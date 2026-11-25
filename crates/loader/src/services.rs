@@ -1530,6 +1530,34 @@ pub(crate) mod handlers {
         vfprintf(context, options, stream, format, locale, arguments)
     }
 
+    // Formatted input (#605): `crt_scan.rs` holds the rules. The string form
+    // needs no stream state; the stream form reads `stdin` or a file.
+
+
+    pub fn vfscanf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.scan(
+                context.memory,
+                &drive,
+                options,
+                stream,
+                format,
+                locale,
+                arguments,
+            )
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn putchar(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
         let outcome = {
             let mut streams = context.state.crt_streams();

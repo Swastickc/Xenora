@@ -93,46 +93,25 @@ fn parse_c_declarations(
         let decl_left = cleaned[..open_paren].trim();
         let args_str = cleaned[open_paren + 1..close_paren].trim();
 
-        // Split return type and function name
-        let parts: Vec<&str> = decl_left.split_whitespace().collect();
-        if parts.len() < 2 {
+        let Some((ret_str, name_str)) = split_named_declarator(decl_left) else {
             continue;
-        }
-        let ret_str = parts[..parts.len() - 1].join(" ");
-        let name_str = parts[parts.len() - 1].trim_start_matches('*');
-
-        if !is_valid_c_ident(name_str) {
+        };
+        let Some(ret_type) = parse_c_type(ret_str) else {
             continue;
-        }
-
-        let ret_type = match parse_c_type(&ret_str) {
-            Some(t) => t,
-            None => continue,
         };
 
         let mut params = Vec::new();
         if !args_str.is_empty() && args_str != "void" {
             for (idx, arg) in args_str.split(',').enumerate() {
-                let arg_clean = arg.trim();
-                let arg_parts: Vec<&str> = arg_clean.split_whitespace().collect();
-                let (param_name, type_str) = if arg_parts.is_empty() {
-                    (format!("arg{idx}"), "void".to_string())
-                } else if arg_parts.len() == 1 {
-                    (format!("arg{idx}"), arg_parts[0].to_string())
-                } else {
-                    let last = arg_parts[arg_parts.len() - 1].trim_start_matches('*');
-                    if is_valid_c_ident(last) {
-                        (last.to_string(), arg_parts[..arg_parts.len() - 1].join(" "))
-                    } else {
-                        (format!("arg{idx}"), arg_clean.to_string())
-                    }
+                let arg = arg.trim();
+                let (name, type_str) = match split_named_declarator(arg) {
+                    Some((type_str, name)) => (name.to_string(), type_str),
+                    None if arg.is_empty() => (format!("arg{idx}"), "void"),
+                    None => (format!("arg{idx}"), arg),
                 };
 
-                let param_type = parse_c_type(&type_str).unwrap_or(AbiType::U64);
-                params.push(ParamDesc {
-                    name: param_name,
-                    abi_type: param_type,
-                });
+                let abi_type = parse_c_type(type_str).unwrap_or(AbiType::U64);
+                params.push(ParamDesc { name, abi_type });
             }
         }
 
@@ -154,21 +133,41 @@ fn parse_c_declarations(
     added
 }
 
-fn is_valid_c_ident(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
+/// Split the trailing identifier from a simple named declarator and keep any
+/// pointer stars with the type, including when a star touches the name.
+fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
+    let type_end = declaration
+        .trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+        .len();
+    let (type_str, name) = declaration.split_at(type_end);
+    let type_str = type_str.trim_end();
+    if type_str.is_empty()
+        || !name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_')
+        || matches!(
+            name,
+            "void"
+                | "char"
+                | "short"
+                | "int"
+                | "long"
+                | "signed"
+                | "unsigned"
+                | "float"
+                | "double"
+                | "_Bool"
+                | "const"
+                | "volatile"
+                | "restrict"
+        )
+    {
+        return None;
     }
-    let bytes = s.as_bytes();
-    if !bytes[0].is_ascii_alphabetic() && bytes[0] != b'_' {
-        return false;
-    }
-    bytes
-        .iter()
-        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+    Some((type_str, name))
 }
 
 fn parse_c_type(s: &str) -> Option<AbiType> {
-    let s = s.trim();
+    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = normalized.as_str();
     if s == "void" {
         Some(AbiType::Void)
     } else if s == "int" || s == "int32_t" {
@@ -199,6 +198,63 @@ fn parse_c_type(s: &str) -> Option<AbiType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simple_pointer_declarators_preserve_stars_across_spacing() {
+        let mut catalog = MetadataCatalog::new();
+        let declarations = "
+            int *attached(int *out);
+            int * separated(int * out);
+            int*compact(int*out);
+            int **indirect(int * *out);
+        ";
+        assert_eq!(
+            parse_c_declarations(&mut catalog, "example.dll", "test.h", declarations),
+            4
+        );
+        let pointer = AbiType::Pointer {
+            is_const: false,
+            pointee: "void".into(),
+        };
+        for symbol in ["attached", "separated", "compact", "indirect"] {
+            let signature = catalog.lookup("example.dll", symbol).unwrap();
+            assert_eq!(signature.return_type, pointer, "{symbol}");
+            assert_eq!(signature.params.len(), 1, "{symbol}");
+            assert_eq!(signature.params[0].name, "out", "{symbol}");
+            assert_eq!(signature.params[0].abi_type, pointer, "{symbol}");
+        }
+    }
+
+    #[test]
+    fn unnamed_supported_parameters_keep_their_complete_types() {
+        let mut catalog = MetadataCatalog::new();
+        let declarations = "void inspect(unsigned  int, long long, unsigned long long, double, int *, unsigned int named);";
+        assert_eq!(
+            parse_c_declarations(&mut catalog, "example.dll", "test.h", declarations),
+            1
+        );
+        let signature = catalog.lookup("example.dll", "inspect").unwrap();
+        let expected = vec![
+            ("arg0", AbiType::U32),
+            ("arg1", AbiType::I64),
+            ("arg2", AbiType::U64),
+            ("arg3", AbiType::F64),
+            (
+                "arg4",
+                AbiType::Pointer {
+                    is_const: false,
+                    pointee: "void".into(),
+                },
+            ),
+            ("named", AbiType::U32),
+        ];
+        let actual: Vec<_> = signature
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), param.abi_type.clone()))
+            .collect();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn test_parse_declarations_from_string() {

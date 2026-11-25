@@ -222,6 +222,9 @@ pub struct ServicesState {
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     error_mode: Mutex<u32>,
+    /// Whether the narrow file APIs use the ANSI codepage, as AreFileApisANSI
+    /// reports. Documented default true; SetFileApisToOEM clears it.
+    file_apis_ansi: AtomicBool,
     crt_arguments: Mutex<crt_arguments::CrtArguments>,
     startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
@@ -259,6 +262,7 @@ impl ServicesState {
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
             error_mode: Mutex::new(0),
+            file_apis_ansi: AtomicBool::new(true),
             crt_arguments: Mutex::default(),
             startup: Mutex::default(),
             synch: Mutex::default(),
@@ -307,6 +311,14 @@ impl ServicesState {
     /// mode controls error dialogs that do not exist here; it is stored so
     /// programs that propagate it - a parent passing it to children, say -
     /// behave coherently.
+    pub(crate) fn file_apis_use_ansi(&self) -> bool {
+        self.file_apis_ansi.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_file_apis_ansi(&self, ansi: bool) {
+        self.file_apis_ansi.store(ansi, Ordering::Relaxed);
+    }
+
     pub(crate) fn exchange_error_mode(&self, mode: u32) -> u32 {
         let mut guard = self.error_mode.lock().expect("error mode");
         let previous = *guard;

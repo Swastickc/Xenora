@@ -54,6 +54,28 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             .unwrap_or(0))
     });
 
+    // Compacting a xenora heap has nothing to coalesce: allocations are
+    // individual spans of the guest memory map, so there is no fragmentation
+    // inside them. The documented return for a heap with the no-serialize
+    // caveat aside is the largest free block, and zero also documents
+    // failure-free compaction; the honest state of this heap is that there
+    // is nothing to compact.
+    registry.register(KERNEL32, "HeapCompact", |args, _, memory| {
+        let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+        if !memory.has_heap(handle) {
+            return Ok(0);
+        }
+        Ok(0)
+    });
+
+    // A xenora heap cannot be corrupted through the guest API: every write
+    // lands in tracked spans. Validation of a live heap is the truth - valid.
+    // A heap that does not exist is invalid, which is also the truth.
+    registry.register(KERNEL32, "HeapValidate", |args, _, memory| {
+        let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+        Ok(u64::from(memory.has_heap(handle)))
+    });
+
     registry.register(KERNEL32, "HeapSize", |args, _, memory| {
         let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
         let flags = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
@@ -149,6 +171,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "HeapAlloc",
         "HeapReAlloc",
         "HeapSize",
+        "HeapCompact",
+        "HeapValidate",
         "HeapFree",
         "HeapCreate",
         "HeapDestroy",

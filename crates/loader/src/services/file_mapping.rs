@@ -111,6 +111,25 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
     let state_unmap = Arc::clone(state);
     let views_unmap = Arc::clone(&views);
+    // Flushing a view has nothing to write back: the view is guest memory,
+    // already as coherent as this machine makes it. The documented failures
+    // still apply - an unmapped base is an invalid parameter.
+    {
+        let views = Arc::clone(&views);
+        let flush_state = Arc::clone(state);
+        registry.register(KERNEL32, "FlushViewOfFile", move |args, cpu, memory| {
+            let known = views
+                .lock()
+                .expect("file mapping views")
+                .by_address
+                .contains_key(&args.rcx);
+            if !known {
+                return flush_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            Ok(1)
+        });
+    }
+
     registry.register(KERNEL32, "UnmapViewOfFile", move |args, cpu, memory| {
         let address = args.rcx;
         let length = views_unmap

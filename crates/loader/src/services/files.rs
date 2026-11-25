@@ -661,6 +661,97 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    // The 32-bit split form of the size query: the low half is the return,
+    // the high half goes through the optional out pointer. A file beyond
+    // 4 GiB without the pointer reports the documented INVALID_FILE_SIZE.
+    let size32 = Arc::clone(state);
+    registry.register(KERNEL32, "GetFileSize", move |args, cpu, memory| {
+        let objects = size32.objects.lock().expect("guest object state");
+        let Some(GuestObject::File(file)) = objects.handles.get(&args.rcx) else {
+            return size32.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0xffffffff);
+        };
+        let bytes = objects
+            .files
+            .get(&file.path)
+            .expect("open file exists")
+            .len() as u64;
+        let low = bytes as u32;
+        if args.rdx != 0 {
+            if memory.write_u32(args.rdx, (bytes >> 32) as u32).is_err() {
+                return size32.fail(cpu.gs_base, ERROR_NOACCESS, 0xffffffff);
+            }
+            return Ok(u64::from(low));
+        }
+        if bytes > u64::from(u32::MAX) {
+            return size32.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0xffffffff);
+        }
+        Ok(u64::from(low))
+    });
+
+    // The narrow file APIs of this machine use the ANSI translation; the mode
+    // is recorded faithfully so a program that switches to OEM reads back the
+    // truth of its own switch. Path bytes reach the drive as written either
+    // way, which the status records note.
+    let ansi_query = Arc::clone(state);
+    registry.register(KERNEL32, "AreFileApisANSI", move |_, _, _| {
+        Ok(u64::from(ansi_query.file_apis_use_ansi()))
+    });
+    let ansi_set = Arc::clone(state);
+    registry.register(KERNEL32, "SetFileApisToANSI", move |_, _, _| {
+        ansi_set.set_file_apis_ansi(true);
+        Ok(0)
+    });
+    let oem_set = Arc::clone(state);
+    registry.register(KERNEL32, "SetFileApisToOEM", move |_, _, _| {
+        oem_set.set_file_apis_ansi(false);
+        Ok(0)
+    });
+
+    // Flushing a memory-backed file has nothing to do: the bytes are already
+    // as durable as this machine makes them, which is the honest success.
+    let flush = Arc::clone(state);
+    registry.register(KERNEL32, "FlushFileBuffers", move |args, cpu, _| {
+        let objects = flush.objects.lock().expect("guest object state");
+        if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::File(_))) {
+            return flush.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        }
+        Ok(1)
+    });
+
+    // Free space of the confined synthetic volume: the drive's byte budget
+    // and the bytes its files hold, in clusters of one 4096-byte sector.
+    // The volume is memory-backed, so the budget is the honest capacity.
+    for (symbol, narrow) in [("GetDiskFreeSpaceA", true), ("GetDiskFreeSpaceW", false)] {
+        let disk = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let path = if narrow {
+                guest_path_a(memory, args.rcx)
+            } else {
+                guest_path(memory, args.rcx)
+            };
+            if matches!(path, Ok(None) | Err(_)) {
+                return disk.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            let objects = disk.objects.lock().expect("guest object state");
+            let used: u64 = objects.files.values().map(|f| f.len() as u64).sum();
+            let total = MAX_BYTES as u64;
+            let free = total.saturating_sub(used);
+            let fourth = match args.get(4, memory) {
+                Ok(p) => p,
+                Err(_) => return disk.fail(cpu.gs_base, ERROR_NOACCESS, 0),
+            };
+            let clamp = |v: u64| (v / 4096).min(u64::from(u32::MAX)) as u32;
+            if memory.write_u32(args.rdx, 1).is_err()
+                || memory.write_u32(args.r8, 4096).is_err()
+                || memory.write_u32(args.r9, clamp(free)).is_err()
+                || memory.write_u32(fourth, clamp(total)).is_err()
+            {
+                return disk.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            Ok(1)
+        });
+    }
+
     let seek = Arc::clone(state);
     registry.register(KERNEL32, "SetFilePointerEx", move |args, cpu, memory| {
         let mut objects = seek.objects.lock().expect("guest object state");
@@ -1034,6 +1125,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "SetFileAttributesW",
         "SetFilePointer",
         "GetTempFileNameA",
+        "GetFileSize",
+        "AreFileApisANSI",
+        "SetFileApisToANSI",
+        "SetFileApisToOEM",
+        "FlushFileBuffers",
+        "GetDiskFreeSpaceA",
+        "GetDiskFreeSpaceW",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

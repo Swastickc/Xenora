@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Kernel32 file and heap queries real programs hit: GetFileSize, AreFileApisANSI with faithful mode tracking, FlushFileBuffers and FlushViewOfFile as the honest no-op of memory-backed storage, GetDiskFreeSpace of the confined volume, HeapCompact and HeapValidate.
 - IsDebuggerPresent answers false and OutputDebugString drops its output, the documented behavior of a machine with no debugger attached.
 - Paging-file-backed memory mappings (`CreateFileMappingA/W`, `MapViewOfFile`, `UnmapViewOfFile`) with zero-filled views tracked in the central handle table, and `CreateProcessA/W` failing honestly with ERROR_NOT_SUPPORTED since the guest is the only process. Verified through the unit tests of `runtime_file_mapping.rs`.
 - `GetModuleFileNameA/W` answer the path the program was started with for its own image, with the documented truncation form, and the registry services of advapi32 (`RegOpenKeyExA/W`, `RegQueryValueExA/W`, `RegCloseKey`) model the machine's registry as honestly empty: the predefined roots open, every subkey and value is absent with ERROR_FILE_NOT_FOUND. Verified through the unit tests; probe binaries using them run end to end through `xenora run`.

@@ -81,6 +81,7 @@ final class FrameLoopModel: ObservableObject {
     private static let horizontalButtons = UInt32(XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT)
     private var screenDirection: UInt32 = 0
     private var lastSentInput = xenora_controller_input()
+    private var controllerInputError: String?
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
     private var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
@@ -138,6 +139,7 @@ final class FrameLoopModel: ObservableObject {
         controller = nil
         screenDirection = 0
         lastSentInput = xenora_controller_input()
+        controllerInputError = nil
         completed = 0
         frameId = XENORA_NO_FRAME
         image = nil
@@ -221,11 +223,28 @@ final class FrameLoopModel: ObservableObject {
             || state.stick_y != lastSentInput.state.stick_y
             || state.connected != lastSentInput.state.connected
             || input.left_trigger != lastSentInput.left_trigger
-            || input.right_trigger != lastSentInput.right_trigger else { return }
-
-        if check(api.sendInput(session, &input), operation: "send controller input") {
-            lastSentInput = input
+            || input.right_trigger != lastSentInput.right_trigger else {
+            clearControllerInputError()
+            return
         }
+
+        let code = api.sendInput(session, &input)
+        if code == XENORA_OK {
+            lastSentInput = input
+            clearControllerInputError()
+            return
+        }
+        let message = "Failed to send controller input (status \(code))."
+        // A retry must not replace a later command error or republish the same message.
+        let canShow = controllerInputError == nil || errorMessage == controllerInputError
+        controllerInputError = message
+        if canShow && errorMessage != message { errorMessage = message }
+    }
+
+    private func clearControllerInputError() {
+        guard let previous = controllerInputError else { return }
+        controllerInputError = nil
+        if errorMessage == previous { errorMessage = nil }
     }
 
     func pause() {

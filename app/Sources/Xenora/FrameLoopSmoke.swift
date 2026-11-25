@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import Combine
 import CoreGraphics
 import CXenora
 import Foundation
@@ -185,7 +186,7 @@ func checkFrameLoopFailures() async -> [String] {
     try? await Task.sleep(for: .milliseconds(35))
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
     return failures + (await checkFramePolling()) + checkControllerComposition()
-        + checkControllerHandoffs()
+        + checkControllerHandoffs() + checkControllerErrorRecovery()
 }
 
 @MainActor
@@ -384,6 +385,65 @@ private func checkControllerHandoffs() -> [String] {
     expectInput(10, left, connected: 1, "another replacement resends the same held physical input")
     if api.lastInputHandle == previousHandle {
         failures.append("the identical physical input was not submitted to the new session")
+    }
+    return failures
+}
+
+@MainActor
+private func checkControllerErrorRecovery() -> [String] {
+    let api = ScriptedFrameLoop()
+    let model = FrameLoopModel(api: api, readController: { nil })
+    let left = UInt32(XENORA_INPUT_LEFT)
+    let release = UInt32(XENORA_INPUT_NONE)
+    let inputError = "Failed to send controller input (status 9)."
+    let stopError = "Failed to stop frame loop (status 4)."
+    let status = Int32(XENORA_INVALID_STATE)
+    var inputErrorPublications = 0
+    var failures: [String] = []
+    let observation = model.$errorMessage.sink { message in
+        if message == inputError { inputErrorPublications += 1 }
+    }
+    defer { observation.cancel() }
+
+    model.startInteractive()
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    if model.errorMessage != inputError || api.count(.sendInput) != 2 || inputErrorPublications != 1 {
+        failures.append("repeated rejection should retry the send without republishing its diagnostic")
+    }
+    model.sendInput(buttons: release)
+    if model.errorMessage != nil || api.count(.sendInput) != 2 {
+        failures.append("returning to the already accepted neutral input should clear the error without a send")
+    }
+
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    if model.errorMessage != nil || api.count(.sendInput) != 4 {
+        failures.append("an accepted retry should clear the controller input error")
+    }
+    api.report(XENORA_LOOP_FAILED, completed: 1, frame: 0, pixel: 0)
+    model.resume()
+    if model.errorMessage != "Fixture frame loop entered the failed state." {
+        failures.append("a recovered controller input error should not hide a later terminal failure")
+    }
+
+    model.startInteractive()
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    api.fail(.stop, Int32(XENORA_INTERNAL_ERROR))
+    model.stop()
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    if model.errorMessage != stopError {
+        failures.append("a repeated input rejection should not replace a later stop failure")
+    }
+    model.sendInput(buttons: left)
+    if model.errorMessage != stopError || api.count(.sendInput) != 7 {
+        failures.append("an accepted retry should preserve a later stop failure")
     }
     return failures
 }

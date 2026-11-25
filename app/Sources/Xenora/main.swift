@@ -209,6 +209,7 @@ private enum FixturePlaybackError: LocalizedError {
     case unexpectedOutput(AudioDeviceID)
     case queueFailure(Int32)
     case queueShortfall(UInt64)
+    case interrupted
     case timedOut
 
     var errorDescription: String? {
@@ -231,6 +232,8 @@ private enum FixturePlaybackError: LocalizedError {
             "The fixture audio queue failed (status \(status))."
         case .queueShortfall(let supplied):
             "The fixture audio queue returned only \(supplied) bytes."
+        case .interrupted:
+            "Audio output stopped before the preview completed."
         case .timedOut:
             "Audio playback did not complete before the deadline."
         }
@@ -438,6 +441,10 @@ private func playFixturePCM(
         guard played.wait(timeout: deadline) == .success else {
             throw FixturePlaybackError.timedOut
         }
+        // A player stop can invoke pending completion handlers too.
+        if mode == .preview && (!engine.isRunning || !player.isPlaying) {
+            throw FixturePlaybackError.interrupted
+        }
         completedBuffers += 1
         if nextFrame < frames {
             try scheduleNextBuffer()
@@ -470,12 +477,9 @@ final class FrameModel: ObservableObject {
     @Published var running = false
     @Published var texturedFrame: TexturedFrame?
     @Published var runningTextured = false
-    @Published var audioVfsFrame: AudioVfsFrame?
-    @Published var runningAudioVfs = false
     /// Host wall time of the latest run of each fixture, measured here, for the HUD.
     @Published var frameMs: Double?
     @Published var texturedMs: Double?
-    @Published var audioVfsMs: Double?
 
     private static func timed<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> (T, Double) {
         await Task.detached {
@@ -499,14 +503,6 @@ final class FrameModel: ObservableObject {
         Task {
             (texturedFrame, texturedMs) = await Self.timed { TexturedFrame.run() }
             runningTextured = false
-        }
-    }
-
-    func runAudioVfs() {
-        runningAudioVfs = true
-        Task {
-            (audioVfsFrame, audioVfsMs) = await Self.timed { AudioVfsFrame.run() }
-            runningAudioVfs = false
         }
     }
 }
@@ -649,6 +645,7 @@ struct ContentView: View {
     let probe = RuntimeProbe.run()
     @ObservedObject var model: FrameModel
     @ObservedObject var loop: FrameLoopModel
+    @ObservedObject var audio: AudioVfsPlaybackModel
     @ObservedObject var inspection = InspectionModel.shared
     @ObservedObject var programRun = ProgramRunModel.shared
     @ObservedObject var hud = HudSettings.shared
@@ -697,27 +694,14 @@ struct ContentView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-                if let aImage = model.audioVfsFrame?.image {
-                    Image(decorative: aImage, scale: 1)
-                        .resizable()
-                        .interpolation(.none)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
-                        .metalHud(hud.enabled, ["2x2 audio/VFS", ms(model.audioVfsMs)])
-                        .accessibilityLabel("Audio/VFS guest frame, 2 by 2 pixels")
-                    Text("Audio/VFS fixture ran: asset.bin loaded through sandboxed VFS, \(model.audioVfsFrame!.samples) audio samples queued (\(model.audioVfsFrame!.totalAudioBytes) bytes), texture rendered on Metal.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
                 HStack {
                     Button(running ? "Running…" : "Run trusted fixture") { model.run() }
                         .disabled(running || !probe.connected)
                     Button(model.runningTextured ? "Running…" : "Run textured fixture") { model.runTextured() }
                         .disabled(model.runningTextured || !probe.connected)
-                    Button(model.runningAudioVfs ? "Running…" : "Run Audio/VFS fixture") { model.runAudioVfs() }
-                        .disabled(model.runningAudioVfs || !probe.connected)
                 }
             }
+            AudioVfsFixtureView(model: audio, connected: probe.connected, hudEnabled: hud.enabled)
             Section("Persistent frame loop") {
                 if let image = loop.image {
                     Image(decorative: image, scale: 1)
@@ -794,9 +778,14 @@ struct XenoraApp: App {
     @ObservedObject var hud = HudSettings.shared
     let model = FrameModel()
     let loop = FrameLoopModel()
+    let audio = AudioVfsPlaybackModel { pcm in
+        try await Task.detached(priority: .userInitiated) {
+            _ = try playFixturePCM(pcm, mode: .preview)
+        }.value
+    }
 
     var body: some Scene {
-        WindowGroup("Xenora") { ContentView(model: model, loop: loop) }
+        WindowGroup("Xenora") { ContentView(model: model, loop: loop, audio: audio) }
             .commands {
                 CommandGroup(after: .newItem) {
                     Button("Open Executable…") { InspectionModel.shared.requestImport() }
@@ -899,6 +888,21 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
         print("smoke-native-audio: \(error)")
         exit(1)
     }
+}
+
+if CommandLine.arguments.contains("--smoke-audio-vfs-controls") {
+    Task.detached {
+        try await Task.sleep(for: .seconds(5))
+        print("smoke-audio-vfs-controls: timed out")
+        exit(1)
+    }
+    Task { @MainActor in
+        let failures = await checkAudioVfsPlayback()
+        for failure in failures { print("smoke-audio-vfs-controls: FAILED \(failure)") }
+        print("smoke-audio-vfs-controls: \(failures.isEmpty ? "ok" : "failed")")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+    dispatchMain()
 }
 
 if CommandLine.arguments.contains("--smoke-audio-vfs") {

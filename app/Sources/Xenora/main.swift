@@ -892,7 +892,11 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
 
 if CommandLine.arguments.contains("--smoke-audio-vfs-controls") {
     Task.detached {
-        try await Task.sleep(for: .seconds(5))
+        do {
+            try await Task.sleep(for: .seconds(5))
+        } catch {
+            return
+        }
         print("smoke-audio-vfs-controls: timed out")
         exit(1)
     }

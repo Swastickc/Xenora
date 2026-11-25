@@ -26,6 +26,53 @@ For an instruction or compiler change, cite the applicable ISA section, state th
 
 For a performance change, provide reproducible before-and-after results using equivalent inputs, hardware and settings. For a new dependency, explain why it is needed, verify its license and native ARM64 compatibility, and record its provenance.
 
+## macOS contributor previews
+
+Use native Apple Silicon, Python 3.12 or later and the toolchain required by
+`scripts/build-app.sh`. From the repository root, commit any tracked changes
+before building. The preview builds a separate snapshot of HEAD. Ignored and
+untracked files are excluded from that snapshot.
+
+```sh
+mkdir -p artifacts
+PYTHONPATH=scripts python3 -m preview build --build-number 42 --output artifacts/preview-42
+PYTHONPATH=scripts python3 -m preview verify artifacts/preview-42
+```
+
+Choose a new output directory under an existing parent. Set the bundle build
+number to an incrementing positive integer of up to four digits, optionally
+followed by one or two numeric components of up to two digits each. Omit
+leading zeroes. The three-component marketing version comes from
+`workspace.package.version` in `Cargo.toml`. The app and manifest record the
+exact Git commit.
+
+The build runs the locked native app build and smoke checks. After signing and
+archiving, it extracts the app, records strict signature, ARM64 and system
+library checks, and runs the original trusted fixture through the app and its
+worker with Metal validation enabled. A successful build writes `Xenora.zip`,
+`manifest.json`, preview notes and license notices. The verifier compares
+checksums, the signed bundle metadata and the required signatures without
+launching the app. Checksums identify changes relative to the supplied manifest.
+Keep the manifest with the archive and obtain both from a trusted source.
+
+The default build uses local ad-hoc signatures. For an authorized Apple
+submission, provide both `--developer-id` with the Developer ID Application
+identity and `--notary-profile` with its existing keychain profile. Those flags
+sign the app and its worker with Hardened Runtime, run the original fixture
+before submission, and send a temporary ZIP to Apple. An accepted submission
+is stapled to the app and verified again after the final ZIP is extracted.
+Use `verify --require-developer-id <directory>` to require the Developer ID
+workflow when verifying a preview. Keychain credentials stay outside the
+repository and the output.
+
+The preview tool leaves release creation and public distribution to the
+maintainers. See the [remaining attribution and corresponding-source
+review](docs/licenses.md#remaining-release-question) and [the public preview
+tracking issue](https://github.com/ranveersoni98/Xenora/issues/415).
+
+Run the preview unit tests with
+`PYTHONPATH=scripts python3 -m unittest discover -s tests/preview`.
+
 ## Research and clean-room policy
 
 Use publicly accessible specifications and authorized materials only. Do not submit leaked SDKs, confidential documentation, firmware, keys, proprietary game binaries or unauthorized shader dumps. Under Xenora's clean-room policy, anyone who has accessed leaked or confidential Xbox materials must not contribute. Do not post details of restricted material in issues or PRs.

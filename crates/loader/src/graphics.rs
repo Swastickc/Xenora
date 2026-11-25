@@ -2075,28 +2075,35 @@ impl GraphicsContext {
                     if *index_count_per_instance == 0 || *instance_count == 0 {
                         continue;
                     }
-                    if bindings.root_signature.is_some() {
-                        return Err(GraphicsError::Unsupported("textured indexed draws"));
-                    }
                     let indices = self.resolve_triangle_indices(
                         memory,
                         index_buffer,
                         *start_index_location,
                         *base_vertex_location,
                     )?;
-                    let vertices = self.fetch_indexed_positions(
-                        memory,
-                        (vertex_resource, vertex_offset, vertex_stride),
-                        indices,
-                    )?;
-                    draw_count += 1;
-                    let pixels = if let Some(renderer) = backend_renderer {
-                        renderer(&vertices, viewport, clear_color)?
-                    } else if backend_id == GraphicsBackendId::MetalNative {
-                        return Err(GraphicsError::NativeMetalRequired);
+                    let vertex_view = (vertex_resource, vertex_offset, vertex_stride);
+                    let pixels = if let Some((_, root_signature)) = bindings.root_signature {
+                        self.textured_draw(
+                            memory,
+                            &bindings,
+                            root_signature,
+                            vertex_view,
+                            indices,
+                            (viewport, clear_color),
+                            (textured_renderer, backend_id),
+                        )?
                     } else {
-                        Self::execute_software_reference_draw(&vertices, viewport, clear_color)?
+                        let vertices =
+                            self.fetch_indexed_positions(memory, vertex_view, indices)?;
+                        if let Some(renderer) = backend_renderer {
+                            renderer(&vertices, viewport, clear_color)?
+                        } else if backend_id == GraphicsBackendId::MetalNative {
+                            return Err(GraphicsError::NativeMetalRequired);
+                        } else {
+                            Self::execute_software_reference_draw(&vertices, viewport, clear_color)?
+                        }
                     };
+                    draw_count += 1;
                     if let Some(th) = target_handle
                         && let Some(target_res) = self.resources.get_mut(&th)
                         && target_res.data.len() >= pixels.len()
@@ -2123,12 +2130,13 @@ impl GraphicsContext {
                                 "textured draw other than one instance of three vertices",
                             ));
                         }
+                        let first = *start_vertex_location as usize;
                         let pixels = self.textured_draw(
                             memory,
                             &bindings,
                             root_signature,
                             (vertex_resource, vertex_offset, vertex_stride),
-                            *start_vertex_location,
+                            [first, first + 1, first + 2],
                             (viewport, clear_color),
                             (textured_renderer, backend_id),
                         )?;
@@ -2296,7 +2304,7 @@ impl GraphicsContext {
         bindings: &TableBindings,
         root_signature: RootSignature,
         (vertex_resource, vertex_offset, vertex_stride): (Option<GraphicsHandle>, usize, usize),
-        start_vertex: u32,
+        vertex_indices: [usize; 3],
         (viewport, clear_color): ((usize, usize), [u8; 4]),
         (renderer, backend_id): (Option<&TexturedBackendRenderer<'_>>, GraphicsBackendId),
     ) -> Result<Vec<u8>, GraphicsError> {
@@ -2335,8 +2343,10 @@ impl GraphicsContext {
         }
         let mut positions = [[0.0f32; 4]; 3];
         let mut texcoords = [[0.0f32; 4]; 3];
-        for (k, (position, texcoord)) in positions.iter_mut().zip(&mut texcoords).enumerate() {
-            let at = (start_vertex as usize + k)
+        for ((position, texcoord), vertex) in
+            positions.iter_mut().zip(&mut texcoords).zip(vertex_indices)
+        {
+            let at = vertex
                 .checked_mul(vertex_stride)
                 .and_then(|bytes| bytes.checked_add(vertex_offset))
                 .ok_or(GraphicsError::IndexOutOfRange)?;

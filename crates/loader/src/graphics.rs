@@ -1271,7 +1271,7 @@ impl GraphicsContext {
         Ok(())
     }
 
-    /// Record set vertex buffer.
+    /// Record a vertex-buffer binding backed by a buffer resource.
     pub fn cmd_set_vertex_buffer(
         &mut self,
         list: GraphicsHandle,
@@ -1290,6 +1290,9 @@ impl GraphicsContext {
             .resources
             .get(&resource)
             .ok_or(GraphicsError::InvalidResourceHandle)?;
+        if res.desc.dimension != ResourceDimension::Buffer {
+            return Err(GraphicsError::InvalidDescriptor);
+        }
         let end = offset
             .checked_add(stride)
             .ok_or(GraphicsError::InvalidDescriptor)?;
@@ -1329,7 +1332,8 @@ impl GraphicsContext {
         Ok(())
     }
 
-    /// Record set index buffer. `format` is a DXGI format code; only
+    /// Record an index-buffer binding backed by a buffer resource.
+    /// `format` is a DXGI format code; only
     /// `R16_UINT` (57) and `R32_UINT` (42) are index formats.
     pub fn cmd_set_index_buffer(
         &mut self,
@@ -1351,7 +1355,10 @@ impl GraphicsContext {
             .resources
             .get(&resource)
             .ok_or(GraphicsError::InvalidResourceHandle)?;
-        if !offset.is_multiple_of(format.size()) || offset > res.data.len() {
+        if res.desc.dimension != ResourceDimension::Buffer
+            || !offset.is_multiple_of(format.size())
+            || offset > res.data.len()
+        {
             return Err(GraphicsError::InvalidDescriptor);
         }
         cmd_list.commands.push(GraphicsCommand::SetIndexBuffer {

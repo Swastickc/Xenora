@@ -825,6 +825,37 @@ fn run_indexed(
 }
 
 #[test]
+fn indexed_inputs_require_buffer_resources() {
+    let mut rig = rig();
+    let texture = rig
+        .ctx
+        .create_committed_texture2d(
+            rig.device,
+            4,
+            4,
+            DXGI_FORMAT_R8G8B8A8_UNORM,
+            ResourceStates::COMMON,
+            None,
+        )
+        .unwrap();
+    let bindings = [
+        rig.ctx.cmd_set_vertex_buffer(rig.list, texture, 0, STRIDE),
+        rig.ctx.cmd_set_index_buffer(rig.list, texture, 0, R16_UINT),
+    ];
+    assert_eq!(
+        bindings,
+        [
+            Err(GraphicsError::InvalidDescriptor),
+            Err(GraphicsError::InvalidDescriptor)
+        ]
+    );
+
+    let index = index_buffer(&mut rig, R16_UINT);
+    let valid = run_indexed(&mut rig, Some(index), (3, 1, 1, -1)).expect("valid buffer draw");
+    assert_eq!(valid.pixels, clamped_pixels());
+}
+
+#[test]
 fn textured_indexed_draw_fetches_positions_and_uvs_at_the_resolved_indices() {
     for (format, base) in [(R16_UINT, -1), (R32_UINT, 1)] {
         let mut rig = rig();

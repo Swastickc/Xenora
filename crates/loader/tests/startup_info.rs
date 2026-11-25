@@ -415,6 +415,57 @@ fn no_arguments_give_an_empty_command_line() {
     assert_eq!(text, *b"ab ");
 }
 
+#[test]
+fn the_quoted_command_line_accepts_exactly_32767_utf16_units() {
+    let cases = [
+        (
+            "\"".repeat(16_381),
+            "\\\"".repeat(16_381),
+            "\"".repeat(16_381) + "x",
+        ),
+        (
+            format!("a {}", "\\".repeat(16_380)),
+            format!("a {}", "\\".repeat(32_760)),
+            format!("ax {}", "\\".repeat(16_380)),
+        ),
+        (
+            format!("\u{1f600}{}", "\"".repeat(16_380)),
+            format!("\u{1f600}{}", "\\\"".repeat(16_380)),
+            format!("\u{1f600}{}x", "\"".repeat(16_380)),
+        ),
+    ];
+    for (index, (argument, quoted, too_long)) in cases.into_iter().enumerate() {
+        let mut guest = Guest::new(IMPORTS, &[]);
+        guest
+            .state
+            .set_program_arguments(&["p", &argument])
+            .unwrap();
+
+        // One extra unescaped character adds a single UTF-16 unit.
+        // The last case would still fit if counting Unicode scalars instead.
+        assert_eq!(
+            guest.state.set_program_arguments(&["p", &too_long]),
+            Err(ProgramArgumentsError::TooLong),
+            "case {index}"
+        );
+
+        // A rejected replacement leaves the previous argument list in place.
+        let expected: Vec<u8> = format!("p \"{quoted}\"")
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(expected.len(), 32_767 * 2, "case {index}");
+        let line = guest.call("GetCommandLineW", &[]);
+        let mut actual = vec![0xCC; expected.len()];
+        guest.memory.read_bytes(line, &mut actual).unwrap();
+        assert!(
+            actual == expected,
+            "case {index} returned a different command line"
+        );
+    }
+}
+
 /// STARTUPINFOW documents which flags exist, which exclude each other, and that
 /// STARTF_PREVENTPINNING needs STARTF_TITLEISAPPID.
 #[test]

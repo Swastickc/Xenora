@@ -23,7 +23,7 @@ acceptance remain outside the verified count. All results concern synthetic fixt
 | MTBUF | 16 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | MUBUF | 75 | 2 | 0 | 2 | 2 | 2 | 2 | 2 | 0 |
 | SCRATCH | 22 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
-| SMEM | 14 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| SMEM | 14 | 3 | 0 | 3 | 3 | 3 | 0 | 0 | 0 |
 | SOP1 | 65 | 12 | 12 | 12 | 12 | 12 | 1 | 1 | 11 |
 | SOP2 | 51 | 33 | 33 | 33 | 33 | 33 | 0 | 0 | 12 |
 | SOPC | 18 | 12 | 12 | 12 | 12 | 12 | 1 | 1 | 7 |
@@ -36,7 +36,7 @@ acceptance remain outside the verified count. All results concern synthetic fixt
 | VOP3P | 29 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | VOP3SDST | 10 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | VOPC | 190 | 28 | 44 | 44 | 44 | 44 | 0 | 0 | 9 |
-| **Total** | 1465 | 169 | 179 | 189 | 185 | 185 | 18 | 18 | 83 |
+| **Total** | 1465 | 172 | 179 | 192 | 188 | 188 | 18 | 18 | 83 |
 
 ## Unsupported operand variants
 

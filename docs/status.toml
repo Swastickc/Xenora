@@ -77,6 +77,42 @@ decoded = true
 llvm = "three-way passed"
 
 [[instruction]]
+form = "s_buffer_load_dword"
+encoding = "SMEM, one dword into any normal SGPR destination from s8 (initialized); descriptor s[0:3], the dispatch input; unsigned 20-bit immediate and optional translation-time SGPR byte offset; GLC and DLC clear"
+representation = "8 B"
+lowering = "MSL load"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_buffer_load_dwordx2"
+encoding = "SMEM, two dwords into an even normal SGPR destination from s8 (initialized); descriptor s[0:3], the dispatch input; unsigned 20-bit immediate and optional translation-time SGPR byte offset; GLC and DLC clear"
+representation = "8 B"
+lowering = "MSL load"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "s_buffer_load_dwordx4"
+encoding = "SMEM, four dwords into a quad-aligned normal SGPR destination from s8 (initialized); descriptor s[0:3], the dispatch input; unsigned 20-bit immediate and optional translation-time SGPR byte offset; GLC and DLC clear"
+representation = "8 B"
+lowering = "MSL load"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
 form = "s_waitcnt vmcnt(0)"
 encoding = "SOPP, exact immediate `0x3f70`; other counters disabled by their maximum values (semantic registry)"
 representation = "4 B"

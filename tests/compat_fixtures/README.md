@@ -344,6 +344,16 @@ with `CRT_FILES_BREAK`, which expects a text position without the carriage
 returns, so check 17 fails, as a control. `crates/cli/tests/run_program.rs`
 runs all three through `xenora run`. Provenance is as for Gate A2.
 
+## Temporary files
+
+`tests/compat_fixtures/crt_tmp.c` (#493, last part) is a hosted C program
+that asks `tmpnam` for names, checks they differ and hold no file, and
+writes and reads a stream `tmpfile` opened. `build-crt-tmp.sh` builds it
+with mingw-w64 (UCRT flavour) at `-O0` and `-O2`, and once at `-O1` with
+`CRT_TMP_BREAK`, whose control check must fail.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+Provenance is as for Gate A2.
+
 ## C runtime mathematics
 
 `tests/compat_fixtures/crt_math.c` (#468) is a hosted C program that calls the

@@ -53,8 +53,8 @@ const COMMAND_LINE_APIS: [&str; 3] = [
 /// Size of `STARTUPINFOA` and `STARTUPINFOW` on x64, by the field order and
 /// types in processthreadsapi.h and natural alignment.
 const STARTUP_INFO_SIZE: usize = 104;
-/// The longest desktop or title, with its terminator: the longest command line
-/// `CreateProcess` documents, applied here as a bound.
+/// The UTF-16 unit limit of the `CreateProcessW` command line, including the
+/// terminating NUL. Xenora also uses it for the desktop and title.
 const MAX_STRING_UNITS: usize = 32_767;
 const SW_SHOWDEFAULT: u16 = 10;
 
@@ -222,19 +222,29 @@ fn store(memory: &mut GuestMemory, bytes: &[u8]) -> Result<u64, MemoryError> {
     Ok(address)
 }
 
+/// Check the string the guest would receive, including escaping and its NUL.
+pub(super) fn command_line_fits(arguments: &[&str]) -> bool {
+    command_line(arguments).encode_utf16().count() < MAX_STRING_UNITS
+}
+
 /// The command line whose documented C parse is `arguments`. The program name
 /// takes no backslash or quote rules, so a quote in it cannot be represented
 /// and is left out; a file name cannot hold one.
-fn command_line(arguments: &[String]) -> String {
+fn command_line(arguments: &[impl AsRef<str>]) -> String {
     let Some((program, rest)) = arguments.split_first() else {
         return String::new();
     };
     let blank = |text: &str| text.is_empty() || text.contains([' ', '\t']);
-    let mut line: String = program.chars().filter(|unit| *unit != '"').collect();
+    let mut line: String = program
+        .as_ref()
+        .chars()
+        .filter(|unit| *unit != '"')
+        .collect();
     if blank(&line) {
         line = format!("\"{line}\"");
     }
     for argument in rest {
+        let argument = argument.as_ref();
         line.push(' ');
         if !blank(argument) && !argument.contains('"') {
             line.push_str(argument);

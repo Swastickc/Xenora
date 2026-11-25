@@ -67,12 +67,13 @@ class GenerateX86(unittest.TestCase):
         self.rejects(self.form('op = "movq"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "q"\nunaligned = true'), "alignment applies")
         self.rejects(self.form('op = "nop"\nprefix = "66"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "no opcode table for prefix '66' in map 1")
 
-    def test_three_byte_maps_need_the_66_prefix(self):
+    def test_three_byte_maps_need_a_prefix_with_a_table(self):
         form = 'op = "pshufb"\nmap = "{}"\n{}opcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "x"'
         for opcode_map in ("0f38", "0f3a"):
-            for prefix in ("", 'prefix = "f2"\n', 'prefix = "f3"\n'):
+            for prefix in ("", 'prefix = "f3"\n', *(['prefix = "f2"\n'] if opcode_map == "0f3a" else [])):
                 self.rejects(self.form(form.format(opcode_map, prefix)), f"in map {opcode_map}")
             generate_x86.load(self.form(form.format(opcode_map, 'prefix = "66"\n')))
+        generate_x86.load(self.form('op = "crc32"\nmap = "0f38"\nprefix = "f2"\nopcode = 0xF5\nenc = "reg_rm"\nsize = "v"'))
         self.rejects(self.form(form.format("0f39", "")), "unknown map")
         # A form lands in its own map's table and no other.
         operations, forms = generate_x86.load(self.form(form.format("0f3a", 'prefix = "66"\n')))
@@ -90,12 +91,19 @@ class GenerateX86(unittest.TestCase):
             for shape in ('size = "x"\nsrc = "b"', 'size = "x"\nsrc = "w"', 'size = "x"\nsrc = "d"', 'size = "y"'):
                 generate_x86.load(self.form(form.format(encoding, shape)))
 
-    def test_ptest_is_the_only_packed_integer_operation_that_writes_flags(self):
+    def test_only_ptest_and_the_string_compares_write_flags_in_the_three_byte_maps(self):
         operations, forms = generate_x86.load(REGISTRY)
         writers = {form["op"] for form in forms
                    if form["map"] in ("0f38", "0f3a") and operations[form["op"]]["writes"]}
-        self.assertEqual(writers, {"ptest"})
-        self.assertEqual(operations["ptest"]["writes"], set(generate_x86.FLAGS))
+        self.assertEqual(writers, {"ptest", "pcmpestri", "pcmpestrm", "pcmpistri", "pcmpistrm"})
+        for op in writers:
+            self.assertEqual(operations[op]["writes"], set(generate_x86.FLAGS))
+
+    def test_length_registers_set_the_operand_size_of_a_string_compare(self):
+        form = 'op = "pcmpestri"\nmap = "0f3a"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm_length"\nimm = "ub"\n{}'
+        generate_x86.load(self.form(form.format('size = "y"\nsrc = "x"')))
+        self.rejects(self.form(form.format('size = "x"\nsrc = "x"')), "XMM size")
+        self.rejects(self.form(form.format('size = "y"')), "source size")
 
     def test_lock_needs_a_memory_destination(self):
         # Not a form without ModRM, not one whose ModRM operand is the source,

@@ -15,6 +15,7 @@ mod support;
 
 use support::*;
 use xenora_loader::cpu::ExitReason;
+use xenora_loader::memory::MemoryPermissions;
 
 const KERNEL32: &str = "kernel32.dll";
 const SYNCH: &str = "api-ms-win-core-synch-l1-1-0.dll";
@@ -781,6 +782,41 @@ fn qsort_orders_elements_with_a_guest_comparator() {
         ExitReason::MemoryFault(_)
     ));
     assert_eq!(guest.fails("qsort", &[array, 4, 4, 0]), RUNTIME_LIMIT);
+}
+
+#[test]
+fn qsort_merges_reversed_runs_with_bounded_comparisons_and_stable_ties() {
+    const RECORDS: usize = 1024;
+    const ARRAY: u64 = 0x4000_0000;
+    let mut guest = new_guest();
+    guest
+        .memory
+        .map_region(ARRAY, RECORDS * 8, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    // Two reverse-ordered key groups. Tags distinguish every record, so
+    // preserving the order inside each group is independently observable.
+    for tag in 0..RECORDS {
+        let key = i32::from(tag < RECORDS / 2);
+        write_i32s(&mut guest, ARRAY + 8 * tag as u64, &[key, tag as i32]);
+    }
+
+    guest.call(
+        "qsort_s",
+        &[ARRAY, RECORDS as u64, 8, routine(COMPARE_COUNTING), COUNTER],
+    );
+
+    let sorted = read_i32s(&guest, ARRAY, RECORDS * 2);
+    let (records, remainder) = sorted.as_chunks::<2>();
+    assert!(remainder.is_empty());
+    for (index, record) in records.iter().enumerate() {
+        let key = i32::from(index >= RECORDS / 2);
+        let original_tag = (index + RECORDS / 2) % RECORDS;
+        assert_eq!(*record, [key, original_tag as i32]);
+    }
+    // Each pair of runs here exhausts one run in exactly half as many
+    // comparisons as there are records. There are ten merge passes.
+    let calls = guest.u64_at(COUNTER);
+    assert!(calls <= 5 * RECORDS as u64, "{calls} comparisons");
 }
 
 #[test]

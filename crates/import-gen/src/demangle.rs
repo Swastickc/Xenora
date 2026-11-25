@@ -118,10 +118,18 @@ impl Parser<'_> {
         let mut this = String::new();
         if member {
             let pointer64 = self.eat(b'E');
+            let reference = if self.eat(b'G') {
+                " &"
+            } else if self.eat(b'H') {
+                " &&"
+            } else {
+                ""
+            };
             this.push_str(cv(self.next()?)?.trim_start());
             if pointer64 {
                 this.push_str(" __ptr64");
             }
+            this.push_str(reference);
         }
         let convention = match self.next()? {
             b'A' | b'B' => "__cdecl",
@@ -138,10 +146,12 @@ impl Parser<'_> {
             }
             String::new()
         } else {
-            if self.eat(b'?') {
-                cv(self.next()?)?;
-            }
-            format!("{} ", self.data_type()?)
+            let qualifier = if self.eat(b'?') {
+                cv(self.next()?)?
+            } else {
+                ""
+            };
+            format!("{}{qualifier} ", self.data_type()?)
         };
         let parameters = self.parameters()?;
         if !self.eat(b'Z') {
@@ -487,6 +497,49 @@ mod tests {
             ("?x@ns@@3HA", "int ns::x"),
             ("?count@Foo@@2HB", "public: static int const Foo::count"),
             ("??_7type_info@@6B@", "const type_info::`vftable'"),
+        ] {
+            assert_eq!(
+                demangle(decorated).as_deref(),
+                Some(expected),
+                "{decorated}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_return_and_member_qualifiers() {
+        // Original declarations compiled with clang -target x86_64-pc-windows-msvc.
+        for (decorated, expected) in [
+            ("?plain@@YA?AUItem@@XZ", "struct Item __cdecl plain(void)"),
+            (
+                "?produce@@YA?BUItem@@XZ",
+                "struct Item const __cdecl produce(void)",
+            ),
+            (
+                "?produceVolatile@@YA?CUItem@@XZ",
+                "struct Item volatile __cdecl produceVolatile(void)",
+            ),
+            (
+                "?produceCV@@YA?DUItem@@XZ",
+                "struct Item const volatile __cdecl produceCV(void)",
+            ),
+            ("?scalar@@YA?BHXZ", "int const __cdecl scalar(void)"),
+            (
+                "?get@Item@@QEGAAHXZ",
+                "public: int __cdecl Item::get(void) __ptr64 &",
+            ),
+            (
+                "?get@Item@@QEGBAHXZ",
+                "public: int __cdecl Item::get(void)const __ptr64 &",
+            ),
+            (
+                "?get@Item@@QEHAAHXZ",
+                "public: int __cdecl Item::get(void) __ptr64 &&",
+            ),
+            (
+                "?get@Item@@QEHBAHXZ",
+                "public: int __cdecl Item::get(void)const __ptr64 &&",
+            ),
         ] {
             assert_eq!(
                 demangle(decorated).as_deref(),

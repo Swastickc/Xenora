@@ -14,14 +14,31 @@ use std::fmt;
 pub const IMAGE_REL_BASED_ABSOLUTE: u8 = 0;
 pub const IMAGE_REL_BASED_DIR64: u8 = 10;
 
+// COFF Characteristics flag for an image that must use its preferred base.
+const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;
+
 /// Errors that can occur during base relocation parsing or application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RelocationError {
-    DirectoryOutOfBounds { rva: u32, size: u32 },
-    MalformedBlockHeader { offset: usize },
-    BlockSizeOutOfBounds { block_size: u32, max_size: usize },
+    FixedImageBase {
+        preferred_base: u64,
+        loaded_base: u64,
+    },
+    DirectoryOutOfBounds {
+        rva: u32,
+        size: u32,
+    },
+    MalformedBlockHeader {
+        offset: usize,
+    },
+    BlockSizeOutOfBounds {
+        block_size: u32,
+        max_size: usize,
+    },
     UnsupportedRelocationType(u8),
-    TargetOutOfBounds { target_va: u64 },
+    TargetOutOfBounds {
+        target_va: u64,
+    },
     Memory(MemoryError),
     ArithmeticOverflow,
 }
@@ -29,6 +46,13 @@ pub enum RelocationError {
 impl fmt::Display for RelocationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FixedImageBase {
+                preferred_base,
+                loaded_base,
+            } => write!(
+                f,
+                "PE relocations are stripped: image requires base {preferred_base:#x}, requested {loaded_base:#x}"
+            ),
             Self::DirectoryOutOfBounds { rva, size } => {
                 write!(
                     f,
@@ -80,7 +104,9 @@ pub struct RelocationReport {
     pub delta: i64,
 }
 
-/// Applies PE base relocations to `GuestMemory` if the loaded image base differs from preferred.
+/// Applies PE base relocations when the image is loaded at a nonpreferred base.
+///
+/// An image with the COFF relocations-stripped flag can use only its preferred base.
 pub fn apply_relocations(
     pe: &ParsedPe,
     bytes: &[u8],
@@ -94,14 +120,13 @@ pub fn apply_relocations(
         // Zero delta: image is loaded at preferred base, no DIR64 fixup needed
         return Ok(report);
     }
+    let reloc_dir = find_reloc_directory(bytes, pe.image_base, loaded_base)?;
     if delta > (i64::MAX as i128) || delta < (i64::MIN as i128) {
         return Err(RelocationError::ArithmeticOverflow);
     }
     let delta_i64 = delta as i64;
     report.delta = delta_i64;
 
-    // Locate relocation directory RVA and size from Optional Header data directory #5
-    let reloc_dir = find_reloc_directory(bytes, pe)?;
     let Some((reloc_rva, reloc_size)) = reloc_dir else {
         return Ok(report);
     };
@@ -234,9 +259,11 @@ pub fn apply_relocations(
     Ok(report)
 }
 
+// Called only for loads at a nonpreferred base.
 fn find_reloc_directory(
     bytes: &[u8],
-    _pe: &ParsedPe,
+    preferred_base: u64,
+    loaded_base: u64,
 ) -> Result<Option<(u32, u32)>, RelocationError> {
     if bytes.len() < 0x40 {
         return Ok(None);
@@ -244,14 +271,17 @@ fn find_reloc_directory(
     let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
     let coff_offset = e_lfanew + 4;
     let opt_offset = coff_offset + 20;
-    if bytes.len() < coff_offset + 18 {
+    let Some(coff) = bytes.get(coff_offset..opt_offset) else {
         return Ok(None);
+    };
+    let characteristics = u16::from_le_bytes([coff[18], coff[19]]);
+    if characteristics & IMAGE_FILE_RELOCS_STRIPPED != 0 {
+        return Err(RelocationError::FixedImageBase {
+            preferred_base,
+            loaded_base,
+        });
     }
-    let size_of_opt = u16::from_le_bytes(
-        bytes[coff_offset + 16..coff_offset + 18]
-            .try_into()
-            .unwrap(),
-    ) as usize;
+    let size_of_opt = usize::from(u16::from_le_bytes([coff[16], coff[17]]));
 
     // Relocation directory is directory index 5 (offset 112 + 5 * 8 = 152 in Optional Header).
     // It exists only when NumberOfRvaAndSizes (offset 108) covers index 5.

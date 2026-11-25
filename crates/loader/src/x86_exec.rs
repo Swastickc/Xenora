@@ -370,6 +370,13 @@ fn double_shift(
     Some((result, flags))
 }
 
+/// One byte of a CRC-32C, the polynomial 11EDC6F41H with its bits reflected.
+fn crc32c(crc: u32, byte: u8) -> u32 {
+    (0..8).fold(crc ^ u32::from(byte), |crc, _| {
+        crc >> 1 ^ if crc & 1 != 0 { 0x82F6_3B78 } else { 0 }
+    })
+}
+
 fn push(cpu: &mut CpuState, memory: &mut GuestMemory, value: u64) -> Result<(), ExitReason> {
     let sp = cpu.gpr[RSP]
         .checked_sub(8)
@@ -641,6 +648,16 @@ pub fn execute(
                 zf: value == 0,
                 ..RFlags::default()
             };
+        }
+        // CRC32 of the source bytes, low first, continuing from the low half of
+        // the destination; the rest of the destination is cleared.
+        Op::Crc32 => {
+            let value = read_rm(cpu, memory, insn)?;
+            let mut crc = cpu.gpr[usize::from(insn.reg.index)] as u32;
+            for byte in &value.to_le_bytes()[..usize::from(insn.rm_size)] {
+                crc = crc32c(crc, *byte);
+            }
+            write_reg(cpu, insn.reg, size.max(4), u64::from(crc));
         }
         Op::Tzcnt | Op::Lzcnt => {
             let value = read_rm(cpu, memory, insn)?;

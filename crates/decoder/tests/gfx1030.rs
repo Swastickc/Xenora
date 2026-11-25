@@ -483,6 +483,20 @@ fn reference_op(instruction: Instruction) -> Op {
             resource,
         },
         Instruction::WaitLoad => Op::WaitRead,
+        Instruction::WaitScalarLoad => Op::WaitScalar,
+        Instruction::ScalarBufferLoad {
+            dst,
+            resource,
+            offset,
+            soffset,
+            dwords,
+        } => Op::ScalarLoad {
+            data: dst,
+            resource,
+            offset,
+            register: soffset,
+            dwords,
+        },
         Instruction::WaitStore => Op::WaitWrite,
         Instruction::MoveB32 {
             dst,
@@ -718,6 +732,64 @@ fn reference_op(instruction: Instruction) -> Op {
     }
 }
 
+/// RDNA 2 ISA guide 7.1, 7.5 and Table 73. Words from llvm-mc, then changed by
+/// hand where LLVM refuses the operand.
+#[test]
+fn scalar_buffer_load_operands_are_checked_when_decoding() {
+    let decode_words = |first: u32, second: u32| {
+        let bytes = [first.to_le_bytes(), second.to_le_bytes()].concat();
+        decode(Architecture::Gfx1030, &bytes).map(|decoded| decoded[0].to_string())
+    };
+    const NULL: u32 = 125 << 25;
+    for (first, second, text) in [
+        (
+            0xf420_0200,
+            NULL | 0x14,
+            "s_buffer_load_dword s8, s[0:3], 0x14",
+        ),
+        (0xf420_0000, NULL, "s_buffer_load_dword s0, s[0:3], null"),
+        (
+            0xf420_1a72,
+            NULL,
+            "s_buffer_load_dword s105, s[100:103], null",
+        ),
+        (
+            0xf424_1a00,
+            105 << 25,
+            "s_buffer_load_dwordx2 s[104:105], s[0:3], s105",
+        ),
+        (
+            0xf428_1900,
+            12 << 25 | 0xf_ffff,
+            "s_buffer_load_dwordx4 s[100:103], s[0:3], s12 offset:0xfffff",
+        ),
+    ] {
+        let decoded = decode_words(first, second).unwrap();
+        assert!(decoded.ends_with(text), "{decoded}");
+    }
+    for (first, second) in [
+        (0xf420_0201, NULL),           // an odd SBASE
+        (0xf420_0234, NULL),           // s[104:107]
+        (0xf420_1a80, NULL),           // vcc_lo
+        (0xf420_1f00, NULL),           // m0
+        (0xf424_0240, NULL),           // s[9:10]
+        (0xf428_0280, NULL),           // s[10:13]
+        (0xf428_1a00, NULL),           // s[104:107]
+        (0xf420_0200, 106 << 25),      // an offset in vcc_lo
+        (0xf420_0200, 124 << 25),      // an offset in m0
+        (0xf420_0200, 127 << 25),      // an offset in exec_hi
+        (0xf420_0200, NULL | 1 << 20), // a negative offset
+        (0xf421_0200, NULL),           // GLC
+        (0xf420_4200, NULL),           // DLC
+    ] {
+        let error = decode_words(first, second).unwrap_err();
+        assert!(
+            matches!(error.kind, DecodeErrorKind::UnsupportedForm { .. }),
+            "{first:08x} {second:08x}: {error:?}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires LLVM with the gfx1030 AMDGPU target"]
 fn compares_fixture_instructions_against_llvm() {
@@ -748,12 +820,14 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/vector-compare-16.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-integer.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-compare.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-memory.bin"),
+        include_bytes!("../../../fixtures/rdna2/runtime-branch.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 169, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 172, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -768,6 +842,15 @@ fn assemble_matrix() -> Vec<u8> {
         "
         buffer_load_dword v255, v128, s[100:103], 0 idxen
         buffer_store_dword v128, v255, s[96:99], 0 idxen
+        s_buffer_load_dword s0, s[100:103], 0x0
+        s_buffer_load_dword s105, s[0:3], 0xfffff
+        s_buffer_load_dword s1, s[4:7], s105
+        s_buffer_load_dword s1, s[0:3], s0 offset:0x13
+        s_buffer_load_dwordx2 s[104:105], s[96:99], 0x1
+        s_buffer_load_dwordx2 s[2:3], s[0:3], s104 offset:0xfffff
+        s_buffer_load_dwordx4 s[100:103], s[0:3], 0x40
+        s_buffer_load_dwordx4 s[8:11], s[100:103], s7
+        s_waitcnt lgkmcnt(0)
         v_and_b32_e32 v255, v128, v254
         v_xor_b32_e32 v128, v255, v127
         v_or_b32_e32 v255, v255, v255

@@ -180,14 +180,29 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
-    for symbol in ["CreateSemaphoreA", "CreateSemaphoreW"] {
+    for (symbol, extended) in [
+        ("CreateSemaphoreA", false),
+        ("CreateSemaphoreW", false),
+        ("CreateSemaphoreExA", true),
+        ("CreateSemaphoreExW", true),
+    ] {
         let state = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, mem| {
             let attributes = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
             let count = args.get(1, mem).map_err(ExitReason::MemoryFault)? as i32;
             let maximum = args.get(2, mem).map_err(ExitReason::MemoryFault)? as i32;
             let name = args.get(3, mem).map_err(ExitReason::MemoryFault)?;
-            if attributes != 0 || name != 0 {
+            let access = if extended {
+                let flags = args.get(4, mem).map_err(ExitReason::MemoryFault)? as u32;
+                let access = args.get(5, mem).map_err(ExitReason::MemoryFault)? as u32;
+                if flags != 0 {
+                    return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+                }
+                access
+            } else {
+                SEMAPHORE_ALL_ACCESS
+            };
+            if attributes != 0 || name != 0 || access & !SEMAPHORE_ALL_ACCESS != 0 {
                 return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
             if maximum <= 0 || count < 0 || count > maximum {
@@ -197,7 +212,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 &state,
                 cpu.gs_base,
                 Waitable::Semaphore { count, maximum },
-                SEMAPHORE_ALL_ACCESS,
+                access,
             )
         });
     }
@@ -357,6 +372,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.alias(SYNCH_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
+    // Microsoft’s API-set catalog lists the ANSI entry separately and the
+    // wide entry in three revisions of the core synchronization API set.
+    for (module, symbol) in [
+        (
+            "api-ms-win-core-synch-ansi-l1-1-0.dll",
+            "CreateSemaphoreExA",
+        ),
+        (SYNCH_API, "CreateSemaphoreExW"),
+        ("api-ms-win-core-synch-l1-2-0.dll", "CreateSemaphoreExW"),
+        ("api-ms-win-core-synch-l1-2-1.dll", "CreateSemaphoreExW"),
+    ] {
+        registry.alias(module, KERNEL32, symbol);
+    }
+    registry.set_status(KERNEL32, "CreateSemaphoreExA", ServiceStatus::Partial);
+    registry.set_status(KERNEL32, "CreateSemaphoreExW", ServiceStatus::Partial);
     for symbol in ["WaitForMultipleObjects", "WaitForMultipleObjectsEx"] {
         registry.alias("api-ms-win-core-synch-l1-2-1.dll", KERNEL32, symbol);
     }

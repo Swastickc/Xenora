@@ -76,6 +76,12 @@ impl Random {
             *register = self.next();
         }
         (gpr[6], gpr[7]) = (DATA, 4);
+        // RAX and RDX are string lengths, of either sign.
+        for length in [0, 2] {
+            if !self.next().is_multiple_of(4) {
+                gpr[length] = (self.next() % 41).wrapping_sub(20);
+            }
+        }
         let mut xmm = [[0; 16]; 16];
         for register in &mut xmm {
             *register = self.vector();
@@ -242,6 +248,7 @@ fn packed(name: &str, a: &Bytes, b: &Bytes) -> Bytes {
         "pminsb" | "pminsd" => zip_signed(a, b, width, |x, y| if x < y { x } else { y }),
         "pmaxsb" | "pmaxsd" => zip_signed(a, b, width, |x, y| if x > y { x } else { y }),
         "pmulld" => zip(a, b, 4, |x, y| x * y),
+        "pcmpgtq" => zip_signed(a, b, 8, |x, y| truth(x > y)),
         "pcmpeqq" => zip(a, b, 8, |x, y| truth(x == y)),
         "pmuldq" => {
             let (x, y) = (split(a, 4), split(b, 4));
@@ -412,6 +419,103 @@ fn general(text: &str) -> Option<(usize, usize)> {
     })
 }
 
+/// A string as its characters, the valid ones first.
+type Text = Vec<i128>;
+
+/// The SSE4.2 string compares by what each aggregation means for strings, after
+/// Intel SDM Vol. 2B, 4.1: `set` is the first operand, `hay` the second.
+fn string_compare(
+    m: &mut Machine,
+    name: &str,
+    first: Bytes,
+    second: Bytes,
+    imm: usize,
+    wide: bool,
+) {
+    let width = 1 + imm % 2;
+    let count = 16 / width;
+    let is_signed = imm / 2 % 2 == 1;
+    let length = |register: u64, value: &Bytes| -> usize {
+        if name.starts_with("pcmpistr") {
+            let characters = split(value, width);
+            return characters
+                .iter()
+                .position(|character| *character == 0)
+                .unwrap_or(count);
+        }
+        let bytes = if wide { 8 } else { 4 };
+        let register = split(&register.to_le_bytes()[..bytes], bytes)[0];
+        let magnitude = negative_form(register, bytes).abs();
+        clamp(magnitude, 0, count as i128) as usize
+    };
+    let string = |value: &Bytes, length: usize| -> Text {
+        split(value, width)
+            .into_iter()
+            .take(length)
+            .map(|character| match is_signed {
+                true => negative_form(character, width),
+                false => character,
+            })
+            .collect()
+    };
+    let set = string(&first, length(m.gpr[0], &first));
+    let hay = string(&second, length(m.gpr[2], &second));
+    let mut hits: Vec<bool> = (0..count)
+        .map(|at| match imm / 4 % 4 {
+            // The character is one of the set.
+            0 => hay.get(at).is_some_and(|character| set.contains(character)),
+            // It is within a range; a lower bound without an upper one is none.
+            1 => hay.get(at).is_some_and(|character| {
+                set.as_chunks::<2>()
+                    .0
+                    .iter()
+                    .any(|range| (range[0]..=range[1]).contains(character))
+            }),
+            // The strings agree here: both characters, or both strings ended.
+            2 => set.get(at) == hay.get(at),
+            // The needle starts here, as far as the register shows.
+            _ => set
+                .iter()
+                .take(count - at)
+                .enumerate()
+                .all(|(offset, character)| hay.get(at + offset) == Some(character)),
+        })
+        .collect();
+    for (at, hit) in hits.iter_mut().enumerate() {
+        let negate = match imm / 16 % 4 {
+            1 => true,
+            3 => at < hay.len(),
+            _ => false,
+        };
+        *hit = *hit != negate;
+    }
+    let last = imm / 64 % 2 == 1;
+    if name.ends_with('i') {
+        let found = match last {
+            true => hits.iter().rposition(|hit| *hit),
+            false => hits.iter().position(|hit| *hit),
+        };
+        m.gpr[1] = found.unwrap_or(count) as u64;
+    } else {
+        let mut out = [0; 16];
+        for at in (0..count).filter(|at| hits[*at]) {
+            match last {
+                true => out[at * width..(at + 1) * width].fill(0xFF),
+                false => out[at / 8] += 1 << (at % 8),
+            }
+        }
+        m.xmm[0] = out;
+    }
+    m.flags = RFlags {
+        cf: hits.contains(&true),
+        zf: hay.len() < count,
+        sf: set.len() < count,
+        of: hits[0],
+        pf: false,
+        af: false,
+    };
+}
+
 fn reference(m: &mut Machine, text: &str) {
     let (name, rest) = text.split_once(' ').unwrap();
     let parts: Vec<&str> = rest.split(", ").collect();
@@ -513,6 +617,10 @@ fn reference(m: &mut Machine, text: &str) {
             cf: pairs().all(|(a, b)| b & (255 - a) == 0),
             ..RFlags::default()
         };
+        return;
+    }
+    if name.starts_with("pcmpestr") || name.starts_with("pcmpistr") {
+        string_compare(m, name, old, source, imm.unwrap(), false);
         return;
     }
     let mut out = old;
@@ -700,6 +808,13 @@ fn every_vector_fixture_matches_the_reference_in_both_engines() {
     assert!(native_forms > 150, "{native_forms}");
 }
 
+/// Whether a 16-byte operand may have any alignment.
+fn any_alignment(name: &str) -> bool {
+    ["movups", "movupd", "movdqu"].contains(&name)
+        || name.starts_with("pcmpestr")
+        || name.starts_with("pcmpistr")
+}
+
 #[test]
 fn aligned_operands_fault_and_unaligned_operands_do_not() {
     let mut random = Random(0x51);
@@ -709,7 +824,7 @@ fn aligned_operands_fault_and_unaligned_operands_do_not() {
         .filter(|case| case.text.contains("xmmword ptr"))
     {
         let name = case.text.split(' ').next().unwrap();
-        let unaligned = ["movups", "movupd", "movdqu"].contains(&name);
+        let unaligned = any_alignment(name);
         checked[usize::from(unaligned)] += 1;
         for offset in [1, 4, 8, 15] {
             let mut machine = random.machine();
@@ -725,10 +840,16 @@ fn aligned_operands_fault_and_unaligned_operands_do_not() {
                         "{}",
                         case.text
                     );
-                    if case.text.starts_with(&format!("{name} xmm10")) {
-                        let mut bytes = [0; 16];
-                        bytes.copy_from_slice(&before[32 + offset as usize..48 + offset as usize]);
-                        assert_eq!(result.final_state.xmm[10], u128::from_le_bytes(bytes));
+                    let store = case.text.split(", ").next().unwrap().contains(" ptr ");
+                    if !store {
+                        let mut expected = machine.clone();
+                        let at = 32 + offset as usize;
+                        expected.operand.copy_from_slice(&before[at..at + 16]);
+                        reference(&mut expected, case.text);
+                        let state = &result.final_state;
+                        assert_eq!(state.gpr, expected.gpr, "{}", case.text);
+                        assert_eq!(state.xmm, expected.xmm.map(u128::from_le_bytes));
+                        assert_eq!(state.flags, expected.flags, "{}", case.text);
                     }
                 } else {
                     assert_eq!(
@@ -743,7 +864,7 @@ fn aligned_operands_fault_and_unaligned_operands_do_not() {
             }
         }
     }
-    assert!(checked[0] > 60 && checked[1] == 6, "{checked:?}");
+    assert!(checked[0] > 60 && checked[1] == 38, "{checked:?}");
 }
 
 #[test]
@@ -911,14 +1032,16 @@ fn unsupported_vector_encodings_are_rejected() {
         &[0xF0, 0x66, 0x0F, 0x38, 0x00, 0x06],       // LOCK
         &[0x66, 0x0F, 0x38, 0x0C, 0xC1],             // unassigned without VEX
         &[0x66, 0x0F, 0x38, 0x2A, 0xC1],             // movntdqa with a register
-        &[0x66, 0x0F, 0x38, 0x37, 0xC1],             // pcmpgtq (SSE4.2)
         &[0x0F, 0x3A, 0x08, 0xC1, 0x00],             // roundps without 66
         &[0xF3, 0x66, 0x0F, 0x3A, 0x0A, 0xC1, 0x00], // F3 over the 66 of roundss
         &[0xF2, 0x66, 0x0F, 0x38, 0x14, 0xC1],       // F2 over the 66 of blendvps
         &[0xF0, 0x66, 0x0F, 0x3A, 0x17, 0x06, 0x00], // LOCK extractps
+        &[0x0F, 0x3A, 0x63, 0xC1, 0x00],             // pcmpistri without 66
+        &[0xF2, 0x66, 0x0F, 0x3A, 0x61, 0xC1, 0x00], // F2 over the 66 of pcmpestri
+        &[0xF0, 0x66, 0x0F, 0x3A, 0x60, 0x06, 0x00], // LOCK pcmpestrm
+        &[0xF2, 0x66, 0x0F, 0x38, 0x37, 0xC1],       // F2 over the 66 of pcmpgtq
         &[0x66, 0x0F, 0x38, 0x13, 0xC1],             // unassigned without VEX
         &[0x66, 0x0F, 0x3A, 0x18, 0xC1, 0x00],       // unassigned without VEX
-        &[0x66, 0x0F, 0x3A, 0x62, 0xC1, 0x00],       // pcmpistrm (SSE4.2)
         &[0x66, 0x0F, 0x38, 0xDC, 0xC1],             // aesenc
         &[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00],       // pclmulqdq
         &[0x66, 0x0F, 0x3A, 0x00, 0xC1, 0x00],       // unassigned without VEX
@@ -961,6 +1084,7 @@ fn three_byte_opcodes_decode_by_the_general_rules() {
     // override or a repeated mandatory prefix changes nothing else.
     for (code, reg, rm) in [
         (&[0x66, 0x0F, 0x38, 0x00, 0xC1][..], 0, 1),
+        (&[0x66, 0x45, 0x0F, 0x3A, 0x62, 0xC1, 0x05], 8, 9),
         (&[0x66, 0x45, 0x0F, 0x38, 0x00, 0xC1], 8, 9),
         (&[0x66, 0x48, 0x0F, 0x38, 0x00, 0xC1], 0, 1),
         (&[0x66, 0x66, 0x0F, 0x38, 0x00, 0xC1], 0, 1),
@@ -983,7 +1107,12 @@ fn three_byte_opcodes_decode_by_the_general_rules() {
         }
     }
     // Nothing is fetched after an escape that cannot start a declared form.
-    for code in [&[0x0F, 0x38][..], &[0xF3, 0x66, 0x0F, 0x3A]] {
+    for code in [
+        &[0x0F, 0x38][..],
+        &[0xF3, 0x66, 0x0F, 0x3A],
+        &[0xF3, 0x0F, 0x38],
+        &[0xF2, 0x0F, 0x3A],
+    ] {
         assert!(
             matches!(at(code), Err(DecodeError::Unsupported(_))),
             "{code:02X?}"
@@ -1171,7 +1300,8 @@ fn rex_w_changes_no_form_that_ignores_it() {
     let mut checked = 0;
     for (case, prefixes) in all_vector_cases() {
         let name = case.text.split(' ').next().unwrap();
-        let sized = ["movd", "movq", "pextrd", "pextrq", "pinsrd", "pinsrq"].contains(&name)
+        let sized = name.starts_with("pcmpestr")
+            || ["movd", "movq", "pextrd", "pextrq", "pinsrd", "pinsrq"].contains(&name)
             || name.contains("2si")
             || name.starts_with("cvtsi2");
         if sized {
@@ -1233,8 +1363,7 @@ fn segment_overrides_add_their_base_to_every_memory_operand() {
             }
             // An aligned displacement on a misaligned base is misaligned.
             let name = case.text.split(' ').next().unwrap();
-            if case.text.contains("xmmword ptr") && !["movups", "movupd", "movdqu"].contains(&name)
-            {
+            if case.text.contains("xmmword ptr") && !any_alignment(name) {
                 let mut moved = cpu.clone();
                 moved.gs_base = 8;
                 let code = [&[0x65][..], &case.code].concat();
@@ -1279,7 +1408,7 @@ fn vector_faults_name_the_access_and_the_first_bad_byte() {
         let name = text.split(' ').next().unwrap();
         let store = text.split(", ").next().unwrap().contains(" ptr ");
         let width = operand_width(text);
-        let unaligned = width < 16 || ["movups", "movupd", "movdqu"].contains(&name);
+        let unaligned = width < 16 || any_alignment(name);
         let mut tries = vec![
             (0x9000, MemoryPermissions::READ_WRITE, Some(0x9000)),
             (DATA + 0x40, MemoryPermissions::READ_ONLY, None),
@@ -1391,7 +1520,9 @@ fn flags_of_an_earlier_instruction_survive_every_form_that_keeps_them() {
         let mut machine = Random(0xADD).machine();
         (machine.gpr[0], machine.gpr[1]) = (0xFFFF_FFFF, 1);
         let mut expected = machine.clone();
-        let replaces = name == "ptest";
+        expected.gpr[0] = 0; // the sum, which is also a string length
+        let replaces =
+            name == "ptest" || name.starts_with("pcmpestr") || name.starts_with("pcmpistr");
         if replaces {
             reference(&mut expected, case.text);
             replaced += 1;
@@ -1412,7 +1543,7 @@ fn flags_of_an_earlier_instruction_survive_every_form_that_keeps_them() {
             assert_eq!(states[0], states[1], "{}", case.text);
         }
     }
-    assert_eq!(replaced, 3);
+    assert_eq!(replaced, 3 + 4 * 139);
 }
 
 /// SETB, SETZ and a branch read what a register PTEST wrote, and flags before it
@@ -1487,6 +1618,400 @@ fn flags_around_a_register_ptest_are_exact() {
         };
         assert_eq!(result.final_state.flags, wanted);
     }
+}
+
+fn padded(text: &str) -> Bytes {
+    let mut out = [0; 16];
+    out[..text.len()].copy_from_slice(text.as_bytes());
+    out
+}
+
+/// Hand-worked results of the idioms the instructions were made for.
+#[test]
+fn string_compares_give_hand_worked_results() {
+    // (opcode, immediate, RAX, RDX, first, second, index or mask, CF ZF SF OF)
+    let sixteen = "0123456789abcdef";
+    type Row = (
+        u8,
+        u8,
+        u64,
+        u64,
+        &'static str,
+        &'static str,
+        u128,
+        [bool; 4],
+    );
+    let rows: &[Row] = &[
+        // The first vowel of "hello world" is at 1, and the last at 7.
+        (
+            0x63,
+            0x00,
+            0,
+            0,
+            "aeiou",
+            "hello world",
+            1,
+            [true, true, true, false],
+        ),
+        (
+            0x63,
+            0x40,
+            0,
+            0,
+            "aeiou",
+            "hello world",
+            7,
+            [true, true, true, false],
+        ),
+        // None of them: the index is the number of elements, and CF is clear.
+        (
+            0x63,
+            0x00,
+            0,
+            0,
+            "xyz",
+            "hello",
+            16,
+            [false, true, true, false],
+        ),
+        // The first character outside a to z: the space. With plain negation the
+        // unused elements count too, so from the end it is the last of them.
+        (
+            0x63,
+            0x14,
+            0,
+            0,
+            "az",
+            "hello world",
+            5,
+            [true, true, true, false],
+        ),
+        (
+            0x63,
+            0x54,
+            0,
+            0,
+            "az",
+            "hello world",
+            15,
+            [true, true, true, false],
+        ),
+        (
+            0x63,
+            0x74,
+            0,
+            0,
+            "az",
+            "hello world",
+            5,
+            [true, true, true, false],
+        ),
+        // Substring search.
+        (
+            0x63,
+            0x0C,
+            0,
+            0,
+            "wor",
+            "hello world",
+            6,
+            [true, true, true, false],
+        ),
+        // A needle cut off by the end of a full register still matches there.
+        (
+            0x63,
+            0x0C,
+            0,
+            0,
+            "efgh",
+            sixteen,
+            14,
+            [true, false, true, false],
+        ),
+        (
+            0x63,
+            0x0C,
+            0,
+            0,
+            "efgh",
+            "0123456789abcde",
+            16,
+            [false, true, true, false],
+        ),
+        // An empty needle is everywhere.
+        (0x63, 0x0C, 0, 0, "", "x", 0, [true, true, true, true]),
+        // strcmp: the first difference, and none between equal strings.
+        (
+            0x63,
+            0x18,
+            0,
+            0,
+            "abcd",
+            "abcx",
+            3,
+            [true, true, true, false],
+        ),
+        (
+            0x63,
+            0x18,
+            0,
+            0,
+            "abcd",
+            "abcd",
+            16,
+            [false, true, true, false],
+        ),
+        (
+            0x63,
+            0x18,
+            0,
+            0,
+            "abcd",
+            "abc",
+            3,
+            [true, true, true, false],
+        ),
+        // Masked negation leaves the elements past both ends set, not only the
+        // difference at 3.
+        (
+            0x63,
+            0x38,
+            0,
+            0,
+            "abcd",
+            "abc",
+            4,
+            [true, true, true, false],
+        ),
+        (
+            0x63,
+            0x18,
+            0,
+            0,
+            sixteen,
+            sixteen,
+            16,
+            [false, false, false, false],
+        ),
+        // Masks: bits, then bytes.
+        (
+            0x62,
+            0x00,
+            0,
+            0,
+            "l",
+            "hello",
+            0b01100,
+            [true, true, true, false],
+        ),
+        (
+            0x62,
+            0x40,
+            0,
+            0,
+            "l",
+            "hello",
+            0xFFFF_0000,
+            [true, true, true, false],
+        ),
+        // Word elements: "he" is the word 6568h, the second word of "xxhe".
+        (0x63, 0x01, 0, 0, "he", "xxhe", 1, [true, true, true, false]),
+        (
+            0x62,
+            0x41,
+            0,
+            0,
+            "he",
+            "xxhe",
+            0xFFFF_0000,
+            [true, true, true, false],
+        ),
+        // Explicit lengths: the sign is dropped, large ones saturate, and zeros
+        // are characters.
+        (
+            0x61,
+            0x00,
+            5,
+            11,
+            "aeiou",
+            "hello world",
+            1,
+            [true, true, true, false],
+        ),
+        (
+            0x61,
+            0x00,
+            (-5i64) as u64,
+            (-11i64) as u64,
+            "aeiou",
+            "hello world",
+            1,
+            [true, true, true, false],
+        ),
+        (
+            0x61,
+            0x00,
+            1,
+            11,
+            "aeiou",
+            "hello world",
+            16,
+            [false, true, true, false],
+        ),
+        (
+            0x61,
+            0x00,
+            16,
+            100,
+            "",
+            "hello",
+            5,
+            [true, false, false, false],
+        ),
+        (
+            0x61,
+            0x00,
+            0x8000_0000,
+            0x8000_0000,
+            "",
+            "hello",
+            5,
+            [true, false, false, false],
+        ),
+        (
+            0x61,
+            0x00,
+            0,
+            11,
+            "aeiou",
+            "hello world",
+            16,
+            [false, true, true, false],
+        ),
+        // Without REX.W only EAX and EDX count.
+        (
+            0x61,
+            0x00,
+            0xFFFF_FFFF_0000_0005,
+            0x1_0000_000B,
+            "aeiou",
+            "hello world",
+            1,
+            [true, true, true, false],
+        ),
+        (
+            0x60,
+            0x08,
+            4,
+            4,
+            "abcd",
+            "abxd",
+            0b1111_1111_1111_1011,
+            [true, true, true, true],
+        ),
+        (
+            0x60,
+            0x18,
+            4,
+            4,
+            "abcd",
+            "abxd",
+            0b100,
+            [true, true, true, false],
+        ),
+    ];
+    for &(opcode, imm, rax, rdx, first, second, result, [cf, zf, sf, of]) in rows {
+        let code = [0x66, 0x0F, 0x3A, opcode, 0xCA, imm]; // xmm1, xmm2
+        let mut machine = Random(0x42).machine();
+        (machine.gpr[0], machine.gpr[2]) = (rax, rdx);
+        machine.xmm[1] = padded(first);
+        machine.xmm[2] = padded(second);
+        for native in [false, true] {
+            let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+            let run = run(native, &cpu, &mut memory, 1);
+            let mut wanted = cpu.clone();
+            wanted.rip += 6;
+            if opcode & 1 == 1 {
+                wanted.gpr[1] = result as u64;
+            } else {
+                wanted.xmm[0] = result;
+            }
+            wanted.flags = RFlags {
+                cf,
+                zf,
+                sf,
+                of,
+                ..RFlags::default()
+            };
+            let what = format!("{opcode:x} {imm:#x} {first:?} {second:?}");
+            assert_eq!(run.exit_reason, ExitReason::StepLimitExceeded, "{what}");
+            assert_eq!(run.final_state, wanted, "{what}");
+        }
+    }
+}
+
+/// Short alphabets, so that all aggregations find something, at every immediate
+/// including the reserved bit 7, with both widths of the length registers.
+#[test]
+fn string_compares_match_the_reference_on_related_strings() {
+    let mut random = Random(0x57A1);
+    let mut found = [0u32; 4];
+    for imm in 0..=255u8 {
+        for opcode in 0x60..=0x63u8 {
+            let name =
+                ["pcmpestrm", "pcmpestri", "pcmpistrm", "pcmpistri"][usize::from(opcode - 0x60)];
+            for wide in [false, true] {
+                let mut code = vec![0x66, 0x48, 0x0F, 0x3A, opcode, 0xCA, imm];
+                if !wide {
+                    code.remove(1);
+                }
+                let mut engine = DbtEngine::new(16 * 1024).unwrap();
+                for _ in 0..24 {
+                    let mut machine = random.machine();
+                    const ALPHABET: [u8; 8] = [0, 1, 1, 2, 2, 0x7F, 0x80, 0xFF];
+                    for register in [1, 2] {
+                        for byte in &mut machine.xmm[register] {
+                            *byte = ALPHABET[(random.next() % 8) as usize];
+                        }
+                    }
+                    if random.next().is_multiple_of(2) {
+                        // The second operand contains the start of the first.
+                        let at = (random.next() % 14) as usize;
+                        let prefix = machine.xmm[1];
+                        machine.xmm[2][at..].copy_from_slice(&prefix[..16 - at]);
+                    }
+                    if random.next().is_multiple_of(4) {
+                        // Only a full-width read sees these as large, or as zero.
+                        machine.gpr[0] = (1 << (32 + random.next() % 32)) | (random.next() % 9);
+                        machine.gpr[2] = (random.next() % 9).wrapping_neg() & 0xFFFF_FFFF;
+                    }
+                    let mut expected = machine.clone();
+                    let (first, second) = (machine.xmm[1], machine.xmm[2]);
+                    string_compare(
+                        &mut expected,
+                        name,
+                        first,
+                        second,
+                        usize::from(imm % 128),
+                        wide,
+                    );
+                    found[usize::from(imm / 4 % 4)] += u32::from(expected.flags.cf);
+                    let (mut wanted, _) = load(&expected, &code, MemoryPermissions::READ_WRITE);
+                    wanted.rip += code.len() as u64;
+                    let (cpu, mut memory) = load(&machine, &code, MemoryPermissions::READ_WRITE);
+                    let interpreted = Interpreter::new(cpu.clone(), &mut memory, 1).run();
+                    let translated = engine.run(&mut cpu.clone(), &mut memory, 1);
+                    for result in [interpreted, translated] {
+                        assert_eq!(
+                            result.final_state, wanted,
+                            "{name} {imm:#x} {first:x?} {second:x?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(found.iter().all(|count| *count > 2000), "{found:?}");
 }
 
 #[test]

@@ -1077,6 +1077,30 @@ f3 4c 0f bd 54 be 10 | lzcnt r10, qword ptr [rsi + 4*rdi + 16]
 0f 9f c3 | setg bl
 0f 9f 44 be 10 | setg byte ptr [rsi + 4*rdi + 16]
 0f 9f c4 | setg ah
+f2 41 0f 38 f0 d9 | crc32 ebx, r9b
+f2 44 0f 38 f0 d1 | crc32 r10d, cl
+f2 44 0f 38 f0 54 be 10 | crc32 r10d, byte ptr [rsi + 4*rdi + 16]
+f2 0f 38 f0 d2 | crc32 edx, dl
+66 f2 41 0f 38 f1 d9 | crc32 ebx, r9w
+66 f2 44 0f 38 f1 d1 | crc32 r10d, cx
+66 f2 44 0f 38 f1 54 be 10 | crc32 r10d, word ptr [rsi + 4*rdi + 16]
+66 f2 0f 38 f1 d2 | crc32 edx, dx
+f2 41 0f 38 f1 d9 | crc32 ebx, r9d
+f2 44 0f 38 f1 d1 | crc32 r10d, ecx
+f2 44 0f 38 f1 54 be 10 | crc32 r10d, dword ptr [rsi + 4*rdi + 16]
+f2 0f 38 f1 d2 | crc32 edx, edx
+f2 49 0f 38 f0 d9 | crc32 rbx, r9b
+f2 4c 0f 38 f0 d1 | crc32 r10, cl
+f2 4c 0f 38 f0 54 be 10 | crc32 r10, byte ptr [rsi + 4*rdi + 16]
+f2 48 0f 38 f0 d2 | crc32 rdx, dl
+f2 49 0f 38 f1 d9 | crc32 rbx, r9
+f2 4c 0f 38 f1 d1 | crc32 r10, rcx
+f2 4c 0f 38 f1 54 be 10 | crc32 r10, qword ptr [rsi + 4*rdi + 16]
+f2 48 0f 38 f1 d2 | crc32 rdx, rdx
+f2 0f 38 f0 dc | crc32 ebx, ah
+f2 0f 38 f0 cf | crc32 ecx, bh
+f2 40 0f 38 f0 dd | crc32 ebx, bpl
+f2 0f 38 f0 c6 | crc32 eax, dh
 44 88 cb | mov bl, r9b
 44 8a 54 be 10 | mov r10b, byte ptr [rsi + 4*rdi + 16]
 88 54 be 10 | mov byte ptr [rsi + 4*rdi + 16], dl

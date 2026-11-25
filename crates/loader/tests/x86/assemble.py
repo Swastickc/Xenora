@@ -86,6 +86,11 @@ def cases():
     out += ["movsxd rbx, r9d", f"movsxd r10, {mem(32)}", "movzx ebx, ah", "movsx ecx, bh"]
     for cc in CONDITIONS:
         out += [f"set{cc} bl", f"set{cc} {mem(8)}", f"set{cc} ah"]
+    # The destination is 32 or 64 bits; only a byte source goes to both widths.
+    for bits, wide in ((8, 32), (16, 32), (32, 32), (8, 64), (64, 64)):
+        out += [f"crc32 {reg(3, wide)}, {reg(9, bits)}", f"crc32 {reg(10, wide)}, {reg(1, bits)}",
+                f"crc32 {reg(10, wide)}, {mem(bits)}", f"crc32 {reg(2, wide)}, {reg(2, bits)}"]
+    out += ["crc32 ebx, ah", "crc32 ecx, bh", "crc32 ebx, bpl", "crc32 eax, dh"]
     for bits in (8, 16, 32, 64):
         out += [f"mov {reg(3, bits)}, {reg(9, bits)}", f"mov {reg(10, bits)}, {mem(bits)}",
                 f"mov {mem(bits)}, {reg(2, bits)}", f"mov {reg(14, bits)}, 0x5a",
@@ -167,7 +172,7 @@ def vector_cases():
         out += [f"{op} xmm10, {wide}, 114", f"{op} xmm2, xmm2, 57"]
     for n in (0, 1, 5, 15, 16, 17, 31, 32, 255):
         out += [f"palignr xmm3, xmm9, {n}", f"palignr xmm10, {wide}, {n}", f"palignr xmm2, xmm2, {n}"]
-    for op in """pmuldq pcmpeqq packusdw pminsb pminsd pminuw pminud pmaxsb pmaxsd pmaxuw pmaxud pmulld
+    for op in """pmuldq pcmpeqq pcmpgtq packusdw pminsb pminsd pminuw pminud pmaxsb pmaxsd pmaxuw pmaxud pmulld
             phminposuw ptest""".split():
         out += [f"{op} xmm3, xmm9", f"{op} xmm10, {wide}", f"{op} xmm2, xmm2"]
     # XMM0 selects; it may also be the source or the destination.
@@ -189,6 +194,11 @@ def vector_cases():
         out += [f"insertps xmm3, xmm9, {n}", f"insertps xmm10, {dword}, {n}", f"insertps xmm2, xmm2, {n}"]
     for n in (0, 1, 2, 3, 4, 255):
         out += [f"extractps {r}, xmm9, {n}" for r in ("ebx", "r9d", "ebp")] + [f"extractps {dword}, xmm3, {n}"]
+    for op in "pcmpestri pcmpestrm pcmpistri pcmpistrm".split():
+        out += [f"{op} xmm3, xmm9, {n}" for n in range(128)]
+        out += [f"{op} xmm10, {wide}, {n}" for n in (0, 1, 70, 75, 13, 24, 56, 121)]
+        # XMM0 may be an operand, and is the result of the mask forms.
+        out += [f"{op} xmm0, xmm9, 12", f"{op} xmm3, xmm0, 68", f"{op} xmm0, xmm0, 25"]
     # ebp would be read as CH if its byte were a legacy byte register.
     byte = "byte ptr [rsi + 4*rdi + 16]"
     for op, regs, place in (("b", ("ebx", "r9d", "ebp"), byte), ("w", ("ebx", "r9d", "ebp"), word),

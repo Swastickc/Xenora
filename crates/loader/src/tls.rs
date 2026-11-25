@@ -126,8 +126,17 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
             .unwrap(),
     ) as usize;
 
-    // TLS directory is directory index 9 (offset 112 + 9 * 8 = 184 in Optional Header)
+    // TLS is data directory 9. The optional header can have padding beyond
+    // its declared directories, so check the count as well as the byte span.
     if size_of_opt < 192 || bytes.len() < opt_offset + 192 {
+        return Ok(None);
+    }
+    let directory_count = u32::from_le_bytes(
+        bytes[opt_offset + 108..opt_offset + 112]
+            .try_into()
+            .unwrap(),
+    );
+    if directory_count <= 9 {
         return Ok(None);
     }
 
@@ -506,8 +515,9 @@ mod tests {
         let mut bytes = vec![0u8; section_end];
         bytes.resize(section_end + 0x200, 0xCC);
         bytes[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
-        // SizeOfOptionalHeader: a PE32+ optional header with 16 data directories.
+        // SizeOfOptionalHeader and NumberOfRvaAndSizes for 16 PE32+ directories.
         bytes[0x94..0x96].copy_from_slice(&240u16.to_le_bytes());
+        bytes[OPTIONAL_HEADER + 108..OPTIONAL_HEADER + 112].copy_from_slice(&16u32.to_le_bytes());
         // Data directory 9 (TLS): RVA and size.
         let entry = OPTIONAL_HEADER + 112 + 9 * 8;
         bytes[entry..entry + 4].copy_from_slice(&SECTION_RVA.to_le_bytes());
@@ -613,6 +623,19 @@ mod tests {
             callbacks_of(&bytes, &parsed(SECTION_SIZE)),
             Err(TlsError::TooManyCallbacks { limit: 64 })
         );
+    }
+
+    #[test]
+    fn the_declared_directory_count_controls_whether_tls_is_present() {
+        let mut bytes = file(ARRAY, ARRAY_RVA, &[FIRST, 0]);
+        let pe = parsed(SECTION_SIZE);
+        let count = OPTIONAL_HEADER + 108;
+        // The full optional header is present in both cases. With only nine
+        // declared directories, slot 9 is padding and must be ignored.
+        bytes[count..count + 4].copy_from_slice(&9u32.to_le_bytes());
+        assert!(parse_tls_directory(&bytes, &pe).unwrap().is_none());
+        bytes[count..count + 4].copy_from_slice(&10u32.to_le_bytes());
+        assert_eq!(callbacks_of(&bytes, &pe).unwrap(), [FIRST]);
     }
 
     #[test]

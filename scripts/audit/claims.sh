@@ -4,8 +4,10 @@ set -eu
 cd "$(dirname "$0")/../.."
 exec python3 - <<'PY'
 from collections import Counter
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tomllib
 
@@ -32,10 +34,20 @@ for entry in claims:
         if not str(entry.get(field, "")).strip():
             errors.append(f"{identifier}: missing {field}")
 
-files = [Path("README.md"), Path("AGENTS.md"), *Path("docs").rglob("*"),
-         *Path("crates").rglob("*.rs")]
-for source in files:
-    if source == registry or source.suffix not in {".md", ".toml", ".rs"}:
+roots = ("README.md", "AGENTS.md", "docs", "crates")
+paths = subprocess.check_output(
+    ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *roots]
+)
+for name in sorted(set(paths.split(b"\0")) - {b""}):
+    source = Path(os.fsdecode(name))
+    root = source.parts[0]
+    if root == "docs":
+        supported = source.suffix in {".md", ".toml", ".rs"}
+    elif root == "crates":
+        supported = source.suffix == ".rs"
+    else:
+        supported = len(source.parts) == 1
+    if not supported or source == registry or not source.is_file():
         continue
     for reference in set(claim_id.findall(source.read_text(encoding="utf-8"))) - classes.keys():
         errors.append(f"{source}: unregistered {reference}")

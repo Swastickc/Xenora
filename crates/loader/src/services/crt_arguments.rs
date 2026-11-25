@@ -17,6 +17,7 @@
 //! arguments come from the host, as bytes with no code page; wildcards are not
 //! expanded; and the environment table is empty.
 
+use super::startup_info::command_line_fits;
 use crate::cpu::ExitReason;
 use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
 use std::fmt;
@@ -27,9 +28,8 @@ const EINVAL: i32 = 22;
 const NO_ARGUMENTS: i32 = 0;
 const UNEXPANDED_ARGUMENTS: i32 = 1;
 const EXPANDED_ARGUMENTS: i32 = 2;
-/// Windows limits a command line to 32,767 characters including its
-/// terminator (`CreateProcess`). The same bound is applied here to the
-/// arguments with their terminators.
+/// Xenora's separate byte budget for raw UTF-8 arguments, including their
+/// terminators. The quoted command line has a UTF-16 limit of its own.
 pub const MAX_PROGRAM_ARGUMENT_BYTES: usize = 32_767;
 
 /// Why [`super::ServicesState::set_program_arguments`] refused its input.
@@ -37,8 +37,9 @@ pub const MAX_PROGRAM_ARGUMENT_BYTES: usize = 32_767;
 pub enum ProgramArgumentsError {
     /// An argument holds a NUL byte, which would end it early in the guest.
     ContainsNul,
-    /// The arguments and their terminators exceed
-    /// [`MAX_PROGRAM_ARGUMENT_BYTES`].
+    /// The raw arguments and their terminators exceed
+    /// [`MAX_PROGRAM_ARGUMENT_BYTES`], or the quoted command line exceeds
+    /// 32,767 UTF-16 units including the terminator.
     TooLong,
     /// The guest has already built `__argv` or read its command line; it would
     /// not see a change.
@@ -49,7 +50,9 @@ impl fmt::Display for ProgramArgumentsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::ContainsNul => "a program argument contains a NUL byte",
-            Self::TooLong => "the program arguments exceed 32,767 bytes",
+            Self::TooLong => {
+                "program arguments exceed 32,767 UTF-8 bytes or the quoted command line exceeds 32,767 UTF-16 units (including terminators)"
+            }
             Self::AlreadyConfigured => "the guest has already configured its arguments",
         })
     }
@@ -89,8 +92,11 @@ impl CrtArguments {
         if arguments.iter().any(|argument| argument.contains('\0')) {
             return Err(ProgramArgumentsError::ContainsNul);
         }
-        let bytes: usize = arguments.iter().map(|argument| argument.len() + 1).sum();
-        if bytes > MAX_PROGRAM_ARGUMENT_BYTES {
+        let bytes = arguments
+            .iter()
+            .map(|argument| argument.len() + 1)
+            .fold(0, usize::saturating_add);
+        if bytes > MAX_PROGRAM_ARGUMENT_BYTES || !command_line_fits(arguments) {
             return Err(ProgramArgumentsError::TooLong);
         }
         self.supplied = Some(

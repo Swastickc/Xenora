@@ -2,10 +2,10 @@
 
 use std::fmt::{self, Write as _};
 use std::io::{self, Read, Write as _};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, ExitStatus, Stdio};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 
 use xenora_loader::startup::StartupEvent;
@@ -18,6 +18,12 @@ const VERIFIED: u8 = 2;
 const GUEST_EXIT: u8 = 3;
 const FAILURE: u8 = 4;
 const DEADLINE: u8 = 5;
+
+// POSIX <unistd.h>. Duplicating onto a distinct descriptor clears its
+// close-on-exec flag. Duplicating onto itself only checks that it is open.
+unsafe extern "C" {
+    fn dup2(source: RawFd, destination: RawFd) -> RawFd;
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -101,11 +107,28 @@ struct Writer {
 }
 
 impl Reporter {
-    pub(super) fn from_stdin() -> io::Result<Self> {
-        // The supervisor uses worker fd 0 as a private socket. Guest stdout
-        // and stderr never pass through this protocol.
-        let fd = io::stdin().as_fd().try_clone_to_owned()?;
-        let channel = UnixStream::from(fd);
+    /// Adopt the socket inherited across the worker's exec.
+    ///
+    /// # Safety
+    /// An open non-stdio descriptor must still belong to the worker's
+    /// unclaimed inherited descriptors, with no other code using or closing it.
+    pub(super) unsafe fn from_inherited(fd: RawFd) -> io::Result<Self> {
+        if fd <= 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "startup diagnostic descriptor must be outside stdio",
+            ));
+        }
+        // SAFETY: same-descriptor dup2 only checks validity, including when fd is closed.
+        if unsafe { dup2(fd, fd) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: dup2 confirmed the descriptor is live, and the caller
+        // guarantees ownership of any inherited non-stdio descriptor here.
+        let inherited = unsafe { OwnedFd::from_raw_fd(fd) };
+        // Close the inherited number and keep a close-on-exec clone.
+        let channel = UnixStream::from(inherited.try_clone()?);
+        drop(inherited);
         channel.peer_addr()?;
         Ok(Self(Some(Arc::new(Mutex::new(Writer {
             channel,
@@ -190,12 +213,34 @@ impl fmt::Write for BoundedMessage {
 pub(super) struct Collector(UnixStream);
 
 impl Collector {
-    pub(super) fn attach(command: &mut Command) -> io::Result<Self> {
+    /// Add the diagnostic endpoint to this command and return its child descriptor.
+    /// Drop the command after spawning to release the parent-side copies.
+    pub(super) fn attach(command: &mut Command) -> io::Result<(Self, RawFd)> {
         let (supervisor, worker) = UnixStream::pair()?;
         supervisor.set_nonblocking(true)?;
         worker.set_nonblocking(true)?;
-        command.stdin(Stdio::from(OwnedFd::from(worker)));
-        Ok(Self(supervisor))
+        let reserved = worker.try_clone()?;
+        let fd = reserved.as_raw_fd();
+        if worker.as_raw_fd() <= 2 || fd <= 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "startup diagnostic socket requires non-stdio descriptors",
+            ));
+        }
+
+        // Keep both descriptors owned by the command through spawn. Only the
+        // child's reserved duplicate survives exec, and stdin is inherited normally.
+        // SAFETY: the closure makes only an async-signal-safe dup2 call on
+        // two distinct, live descriptors and reports failures as an OS error.
+        unsafe {
+            command.pre_exec(move || {
+                if dup2(worker.as_raw_fd(), reserved.as_raw_fd()) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok((Self(supervisor), fd))
     }
 
     pub(super) fn report(self, termination: Termination<'_>, program: bool) -> Report {
@@ -441,14 +486,16 @@ fn json_string(output: &mut String, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     fn fake_worker(script: &str, limit: Duration) -> Report {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", script]);
-        let collector = Collector::attach(&mut command).unwrap();
-        let status =
-            super::super::wait_for_worker(command.spawn().unwrap(), Instant::now(), limit).unwrap();
+        let (collector, fd) = Collector::attach(&mut command).unwrap();
+        command.args(["-c", script, "diagnostic-worker", &fd.to_string()]);
+        let child = command.spawn().unwrap();
+        drop(command);
+        let status = super::super::wait_for_worker(child, Instant::now(), limit).unwrap();
         collector.report(
             status.map_or(Termination::Deadline, Termination::Exited),
             true,
@@ -456,11 +503,60 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_endpoint_is_closed_for_later_execs() {
+        const SELF_TEST_FD: &str = "XENORA_TEST_INHERITED_REPORT_FD";
+        if let Ok(fd) = std::env::var(SELF_TEST_FD) {
+            // SAFETY: the test's parent set up an inherited worker descriptor
+            // that has not been adopted by this test process.
+            let reporter = unsafe { Reporter::from_inherited(fd.parse().unwrap()) }.unwrap();
+            reporter.stage(Stage::Parsed);
+            let mut descendant = Command::new("/bin/cat")
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            drop(reporter);
+            assert!(descendant.wait().unwrap().success());
+            return;
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "runner::diagnostics::tests::diagnostic_endpoint_is_closed_for_later_execs",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
+        let (mut collector, fd) = Collector::attach(&mut command).unwrap();
+        command.env(SELF_TEST_FD, fd.to_string());
+        let mut worker = command.spawn().unwrap();
+        drop(command);
+
+        collector.0.set_nonblocking(false).unwrap();
+        collector
+            .0
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        let read = collector.0.read_to_end(&mut bytes);
+        let running = worker.try_wait().unwrap().is_none();
+        // Close the pipe now so the descendant (and thus the worker) can exit.
+        drop(worker.stdin.take());
+        assert!(worker.wait().unwrap().success());
+        read.expect("diagnostic socket did not close while the descendant was running");
+        assert!(
+            running,
+            "the worker had no living descendant blocked on stdin"
+        );
+        assert_eq!(bytes, [STAGE, 1, 0, Stage::Parsed as u8]);
+    }
+
+    #[test]
     fn signal_preserves_complete_records_and_identifies_early_worker_exit() {
         // The first record is Parsed. The second record starts a Mapped
         // event, but the process dies before sending its payload.
         let report = fake_worker(
-            r#"printf '\001\001\000\000\001\001\000' >&0; kill -TERM "$$""#,
+            r#"printf '\001\001\000\000\001\001\000' >&"$1"; kill -TERM "$$""#,
             Duration::from_secs(2),
         );
         let json = report.json();
@@ -476,7 +572,7 @@ mod tests {
     #[test]
     fn supervisor_deadline_keeps_the_last_completed_stage() {
         let report = fake_worker(
-            r#"printf '\001\001\000\000\001\001\000\001' >&0; while :; do :; done"#,
+            r#"printf '\001\001\000\000\001\001\000\001' >&"$1"; while :; do :; done"#,
             Duration::from_millis(250),
         );
         assert_eq!(report.stages, [Stage::Parsed, Stage::Mapped]);
@@ -533,7 +629,7 @@ mod tests {
     #[test]
     fn diagnostic_transport_caps_storage() {
         let report = fake_worker(
-            r#"printf '\001\001\000\000' >&0; /bin/dd if=/dev/zero bs=4096 count=1 >&0 2>/dev/null; exit 125"#,
+            r#"printf '\001\001\000\000' >&"$1"; /bin/dd if=/dev/zero bs=4096 count=1 >&"$1" 2>/dev/null; exit 125"#,
             Duration::from_secs(2),
         );
         assert_eq!(report.protocol, "malformed");

@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 114] = [
+pub static SERVICES: [ServiceMetadata; 116] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -371,6 +371,28 @@ pub static SERVICES: [ServiceMetadata; 114] = [
         failure: "-1 with errno ENOENT when the old name holds nothing, EACCES when the new name exists or its directory does not, EINVAL for a null or rejected name; stops the guest for a directory",
         reference: "stdio.h rename",
         tests: &["file_positions_round_trip_and_files_are_removed_and_renamed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "tmpfile",
+        parameters: &[],
+        result: "ptr",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "null with errno EMFILE at 64 streams, ENOSPC when the drive is full, ENOMEM when the FILE object cannot be allocated",
+        reference: "stdio.h tmpfile",
+        tests: &["temporary_files_are_uniquely_named_and_deleted_on_close"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "tmpnam",
+        parameters: &[Parameter { name: "buffer", kind: "ptr" }],
+        result: "ptr",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "never; a null buffer uses the static one; stops the guest for a buffer it cannot write",
+        reference: "stdio.h tmpnam",
+        tests: &["temporary_files_are_uniquely_named_and_deleted_on_close"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -1562,6 +1584,21 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.u64(1)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::rename(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "tmpfile", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let _ = args;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::tmpfile(&mut context)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "tmpnam", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::tmpnam(&mut context, a0)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

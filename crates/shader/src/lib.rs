@@ -9,7 +9,7 @@ mod graphics;
 pub use graphics::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
 pub use xenora_decoder::Architecture;
-use xenora_decoder::SoppControlOp;
+use xenora_decoder::{CompareRelation, Signedness, SoppControlOp};
 use xenora_decoder::{
     DecodeError, DecodedInstruction, Instruction, ScalarSource, ScalarUnaryOp, VectorAluOp,
     VectorAluVop3Op, VectorBinary, VectorCompareOp, VectorLowering, VectorSource, VectorUnary,
@@ -113,6 +113,12 @@ impl fmt::Display for Value {
 #[derive(Clone, Copy)]
 enum Op {
     Load,
+    /// One word of a scalar buffer load: `input[word]`, or the register's old
+    /// value where the dispatch has no such word. Wave-uniform.
+    ScalarLoad {
+        word: u32,
+        old: Value,
+    },
     Constant(u32),
     Binary(Binary, Value, Value),
     Unary(VectorUnary, Value),
@@ -150,14 +156,29 @@ enum Op {
         high: Option<(Value, Value)>,
         exec: u32,
     },
-    /// `s_cbranch_vccz` on a lane-derived VCC_LO (IR annotation only).
+    /// A wave-uniform SOPC or SOPK compare with a run-time operand: the SCC bit.
+    ScalarTest {
+        relation: CompareRelation,
+        signed: bool,
+        left: Value,
+        right: Value,
+    },
+    /// A branch taken when `mask` is zero: `s_cbranch_vccz` on a lane-derived
+    /// VCC_LO or `s_cbranch_scc0` on a run-time SCC (IR annotation only).
     RuntimeBranch {
+        test: &'static str,
         mask: Value,
         target: usize,
     },
-    /// Join after a runtime `s_cbranch_vccz`: the fall-through value when the
-    /// mask is nonzero (branch not taken), else the value from before the branch.
-    JoinVccz {
+    /// The `s_branch` between the two parts of a run-time `if`/`else` (IR
+    /// annotation only).
+    RuntimeElse {
+        target: usize,
+    },
+    /// Join after a runtime branch: the fall-through value when the mask is
+    /// nonzero (branch not taken), else the value on the taken path.
+    JoinRuntime {
+        test: &'static str,
         mask: Value,
         fallthrough: Value,
         taken: Value,
@@ -171,6 +192,7 @@ impl Op {
     fn operands(self) -> Vec<Value> {
         match self {
             Self::Load | Self::Constant(_) | Self::ScalarBranch { .. } => Vec::new(),
+            Self::ScalarLoad { old, .. } => vec![old],
             Self::Binary(_, left, right) => vec![left, right],
             Self::Unary(_, source) => vec![source],
             Self::MergeLanes {
@@ -187,14 +209,17 @@ impl Op {
                 operands
             }
             Self::RuntimeBranch { mask, .. } => vec![mask],
+            Self::RuntimeElse { .. } => Vec::new(),
+            Self::ScalarTest { left, right, .. } => vec![left, right],
             Self::VccArithmetic {
                 left, right, mask, ..
             } => vec![left, right, mask],
             Self::CarryMask { flag, .. } => vec![flag],
-            Self::JoinVccz {
+            Self::JoinRuntime {
                 mask,
                 fallthrough,
                 taken,
+                ..
             } => vec![mask, fallthrough, taken],
             Self::Reuse(source) => vec![source],
         }
@@ -205,6 +230,9 @@ impl Op {
     fn expression(self, name: &dyn Fn(Value) -> String, index: &str, lane: &str) -> String {
         match self {
             Self::Load => format!("input[{index}]"),
+            Self::ScalarLoad { word, old } => {
+                format!("{word}u < grid ? input[{word}u] : {}", name(old))
+            }
             Self::Constant(value) => format!("0x{value:08x}u"),
             Self::Unary(op, source) => {
                 let src = name(source);
@@ -240,10 +268,11 @@ impl Op {
                 name(active),
                 name(inactive)
             ),
-            Self::JoinVccz {
+            Self::JoinRuntime {
                 mask,
                 fallthrough,
                 taken,
+                ..
             } => format!(
                 "{} != 0u ? {} : {}",
                 name(mask),
@@ -274,27 +303,53 @@ impl Op {
                 }
             }
             Self::Reuse(source) => name(source),
+            Self::ScalarTest {
+                relation,
+                signed,
+                left,
+                right,
+            } => {
+                let (left, right) = (name(left), name(right));
+                let test = relation_expression(relation, signed, &left, &right);
+                format!("({test}) ? 1u : 0u")
+            }
             Self::Store(_)
             | Self::ScalarBranch { .. }
             | Self::CarryMask { .. }
             | Self::LaneMask { .. }
+            | Self::RuntimeElse { .. }
             | Self::RuntimeBranch { .. } => unreachable!("not a per-thread expression"),
         }
     }
 }
 
-fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
-    use xenora_decoder::CompareRelation;
-    let symbol = match op.relation() {
+/// The MSL operator of a relation; `None` for F and T, which read no operand.
+fn relation_symbol(relation: CompareRelation) -> Option<&'static str> {
+    Some(match relation {
         CompareRelation::Less => "<",
         CompareRelation::Equal => "==",
         CompareRelation::LessOrEqual => "<=",
         CompareRelation::Greater => ">",
         CompareRelation::NotEqual => "!=",
         CompareRelation::GreaterOrEqual => ">=",
-        // F and T read no operand bits.
-        CompareRelation::False => return "false".to_owned(),
-        CompareRelation::True => return "true".to_owned(),
+        CompareRelation::False | CompareRelation::True => return None,
+    })
+}
+
+/// A 32-bit integer relation.
+fn relation_expression(relation: CompareRelation, signed: bool, left: &str, right: &str) -> String {
+    match relation_symbol(relation) {
+        None => (relation == CompareRelation::True).to_string(),
+        Some(symbol) if signed => {
+            format!("as_type<int>({left}) {symbol} as_type<int>({right})")
+        }
+        Some(symbol) => format!("{left} {symbol} {right}"),
+    }
+}
+
+fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
+    let Some(symbol) = relation_symbol(op.relation()) else {
+        return (op.relation() == CompareRelation::True).to_string();
     };
     if op.semantics().width == 16 {
         // Guide §§6.2, 6.2.5 and 6.8: the e32 form reads the low half.
@@ -308,10 +363,10 @@ fn compare_expression(op: VectorCompareOp, left: &str, right: &str) -> String {
         format!("{} {symbol} {}", half(left), half(right))
     } else if op.signed() && op.semantics().width == 64 {
         format!("as_type<long>({left}) {symbol} as_type<long>({right})")
-    } else if op.signed() {
-        format!("as_type<int>({left}) {symbol} as_type<int>({right})")
-    } else {
+    } else if op.semantics().width == 64 {
         format!("{left} {symbol} {right}")
+    } else {
+        relation_expression(op.relation(), op.signed(), left, right)
     }
 }
 
@@ -526,10 +581,13 @@ pub fn compile_with(
 
     let disassembly = decoded.iter().map(|line| format!("{line}\n")).collect();
     let mut ir = String::new();
-    let has_mask = operations
-        .iter()
-        .any(|(_, operation)| matches!(operation, Op::LaneMask { .. } | Op::CarryMask { .. }));
-    let grid = if has_mask {
+    let reads_grid = operations.iter().any(|(_, operation)| {
+        matches!(
+            operation,
+            Op::LaneMask { .. } | Op::CarryMask { .. } | Op::ScalarLoad { .. }
+        )
+    });
+    let grid = if reads_grid {
         ",\n    uint grid [[threads_per_grid]]"
     } else {
         ""
@@ -563,6 +621,10 @@ pub fn compile_with(
                     operation.expression(&thread, "index", "")
                 ),
             ),
+            Op::ScalarLoad { word, old } => (
+                format!("{dest} = load.uniform.u32 input[{word}], {old}"),
+                format!("uint {dest} = {};", operation.expression(&thread, "", "")),
+            ),
             Op::Constant(value) => (
                 format!("{dest} = const.u32 0x{value:08x}"),
                 format!("uint {dest} = {};", operation.expression(&thread, "", "")),
@@ -591,10 +653,26 @@ pub fn compile_with(
                 );
                 continue;
             }
-            Op::RuntimeBranch { mask, target } => {
-                let _ = writeln!(ir, "{offset:04x}: branch.vccz {mask} -> 0x{target:04x}");
+            Op::RuntimeBranch { test, mask, target } => {
+                let _ = writeln!(ir, "{offset:04x}: branch.{test} {mask} -> 0x{target:04x}");
                 continue;
             }
+            Op::RuntimeElse { target } => {
+                let _ = writeln!(ir, "{offset:04x}: else -> 0x{target:04x}");
+                continue;
+            }
+            Op::ScalarTest {
+                relation,
+                signed,
+                left,
+                right,
+            } => (
+                format!(
+                    "{dest} = test.uniform {relation:?}.{} {left}, {right}",
+                    if signed { "i32" } else { "u32" }
+                ),
+                format!("uint {dest} = {};", operation.expression(&thread, "", "")),
+            ),
             Op::MergeLanes {
                 mask,
                 active,
@@ -606,12 +684,13 @@ pub fn compile_with(
                     operation.expression(&thread, "", "(index & 31u)")
                 ),
             ),
-            Op::JoinVccz {
+            Op::JoinRuntime {
+                test,
                 mask,
                 fallthrough,
                 taken,
             } => (
-                format!("{dest} = join.vccz {mask}, {fallthrough}, {taken}"),
+                format!("{dest} = join.{test} {mask}, {fallthrough}, {taken}"),
                 format!("uint {dest} = {};", operation.expression(&thread, "", "")),
             ),
             Op::VccArithmetic {
@@ -784,6 +863,47 @@ enum ScalarValue {
     Uninitialized,
     Known(u32),
     RuntimeMask,
+    /// A wave-uniform value known only at run time.
+    Runtime(Value),
+    /// The destination of a scalar load without a completed wait.
+    Pending(Value),
+}
+
+/// SCC during translation.
+#[derive(Clone, Copy)]
+enum Scc {
+    Uninitialized,
+    Known(bool),
+    /// A wave-uniform 0 or 1 known only at run time.
+    Runtime(Value),
+}
+
+impl Scc {
+    fn known(self, uninitialized: &'static str) -> Result<bool, &'static str> {
+        match self {
+            Self::Known(value) => Ok(value),
+            Self::Runtime(_) => Err("instruction reads a run-time SCC"),
+            Self::Uninitialized => Err(uninitialized),
+        }
+    }
+}
+
+/// The code a run-time branch may skip, and its `else` part if there is one.
+struct Region {
+    /// End of the part being translated, where the paths join after the last.
+    end: usize,
+    test: &'static str,
+    mask: Value,
+    /// The VGPRs at the branch.
+    before: [Option<Value>; 256],
+    /// The VGPRs after the fall-through part, while translating an `else`.
+    fallthrough: Option<[Option<Value>; 256]>,
+}
+
+fn scalar_load_pending(scalars: &[ScalarValue]) -> bool {
+    scalars
+        .iter()
+        .any(|value| matches!(value, ScalarValue::Pending(_)))
 }
 
 fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, Op)>, CompileError> {
@@ -796,12 +916,11 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     let mut scalars = [ScalarValue::Uninitialized; 128];
     let mut exec = u32::MAX; // The fixture starts with full Wave32 EXEC.
     scalars[126] = ScalarValue::Known(exec);
-    let mut scc = None;
+    let mut scc = Scc::Uninitialized;
     let mut skip_before = 0;
     // VCC_LO can forward a lane-derived mask to its supported runtime consumers.
     let mut lane_vcc: Option<Value> = None;
-    // An open runtime `s_cbranch_vccz` region: its end, mask and the VGPRs at the branch.
-    let mut region: Option<(usize, Value, [Option<Value>; 256])> = None;
+    let mut region: Option<Region> = None;
 
     // Every decoded instruction must satisfy the fixture layout and binding
     // contract, even when a known branch skips it.
@@ -825,6 +944,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             Instruction::BufferStoreDword {
                 index, resource, ..
             } if (index, resource) != (0, 4) => "unsupported resource or buffer index",
+            Instruction::ScalarBufferLoad { resource, .. } if resource != 0 => {
+                "unsupported resource or buffer index"
+            }
             Instruction::Export { .. }
             | Instruction::Interpolate { .. }
             | Instruction::ImageSampleLz { .. } => {
@@ -844,18 +966,28 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     for instruction in decoded {
         let offset = instruction.offset;
         let error = |reason| CompileError::Verify { offset, reason };
-        if let Some((end, mask, before)) = region
-            && offset >= end
+        if let Some(Region {
+            end,
+            test,
+            mask,
+            before,
+            fallthrough,
+        }) = region.take_if(|region| offset >= region.end)
         {
-            region = None;
+            // Without an `else`, the taken path leaves the VGPRs as they were.
+            let (fallthrough, taken) = match fallthrough {
+                Some(fallthrough) => (fallthrough, registers),
+                None => (registers, before),
+            };
             for slot in 0..registers.len() {
-                if let (Some(fallthrough), Some(taken)) = (registers[slot], before[slot])
+                if let (Some(fallthrough), Some(taken)) = (fallthrough[slot], taken[slot])
                     && fallthrough.0 != taken.0
                 {
                     let next = Value(operations.len());
                     operations.push((
                         end,
-                        Op::JoinVccz {
+                        Op::JoinRuntime {
+                            test,
                             mask,
                             fallthrough,
                             taken,
@@ -886,7 +1018,22 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             }
         }
         // docs/shaders/vector-compare.md section 6: checked whatever EXEC is.
-        if let Some((_, _, before)) = &region {
+        if let Some(region) = &mut region {
+            // An `s_branch` that ends the fall-through part skips an `else`. The
+            // `s_cbranch_vccz` contract has none.
+            if let Instruction::Branch { target } = instruction.instruction
+                && region.test == "scc0"
+                && region.fallthrough.is_none()
+                && offset + usize::from(instruction.byte_len) == region.end
+            {
+                region.fallthrough = Some(registers);
+                registers = region.before;
+                region.end = target;
+                operations.push((offset, Op::RuntimeElse { target }));
+                facts.push(KnownBits::UNKNOWN);
+                continue;
+            }
+            let before = &region.before;
             let dst = match instruction.instruction {
                 Instruction::MoveB32 { dst, .. }
                 // Of the VOP3 variants, the contract admits only v_add_nc_u32_e64.
@@ -910,13 +1057,13 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 } => dst,
                 _ => {
                     return Err(error(
-                        "code skipped by a runtime s_cbranch_vccz may contain only v_mov_b32, v_add_nc_u32_e64 and the VOP2 logical and shift forms",
+                        "code skipped by a runtime branch may contain only v_mov_b32, v_add_nc_u32_e64 and the VOP2 logical and shift forms",
                     ));
                 }
             };
             if before[usize::from(dst)].is_none() {
                 return Err(error(
-                    "a VGPR written under a runtime s_cbranch_vccz must be initialized before the branch",
+                    "a VGPR written under a runtime branch must be initialized before the branch",
                 ));
             }
         }
@@ -935,10 +1082,30 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 Some(ScalarValue::RuntimeMask) => Err(error(
                     "scalar source reads a runtime-only SGPR compare mask",
                 )),
+                Some(ScalarValue::Runtime(_)) => {
+                    Err(error("scalar source reads a run-time loaded SGPR"))
+                }
+                Some(ScalarValue::Pending(_)) => Err(error(
+                    "scalar source reads an SGPR pending a scalar load wait",
+                )),
                 Some(ScalarValue::Uninitialized) | None => {
                     Err(error("scalar source has no known value"))
                 }
             },
+        };
+        let is_runtime = |source| {
+            matches!(source, ScalarSource::Register(register) if matches!(
+                scalars.get(usize::from(register)),
+                Some(ScalarValue::Runtime(_))
+            ))
+        };
+        // A wave-uniform operand of a vector instruction or a scalar compare.
+        let read_uniform = |register: u8, operations: &mut Vec<_>, facts: &mut Vec<_>| {
+            if let Some(ScalarValue::Runtime(value)) = scalars.get(usize::from(register)) {
+                return Ok(*value);
+            }
+            let bits = read_scalar(ScalarSource::Register(register))?;
+            Ok(constant(operations, facts, offset, bits))
         };
         let read_vector = |source, operations: &mut Vec<_>, facts: &mut Vec<_>| {
             Ok(match source {
@@ -954,10 +1121,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         }
                     }
                 }
-                VectorSource::Scalar(register) => {
-                    let bits = read_scalar(ScalarSource::Register(register))?;
-                    constant(operations, facts, offset, bits)
-                }
+                VectorSource::Scalar(register) => read_uniform(register, operations, facts)?,
                 VectorSource::Immediate(bits) => constant(operations, facts, offset, bits),
             })
         };
@@ -1002,6 +1166,16 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 ));
             }
         }
+        if let Instruction::ScalarUnary { dst, .. }
+        | Instruction::ScalarAlu { dst, .. }
+        | Instruction::ScalarImmediate { dst, .. }
+        | Instruction::VectorCompareVop3 { sdst: dst, .. } = instruction.instruction
+            && matches!(scalars.get(usize::from(dst)), Some(ScalarValue::Pending(_)))
+        {
+            return Err(error(
+                "instruction writes an SGPR pending a scalar load wait",
+            ));
+        }
         let next = Value(operations.len());
         let (dest, operation) = match instruction.instruction {
             Instruction::BufferLoadDword { data, .. } => {
@@ -1025,6 +1199,50 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             }
             Instruction::WaitStore => {
                 store_pending = false;
+                continue;
+            }
+            // docs/shaders/scalar-memory.md.
+            Instruction::ScalarBufferLoad {
+                dst,
+                offset: immediate,
+                soffset,
+                dwords,
+                ..
+            } => {
+                if dst < 8 {
+                    return Err(error("scalar load would modify a resource descriptor"));
+                }
+                let extra = match soffset {
+                    Some(register) => read_scalar(ScalarSource::Register(register))?,
+                    None => 0,
+                };
+                let first = (u64::from(immediate) + u64::from(extra)) / 4;
+                let mut loaded = Vec::new();
+                for index in 0..dwords {
+                    let old = read_uniform(dst + index, &mut operations, &mut facts)?;
+                    let word = first + u64::from(index);
+                    loaded.push(match u32::try_from(word) {
+                        Ok(word) if word < u32::MAX => {
+                            let value = Value(operations.len());
+                            operations.push((offset, Op::ScalarLoad { word, old }));
+                            facts.push(KnownBits::UNKNOWN);
+                            value
+                        }
+                        // Beyond any dispatch: the word is not loaded.
+                        _ => old,
+                    });
+                }
+                for (slot, value) in (usize::from(dst)..).zip(loaded) {
+                    scalars[slot] = ScalarValue::Pending(value);
+                }
+                continue;
+            }
+            Instruction::WaitScalarLoad => {
+                for slot in &mut scalars {
+                    if let ScalarValue::Pending(value) = *slot {
+                        *slot = ScalarValue::Runtime(value);
+                    }
+                }
                 continue;
             }
             Instruction::MoveB32 {
@@ -1074,7 +1292,27 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 )?);
                 continue;
             }
-            // SGPR values are wave-uniform and known during translation.
+            Instruction::MoveB32 {
+                dst,
+                src: VectorSource::Scalar(register),
+            } if let ScalarValue::Runtime(value) = scalars[usize::from(register)] => {
+                let slot = usize::from(dst);
+                if dst == 0 || pending_load.is_some_and(|(register, _)| register == slot) {
+                    return Err(error(
+                        "move writes the index register or replaces a pending load",
+                    ));
+                }
+                registers[slot] = Some(merge_lanes(
+                    &mut operations,
+                    &mut facts,
+                    offset,
+                    exec,
+                    value,
+                    registers[slot],
+                )?);
+                continue;
+            }
+            // Other SGPR values are wave-uniform and known during translation.
             Instruction::MoveB32 {
                 dst,
                 src: VectorSource::Scalar(register),
@@ -1131,7 +1369,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = ScalarValue::Known(value);
                 if let Some(flag) = flag {
-                    scc = Some(flag);
+                    scc = Scc::Known(flag);
                 }
                 continue;
             }
@@ -1143,7 +1381,8 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             } => {
                 let (src0, src1) = (read_scalar(src0)?, read_scalar(src1)?);
                 let scc_in = if op.reads_scc() {
-                    scc.ok_or_else(|| error("SOP2 SCC input reads uninitialized SCC"))?
+                    scc.known("SOP2 SCC input reads uninitialized SCC")
+                        .map_err(error)?
                 } else {
                     false
                 };
@@ -1156,12 +1395,39 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = ScalarValue::Known(value);
                 if let Some(flag) = flag {
-                    scc = Some(flag);
+                    scc = Scc::Known(flag);
                 }
                 continue;
             }
             Instruction::ScalarCompare { op, src0, src1 } => {
-                scc = Some(op.test(read_scalar(src0)?, read_scalar(src1)?));
+                let operand = |source, operations: &mut Vec<_>, facts: &mut Vec<_>| {
+                    Ok(match source {
+                        ScalarSource::Register(register) => {
+                            read_uniform(register, operations, facts)?
+                        }
+                        ScalarSource::Immediate(bits) => constant(operations, facts, offset, bits),
+                    })
+                };
+                if !(is_runtime(src0) || is_runtime(src1)) {
+                    scc = Scc::Known(op.test(read_scalar(src0)?, read_scalar(src1)?));
+                    continue;
+                }
+                let left = operand(src0, &mut operations, &mut facts)?;
+                let right = operand(src1, &mut operations, &mut facts)?;
+                let Some(relation) = op.semantics().relation else {
+                    return Err(error("scalar compare without a relation"));
+                };
+                scc = Scc::Runtime(Value(operations.len()));
+                operations.push((
+                    offset,
+                    Op::ScalarTest {
+                        relation,
+                        signed: op.semantics().signedness == Signedness::Signed,
+                        left,
+                        right,
+                    },
+                ));
+                facts.push(KnownBits::UNKNOWN);
                 continue;
             }
             // docs/shaders/scalar-immediate.md.
@@ -1170,7 +1436,8 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     return Err(error("scalar immediate would modify a resource descriptor"));
                 }
                 let scc_in = if op.reads_scc() {
-                    scc.ok_or_else(|| error("SOPK SCC input reads uninitialized SCC"))?
+                    scc.known("SOPK SCC input reads uninitialized SCC")
+                        .map_err(error)?
                 } else {
                     false
                 };
@@ -1182,6 +1449,9 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         ScalarValue::Known(value) => value,
                         ScalarValue::RuntimeMask => {
                             return Err(error("SOPK reads a runtime-only SGPR compare mask"));
+                        }
+                        ScalarValue::Runtime(_) | ScalarValue::Pending(_) => {
+                            return Err(error("SOPK reads a run-time loaded SGPR"));
                         }
                         ScalarValue::Uninitialized => {
                             return Err(error("SOPK reads an uninitialized SGPR"));
@@ -1195,12 +1465,35 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     *slot = ScalarValue::Known(value);
                 }
                 if let Some(flag) = flag {
-                    scc = Some(flag);
+                    scc = Scc::Known(flag);
                 }
                 continue;
             }
             Instruction::ScalarImmediateCompare { op, src, simm16 } => {
-                scc = Some(op.test(read_scalar(ScalarSource::Register(src))?, simm16));
+                if !is_runtime(ScalarSource::Register(src)) {
+                    scc = Scc::Known(op.test(read_scalar(ScalarSource::Register(src))?, simm16));
+                    continue;
+                }
+                let signed = op.semantics().signedness == Signedness::Signed;
+                // Guide 12.2: the unsigned compares zero-extend SIMM16.
+                let extended = if signed {
+                    i32::from(simm16 as i16) as u32
+                } else {
+                    u32::from(simm16)
+                };
+                let left = read_uniform(src, &mut operations, &mut facts)?;
+                let right = constant(&mut operations, &mut facts, offset, extended);
+                scc = Scc::Runtime(Value(operations.len()));
+                operations.push((
+                    offset,
+                    Op::ScalarTest {
+                        relation: op.relation(),
+                        signed,
+                        left,
+                        right,
+                    },
+                ));
+                facts.push(KnownBits::UNKNOWN);
                 continue;
             }
             // docs/shaders/vector-compare.md sections 3 and 5.
@@ -1248,8 +1541,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     let left = match src0 {
                         VectorSource::Register(base) => read(base + 1)?,
                         VectorSource::Scalar(base) => {
-                            let bits = read_scalar(ScalarSource::Register(base + 1))?;
-                            constant(&mut operations, &mut facts, bits)
+                            read_uniform(base + 1, &mut operations, &mut facts)?
                         }
                         VectorSource::Immediate(bits) => {
                             let high = ((bits as i32) >> 31) as u32;
@@ -1274,8 +1566,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         }
                     }
                     VectorSource::Scalar(register) => {
-                        let bits = read_scalar(ScalarSource::Register(register))?;
-                        constant(&mut operations, &mut facts, bits)
+                        read_uniform(register, &mut operations, &mut facts)?
                     }
                     VectorSource::Immediate(bits) => constant(&mut operations, &mut facts, bits),
                 };
@@ -1321,7 +1612,11 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         continue;
                     }
                     SoppControlOp::EndProgram => {
-                        if !stored || store_pending || pending_load.is_some() {
+                        if !stored
+                            || store_pending
+                            || pending_load.is_some()
+                            || scalar_load_pending(&scalars)
+                        {
                             return Err(error(
                                 "termination requires one completed store and no pending loads",
                             ));
@@ -1330,22 +1625,38 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     }
                     op => {
                         let target = instruction.branch_target().expect("decoded SOPP branch");
-                        if op == SoppControlOp::BranchVccZero
-                            && let Some(mask) = lane_vcc
-                        {
+                        let runtime = match (op, lane_vcc, scc) {
+                            (SoppControlOp::BranchVccZero, Some(mask), _) => Some(("vccz", mask)),
+                            (SoppControlOp::BranchSccZero, _, Scc::Runtime(value)) => {
+                                Some(("scc0", value))
+                            }
+                            _ => None,
+                        };
+                        if let Some((test, mask)) = runtime {
                             if pending_load.is_some() {
                                 return Err(error(
-                                    "a runtime s_cbranch_vccz requires no outstanding vector load",
+                                    "a runtime branch requires no outstanding vector load",
                                 ));
                             }
-                            region = Some((target, mask, registers));
-                            (None, Op::RuntimeBranch { mask, target })
+                            if scalar_load_pending(&scalars) {
+                                return Err(error(
+                                    "a runtime branch requires no outstanding scalar load",
+                                ));
+                            }
+                            region = Some(Region {
+                                end: target,
+                                test,
+                                mask,
+                                before: registers,
+                                fallthrough: None,
+                            });
+                            (None, Op::RuntimeBranch { test, mask, target })
                         } else {
                             let taken = match op {
                                 SoppControlOp::Branch => true,
-                                SoppControlOp::BranchSccZero => !scc.ok_or_else(|| {
-                                    error("conditional branch reads uninitialized SCC")
-                                })?,
+                                SoppControlOp::BranchSccZero => !scc
+                                    .known("conditional branch reads uninitialized SCC")
+                                    .map_err(error)?,
                                 SoppControlOp::BranchVccZero => {
                                     let ScalarValue::Known(bits) = scalars[VCC_LO] else {
                                         return Err(error(
@@ -1580,6 +1891,10 @@ fn equivalent_value(
 fn map_uses(operation: Op, map: impl Fn(Value) -> Value) -> Op {
     match operation {
         Op::Load | Op::Constant(_) | Op::ScalarBranch { .. } => operation,
+        Op::ScalarLoad { word, old } => Op::ScalarLoad {
+            word,
+            old: map(old),
+        },
         Op::Binary(operator, left, right) => Op::Binary(operator, map(left), map(right)),
         Op::Unary(operator, source) => Op::Unary(operator, map(source)),
         Op::MergeLanes {
@@ -1626,15 +1941,30 @@ fn map_uses(operation: Op, map: impl Fn(Value) -> Value) -> Op {
             high: high.map(|(left, right)| (map(left), map(right))),
             exec,
         },
-        Op::RuntimeBranch { mask, target } => Op::RuntimeBranch {
+        Op::RuntimeBranch { test, mask, target } => Op::RuntimeBranch {
+            test,
             mask: map(mask),
             target,
         },
-        Op::JoinVccz {
+        Op::RuntimeElse { .. } => operation,
+        Op::ScalarTest {
+            relation,
+            signed,
+            left,
+            right,
+        } => Op::ScalarTest {
+            relation,
+            signed,
+            left: map(left),
+            right: map(right),
+        },
+        Op::JoinRuntime {
+            test,
             mask,
             fallthrough,
             taken,
-        } => Op::JoinVccz {
+        } => Op::JoinRuntime {
+            test,
             mask: map(mask),
             fallthrough: map(fallthrough),
             taken: map(taken),

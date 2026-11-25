@@ -31,10 +31,10 @@ exit. Message text is limited to 1,024 UTF-8 bytes and carries
 `message_truncated`. Software should use the stage and outcome fields
 for decisions, and show messages as diagnostic text.
 
-The private diagnostic socket occupies the worker's standard input
-descriptor when reporting is enabled. The worker currently has no guest
-input stream. [Guest standard input (#467)](https://github.com/ranveersoni98/Xenora/issues/467)
-will need a separate transport so it can work with startup reports.
+The worker inherits standard input with or without reporting. Piped input
+has the same 1 MiB limit, is read to EOF before guest entry, and remains
+subject to the wall deadline. Terminal input is treated as empty. The
+worker sends diagnostic records over a separate private socket.
 The supervisor inspects at most 2,048 diagnostic bytes and keeps only
 the ordered, valid stage prefix. The protocol status is
 `complete` when an intact outcome agrees with process termination,

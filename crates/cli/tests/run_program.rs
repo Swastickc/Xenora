@@ -54,6 +54,11 @@ fn hosted(name: &str) -> PathBuf {
     build("build-gate-a2.sh", "run-program-a2", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_tmp(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-tmp.sh", "run-program-crt-tmp", &OUT).join(format!("{name}.exe"))
+}
+
 fn crt_files(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-crt-files.sh", "run-program-crt-files", &OUT).join(format!("{name}.exe"))
@@ -360,6 +365,23 @@ fn a_program_moving_through_files_and_renaming_them_passes_its_checks() {
     assert_eq!(
         run.stdout,
         "check 17 failed: text position counts the CR\r\ncrt_files: 27 of 28 checks passed\r\n"
+    );
+}
+
+#[test]
+fn a_program_using_temporary_files_passes_its_checks() {
+    for name in ["crt-tmp-O0", "crt-tmp-O2"] {
+        let run = run_program(&crt_tmp(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(run.stdout, "crt_tmp: 9 of 9 checks passed\r\n", "{name}");
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_tmp("crt-tmp-break"), &[], &[]);
+    assert_eq!(run.code, Some(10), "{}", run.stderr);
+    assert!(
+        run.stdout.contains("check 10 failed: control"),
+        "{}",
+        run.stdout
     );
 }
 

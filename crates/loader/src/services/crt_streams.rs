@@ -82,6 +82,9 @@ pub(super) struct StandardStreams {
     scratch: Scratch,
     /// What the guest reads from `stdin` (#467).
     input: Input,
+    /// The static buffer `tmpnam` uses when its argument is null, allocated
+    /// once, as the CRT keeps one.
+    temporary_static: u64,
 }
 
 /// The standard input: bytes the host supplied before the run, after the
@@ -687,15 +690,60 @@ impl StandardStreams {
             .map_err(|errno| Failed(0, errno)))
     }
 
+    /// `tmpfile`: a stream open for reading and writing in binary, deleted
+    /// when it closes.
+    pub(super) fn open_temporary(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+    ) -> Outcome<u64> {
+        Ok(self
+            .opened
+            .open_temporary(memory, drive)
+            .map_err(|errno| Failed(0, errno)))
+    }
+
+    /// `tmpnam`: a name no file on the drive holds, into the caller's
+    /// buffer, or into a static buffer allocated once when `buffer` is
+    /// null, as the CRT does. The buffer is `L_tmpnam` bytes; 260 are
+    /// allocated, as the names never come close.
+    pub(super) fn temporary_name(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &ObjectState,
+        buffer: u64,
+    ) -> Outcome<u64> {
+        let buffer = if buffer == 0 {
+            if self.temporary_static == 0 {
+                let allocated = memory
+                    .map_heap_allocation(PROCESS_HEAP, 260)
+                    .map_err(fault)?;
+                self.temporary_static = allocated;
+            }
+            self.temporary_static
+        } else {
+            buffer
+        };
+        let mut name = self.opened.temporary_name(drive).into_bytes();
+        name.push(0);
+        memory.write_bytes(buffer, &name).map_err(fault)?;
+        Ok(Ok(buffer))
+    }
+
     /// `fclose`. Returns 0, or `EOF` with `EINVAL` for a null stream. Closing
     /// a standard stream is not modelled.
-    pub(super) fn close(&mut self, memory: &mut GuestMemory, file: u64) -> Outcome<i32> {
+    pub(super) fn close(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+        file: u64,
+    ) -> Outcome<i32> {
         if file == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
         }
         match self.stream(file)? {
             Stream::File(file) => {
-                self.opened.close(memory, file);
+                self.opened.close(memory, drive, file);
                 Ok(Ok(0))
             }
             _ => Err(RUNTIME_LIMIT),

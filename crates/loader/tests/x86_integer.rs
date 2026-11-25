@@ -628,6 +628,27 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
                 destination: false,
             })
         }
+        "crc32" => {
+            // The definition: reflect both, append 32 zeros, divide modulo 2 by
+            // the polynomial, and reflect the remainder.
+            let reflect = |value: u128, bits: u32| -> u128 {
+                (0..bits)
+                    .filter(|index| bit(value, *index))
+                    .map(|index| 1u128 << (bits - 1 - index))
+                    .sum()
+            };
+            let source_bits = bits_of(places[1]);
+            let source = read(m, places[1], source_bits);
+            let initial = read(m, places[0], bits) % (1 << 32);
+            let mut rest = reflect(source, source_bits) << 32 ^ reflect(initial, 32) << source_bits;
+            for position in (32..32 + 64).rev() {
+                if bit(rest, position) {
+                    rest ^= 0x1_1EDC_6F41u128 << (position - 32);
+                }
+            }
+            write(m, places[0], reflect(rest, 32));
+            Outcome::Done(none)
+        }
         "bsf" | "bsr" | "tzcnt" | "lzcnt" | "popcnt" => {
             let value = read(m, places[1], bits);
             let first = (0..bits).find(|index| bit(value, *index));
@@ -1693,6 +1714,104 @@ fn flags_survive_when_the_next_flag_writer_is_never_reached() {
         // 1 - 2 borrows and is negative; it neither overflows nor is zero.
         assert!(state.flags.cf && state.flags.sf, "{middle:02X?}");
         assert!(!state.flags.zf && !state.flags.of, "{middle:02X?}");
+    }
+}
+
+#[test]
+fn crc32_reads_exactly_its_source_and_changes_only_its_destination() {
+    let end = DATA + 0x100;
+    let forms: [(&[u8], u64); 7] = [
+        (&[0xF2, 0x0F, 0x38, 0xF0, 0x03], 1), // crc32 eax, byte ptr [rbx]
+        (&[0x66, 0xF2, 0x0F, 0x38, 0xF0, 0x03], 1), // 66 has no effect on a byte source
+        (&[0xF2, 0x48, 0x0F, 0x38, 0xF0, 0x03], 1), // crc32 rax, byte ptr [rbx]
+        (&[0x66, 0xF2, 0x0F, 0x38, 0xF1, 0x03], 2), // crc32 eax, word ptr [rbx]
+        (&[0xF2, 0x0F, 0x38, 0xF1, 0x03], 4), // crc32 eax, dword ptr [rbx]
+        (&[0xF2, 0x48, 0x0F, 0x38, 0xF1, 0x03], 8), // crc32 rax, qword ptr [rbx]
+        (&[0xF2, 0x66, 0x48, 0x0F, 0x38, 0xF1, 0x03], 8), // REX.W over 66
+    ];
+    for (code, width) in forms {
+        let mut machine = Random(0xC3C).machine();
+        machine.gpr[0] = 0xAAAA_AAAA_0000_0000;
+        machine.flags = Flags {
+            cf: true,
+            of: true,
+            af: true,
+            ..Flags::default()
+        };
+        // The bytes 00 to 07 at the end of the region.
+        let image = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        for native in [false, true] {
+            let run = |rbx: u64, gs: u64, code: &[u8]| {
+                let (mut cpu, mut memory) = load(&machine, code);
+                memory.write_bytes(end - 8, &image).unwrap();
+                cpu.gpr[3] = rbx;
+                cpu.gs_base = gs;
+                let before = cpu.clone();
+                let result = if native {
+                    DbtEngine::new(16 * 1024)
+                        .unwrap()
+                        .run(&mut cpu, &mut memory, 1)
+                } else {
+                    Interpreter::new(cpu, &mut memory, 1).run()
+                };
+                (before, result)
+            };
+            // An independent bitwise CRC of the bytes that should be read.
+            let mut crc = 0u32;
+            for byte in &image[8 - width as usize..] {
+                for index in 0..8 {
+                    let top = (crc ^ u32::from(byte >> index)) & 1;
+                    crc = (crc / 2) ^ (top * 0x82F6_3B78);
+                }
+            }
+            let (mut wanted, result) = run(end - width, 0, code);
+            wanted.gpr[0] = u64::from(crc);
+            wanted.rip += code.len() as u64;
+            assert_eq!(result.exit_reason, ExitReason::StepLimitExceeded);
+            assert_eq!(result.final_state, wanted, "{code:02X?}");
+
+            let prefixed = [&[0x65][..], code].concat();
+            let (_, result) = run(end - width - 0x777, 0x777, &prefixed);
+            assert_eq!(result.final_state.gpr[0], u64::from(crc), "{code:02X?}");
+
+            let (before, result) = run(end - width + 1, 0, code);
+            let fault = MemoryError::UnmappedAddress(end);
+            assert_eq!(result.exit_reason, ExitReason::MemoryFault(fault));
+            assert_eq!(result.final_state, before, "{code:02X?}");
+
+            const LIMIT: u64 = 0x0000_8000_0000_0000;
+            for address in [LIMIT, LIMIT - width + 1, 1 << 63] {
+                let (before, result) = run(address, 0, code);
+                if address < LIMIT && width == 1 {
+                    continue;
+                }
+                assert_eq!(result.exit_reason, ExitReason::GeneralProtection);
+                assert_eq!(result.final_state, before, "{code:02X?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn crc32_neighbours_are_rejected() {
+    let rejected: &[&[u8]] = &[
+        &[0x0F, 0x38, 0xF0, 0x03],             // movbe eax, [rbx]
+        &[0x66, 0x0F, 0x38, 0xF1, 0x03],       // movbe [rbx], ax
+        &[0xF3, 0x0F, 0x38, 0xF1, 0xC1],       // F3 selects no such form
+        &[0xF2, 0xF3, 0x0F, 0x38, 0xF1, 0xC1], // both repeat prefixes
+        &[0xF0, 0xF2, 0x0F, 0x38, 0xF1, 0x03], // LOCK
+        &[0xF2, 0x0F, 0x38, 0xF2, 0xC1],       // unassigned
+        &[0xF2, 0x0F, 0x3A, 0xF1, 0xC1, 0x00], // the other escape
+    ];
+    for code in rejected {
+        let machine = Random(0xC4C).machine();
+        let padded = [code, &[0x90; 8][..]].concat();
+        let (state, exit, _) = run_both(&machine, &padded, 1);
+        assert!(
+            matches!(exit, ExitReason::IllegalInstruction(_)),
+            "{code:02X?}: {exit:?}"
+        );
+        assert_eq!(state.rip, ENTRY, "{code:02X?}");
     }
 }
 

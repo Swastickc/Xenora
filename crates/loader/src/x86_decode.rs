@@ -8,8 +8,8 @@
 //! forms agree across them.
 
 use crate::x86_table::{
-    FORMS, GROUPS, ONE_BYTE, Op, THREE_BYTE_3A_66, THREE_BYTE_38_66, TWO_BYTE, TWO_BYTE_66,
-    TWO_BYTE_F2, TWO_BYTE_F3,
+    FORMS, GROUPS, ONE_BYTE, Op, THREE_BYTE_3A_66, THREE_BYTE_38_66, THREE_BYTE_38_F2, TWO_BYTE,
+    TWO_BYTE_66, TWO_BYTE_F2, TWO_BYTE_F3,
 };
 
 /// Architectural x86-64 instruction length limit, in bytes.
@@ -95,6 +95,9 @@ pub enum Encoding {
     /// XMM or memory from XMM `reg`.
     RmXmm,
     XmmRmImm,
+    /// XMM `reg` with XMM or memory, and lengths in RAX and RDX of the operand
+    /// size.
+    XmmRmLength,
     /// XMM `rm` shifted in place by an immediate.
     RmImmXmm,
     /// XMM `reg` from a general register or memory.
@@ -340,22 +343,23 @@ pub fn decode<E>(
     let two_byte = byte == 0x0F;
     let mut opcode = if two_byte { cursor.u8()? } else { byte };
     // 0F 38 and 0F 3A are escapes to maps with a third opcode byte. Every
-    // declared form there has 0x66 as its mandatory prefix, over which F2 and
-    // F3 take precedence.
-    let three_byte = match opcode {
-        0x38 if two_byte => Some(&THREE_BYTE_38_66),
-        0x3A if two_byte => Some(&THREE_BYTE_3A_66),
-        _ => None,
-    };
-    if three_byte.is_some() {
-        if !operand_size || rep || repne {
-            return Err(DecodeError::Unsupported(opcode));
-        }
+    // declared form there has 0x66 or, in the first map, F2 as its mandatory
+    // prefix. F2 and F3 take precedence over 0x66, which then is an operand size.
+    let three_byte = if two_byte && matches!(opcode, 0x38 | 0x3A) {
+        let table = match (opcode, repne) {
+            (0x38, true) => &THREE_BYTE_38_F2,
+            (0x38, false) if operand_size && !rep => &THREE_BYTE_38_66,
+            (0x3A, false) if operand_size && !rep => &THREE_BYTE_3A_66,
+            _ => return Err(DecodeError::Unsupported(opcode)),
+        };
+        operand_size &= repne;
         opcode = cursor.u8()?;
-    }
+        Some(table)
+    } else {
+        None
+    };
     let slot = usize::from(opcode);
     let table = if let Some(table) = three_byte {
-        operand_size = false;
         table
     } else if !two_byte {
         // On a one-byte opcode F3 is PAUSE (F3 90) or REP on a string form.

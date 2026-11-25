@@ -299,6 +299,23 @@ service ucrtbase.dll rename(from: ptr, to: ptr) -> i32
     ref stdio.h rename
     test file_positions_round_trip_and_files_are_removed_and_renamed
 
+# Temporary files (#493, last part of package 4 of #459).
+service ucrtbase.dll tmpfile() -> ptr
+    handler tmpfile
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails null with errno EMFILE at 64 streams, ENOSPC when the drive is full, ENOMEM when the FILE object cannot be allocated
+    ref stdio.h tmpfile
+    test temporary_files_are_uniquely_named_and_deleted_on_close
+
+service ucrtbase.dll tmpnam(buffer: ptr) -> ptr
+    handler tmpnam
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails never; a null buffer uses the static one; stops the guest for a buffer it cannot write
+    ref stdio.h tmpnam
+    test temporary_files_are_uniquely_named_and_deleted_on_close
+
 service ucrtbase.dll perror(message: ptr) -> void
     handler perror
     status partial

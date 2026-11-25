@@ -56,7 +56,7 @@ pass() {
         tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-sync.XXXXXX")
         login=$(gh api user -q .login)
         aq gather --repo "$upstream_repo" --no-prs > "$tmp/state.json"
-        git -C "$root" log --name-only --format='@%h' "$old..$new" |
+        git -C "$root" log --no-renames --name-only --format='@%h' "$old..$new" |
             awk '/^@/ {sha=substr($0,2); next} NF {print sha "\t" $0}' > "$tmp/files.tsv"
         aq touch --state "$tmp/state.json" --login "$login" < "$tmp/files.tsv" > "$tmp/hits.json"
         if [ "$(tr -d ' \n' < "$tmp/hits.json")" != "[]" ]; then

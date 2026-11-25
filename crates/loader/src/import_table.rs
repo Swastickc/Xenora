@@ -178,7 +178,7 @@ impl<F: Fn(u32) -> Option<usize>> Reader<'_, F> {
             match byte {
                 0 if name.is_empty() => return Err(malformed),
                 0 => return Ok(name),
-                0x21..=0x7E => name.push(char::from(byte)),
+                b' '..=b'~' => name.push(char::from(byte)),
                 _ => return Err(malformed),
             }
         }
@@ -358,4 +358,39 @@ fn collect_symbols<F: Fn(u32) -> Option<usize>>(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_names_keep_printable_bytes_and_reject_malformed_strings() {
+        let read = |bytes: &[u8]| {
+            Reader {
+                bytes,
+                rva_to_offset: |rva| Some(rva as usize),
+            }
+            .name(0)
+        };
+        assert_eq!(read(b"~name with spaces~\0").unwrap(), "~name with spaces~");
+
+        let error = ImportTableError::MalformedName { rva: 0 };
+        for bytes in [
+            &b"\0"[..],
+            b"no terminator",
+            b"tab\tname\0",
+            b"newline\nname\0",
+            b"del\x7fname\0",
+            b"nonascii\x80name\0",
+        ] {
+            assert_eq!(read(bytes), Err(error), "{bytes:?}");
+        }
+
+        let mut largest = vec![b'x'; MAX_NAME_LEN];
+        largest.push(0);
+        assert_eq!(read(&largest).unwrap().len(), MAX_NAME_LEN);
+        largest.insert(0, b' ');
+        assert_eq!(read(&largest), Err(error));
+    }
 }

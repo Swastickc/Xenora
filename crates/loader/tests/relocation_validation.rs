@@ -11,6 +11,8 @@ use xenora_loader::{GuestMemory, ParsedPe, RelocationError, apply_relocations};
 
 const PREFERRED: u64 = 0x1_4000_0000;
 const RELOC_FILE: usize = 0x400;
+const COFF_CHARACTERISTICS: usize = 0x44 + 18;
+const RELOCS_STRIPPED: u16 = 1;
 
 /// .text at RVA 0x1000 (file 0x200) holding two pointers, .reloc at RVA 0x2000 (file 0x400).
 /// `NumberOfRvaAndSizes` and the relocation table bytes are parameters.
@@ -79,7 +81,7 @@ fn load(bytes: &[u8], base: u64) -> (ParsedPe, GuestMemory) {
         memory
             .map_region_with_data(
                 base + u64::from(s.virtual_address),
-                0x200,
+                raw.len(),
                 s.permissions,
                 raw,
             )
@@ -151,6 +153,71 @@ fn preferred_base_leaves_targets_unchanged() {
         memory.read_u64_bypass(PREFERRED + 0x1010).unwrap(),
         PREFERRED + 0x1100
     );
+}
+
+#[test]
+fn fixed_image_at_its_preferred_base_needs_no_relocations() {
+    let mut bytes = build(16, &[], 0);
+    bytes[COFF_CHARACTERISTICS..COFF_CHARACTERISTICS + 2]
+        .copy_from_slice(&RELOCS_STRIPPED.to_le_bytes());
+    let (result, memory) = relocate(&bytes, PREFERRED);
+    let report = result.expect("load at preferred base");
+    assert_eq!(report.delta, 0);
+    assert_eq!(report.applied_dir64, 0);
+    assert_eq!(
+        memory.read_u64_bypass(PREFERRED + 0x1010).unwrap(),
+        PREFERRED + 0x1100
+    );
+}
+
+#[test]
+fn fixed_image_rejects_a_different_base_before_writing_targets() {
+    // A relocation directory cannot override the fixed-base flag.
+    for table in [Vec::new(), standard_table()] {
+        let mut bytes = build(16, &table, table.len() as u32);
+        bytes[COFF_CHARACTERISTICS..COFF_CHARACTERISTICS + 2]
+            .copy_from_slice(&RELOCS_STRIPPED.to_le_bytes());
+        for base in [PREFERRED + 0x10_000, PREFERRED - 0x10_000] {
+            let (result, memory) = relocate(&bytes, base);
+            assert_eq!(
+                result.unwrap_err(),
+                RelocationError::FixedImageBase {
+                    preferred_base: PREFERRED,
+                    loaded_base: base,
+                }
+            );
+            assert_eq!(
+                memory.read_u64_bypass(base + 0x1010).unwrap(),
+                PREFERRED + 0x1100
+            );
+            assert_eq!(
+                memory.read_u64_bypass(base + 0x1018).unwrap(),
+                PREFERRED + 0x2000
+            );
+        }
+    }
+}
+
+#[test]
+fn delay_import_fixture_rebases_all_three_initial_iat_pointers() {
+    let bytes = include_bytes!("../../../fixtures/pe/delay-imports.exe");
+    let base = PREFERRED + 0x80_000;
+    let (result, memory) = relocate(bytes, base);
+    let report = result.expect("rebase delay-import fixture");
+    assert_eq!(report.delta, 0x80_000);
+    assert_eq!(report.applied_dir64, 3);
+    assert_eq!(report.skipped_absolute, 1);
+    assert_eq!(report.total_entries, 4);
+    for (slot_rva, stub_rva) in [(0x3000, 0x1010), (0x3008, 0x1018), (0x3020, 0x1020)] {
+        assert_eq!(
+            memory.read_u64_bypass(base + slot_rva).unwrap(),
+            base + stub_rva,
+            "delay IAT slot RVA {slot_rva:#x}"
+        );
+    }
+    for terminator_rva in [0x3010, 0x3028] {
+        assert_eq!(memory.read_u64_bypass(base + terminator_rva).unwrap(), 0);
+    }
 }
 
 #[test]

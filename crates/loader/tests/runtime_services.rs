@@ -1452,6 +1452,49 @@ fn stdin_lines_follow_iso_c_at_the_edges() {
     assert_eq!(guest.errno(), 22);
 }
 
+/// `tmpnam` and `tmpfile` (#493, last part). The expectations are the
+/// Microsoft pages for the two functions: names that hold no file, a
+/// binary stream for reading and writing, and deletion when it closes.
+#[test]
+fn temporary_files_are_uniquely_named_and_deleted_on_close() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "tmp1", b"taken");
+    // The first generated name skips the file the drive already holds.
+    assert_eq!(guest.call("tmpnam", &[LINE]), LINE);
+    let mut name = [0u8; 8];
+    guest.memory.read_bytes(LINE, &mut name).unwrap();
+    assert_eq!(&name[..5], b"tmp2\0", "{name:?}");
+    // The next is different again; a null argument reuses one static
+    // buffer, as the CRT does.
+    assert_eq!(guest.call("tmpnam", &[LINE]), LINE);
+    guest.memory.read_bytes(LINE, &mut name).unwrap();
+    assert_eq!(&name[..5], b"tmp3\0", "{name:?}");
+    let first_static = guest.call("tmpnam", &[0]);
+    assert_ne!(first_static, 0);
+    assert_eq!(
+        guest.call("tmpnam", &[0]),
+        first_static,
+        "one static buffer"
+    );
+    guest.memory.read_bytes(first_static, &mut name).unwrap();
+    assert_eq!(&name[..5], b"tmp5\0", "{name:?}");
+
+    // `tmpfile` reads and writes like any binary stream...
+    let file = guest.call("tmpfile", &[]);
+    assert_ne!(file, 0);
+    write(&mut guest, file, b"temp-bytes");
+    assert_eq!(line(&mut guest, file, 16), None, "at the end after writing");
+    close(&mut guest, file);
+    // ...and closing it deletes its file: whatever name it used is free
+    // for the next temporary file, whose name repeats it.
+    let again = guest.call("tmpfile", &[]);
+    assert_ne!(again, 0);
+    close(&mut guest, again);
+    // Unwritable name buffers stop the guest with a fault.
+    let exit = guest.run("tmpnam", &[0x9_0000_0000]).1;
+    assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+}
+
 #[test]
 fn formatted_output_refuses_what_it_cannot_print_correctly() {
     let (mut guest, [input, out, _]) = stdio_guest();

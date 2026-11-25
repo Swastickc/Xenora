@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 114 |
-| Generated adapters | 114 |
-| Unique handler implementations | 114 |
-| Implemented | 22 |
+| Services with a declared ABI | 116 |
+| Generated adapters | 116 |
+| Unique handler implementations | 116 |
+| Implemented | 24 |
 | Partial | 90 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 114 |
-| API-set aliases (not services) | 114 |
+| Conformance-tested through guest dispatch | 116 |
+| API-set aliases (not services) | 116 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -51,6 +51,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fsetpos` | `(stream: ptr, position: ptr) -> i32` | partial | -1 with errno EINVAL for a null argument or a negative position; stops the guest for a standard stream, a pointer that is no stream, or a position it cannot read |
 | `ucrtbase.dll!remove` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT for a missing or rejected name, EACCES for a directory, EINVAL for a null or empty name |
 | `ucrtbase.dll!rename` | `(from: ptr, to: ptr) -> i32` | partial | -1 with errno ENOENT when the old name holds nothing, EACCES when the new name exists or its directory does not, EINVAL for a null or rejected name; stops the guest for a directory |
+| `ucrtbase.dll!tmpfile` | `() -> ptr` | implemented | null with errno EMFILE at 64 streams, ENOSPC when the drive is full, ENOMEM when the FILE object cannot be allocated |
+| `ucrtbase.dll!tmpnam` | `(buffer: ptr) -> ptr` | implemented | never; a null buffer uses the static one; stops the guest for a buffer it cannot write |
 | `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |
 | `ucrtbase.dll!fputc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!strerror` | `(code: i32) -> ptr` | partial | never; the message is valid until the next call |

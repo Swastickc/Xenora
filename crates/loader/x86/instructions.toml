@@ -21,7 +21,7 @@
 # rm = N requires the ModRM r/m field to be N. It needs register_only, so the
 # form matches exactly one ModRM byte. At most one form per opcode and digit.
 #
-# prefix is a mandatory prefix: "66", "f3" or "f2", and "66" in maps 0f38 and 0f3a. SSE forms use size x (XMM)
+# prefix is a mandatory prefix: "66", "f3" or "f2", "66" or "f2" in map 0f38 and "66" in map 0f3a. SSE forms use size x (XMM)
 # and give the ModRM operand width in src: x = 16 bytes, q = 8, d = 4, w = 2.
 # A 16-byte memory operand must be aligned unless unaligned = true.
 #
@@ -275,6 +275,12 @@ roundss = { faults = true, ref = "sdm ROUNDSS" }
 roundsd = { faults = true, ref = "sdm ROUNDSD" }
 dpps = { faults = true, ref = "sdm DPPS" }
 dppd = { faults = true, ref = "sdm DPPD" }
+pcmpgtq = { ref = "sdm PCMPGTQ" }
+pcmpestrm = { writes = "cf zf sf of pf af", ref = "sdm PCMPESTRM" }
+pcmpestri = { writes = "cf zf sf of pf af", ref = "sdm PCMPESTRI" }
+pcmpistrm = { writes = "cf zf sf of pf af", ref = "sdm PCMPISTRM" }
+pcmpistri = { writes = "cf zf sf of pf af", ref = "sdm PCMPISTRI" }
+crc32 = { ref = "sdm CRC32" }
 
 # Floating point. Every form can raise a SIMD floating-point exception.
 sqrtps = { faults = true, ref = "sdm SQRTPS" }
@@ -1568,6 +1574,76 @@ enc = "xmm_rm_imm"
 size = "x"
 src = "x"
 imm = "ub"
+
+[[form]]
+op = "pcmpgtq"
+map = "0f38"
+prefix = "66"
+opcode = 0x37
+enc = "xmm_rm"
+size = "x"
+src = "x"
+
+[[form]]
+op = "pcmpestrm"
+map = "0f3a"
+prefix = "66"
+opcode = 0x60
+enc = "xmm_rm_length"
+size = "y"
+src = "x"
+imm = "ub"
+unaligned = true
+
+[[form]]
+op = "pcmpestri"
+map = "0f3a"
+prefix = "66"
+opcode = 0x61
+enc = "xmm_rm_length"
+size = "y"
+src = "x"
+imm = "ub"
+unaligned = true
+
+[[form]]
+op = "pcmpistrm"
+map = "0f3a"
+prefix = "66"
+opcode = 0x62
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+unaligned = true
+
+[[form]]
+op = "pcmpistri"
+map = "0f3a"
+prefix = "66"
+opcode = 0x63
+enc = "xmm_rm_imm"
+size = "x"
+src = "x"
+imm = "ub"
+unaligned = true
+
+[[form]]
+op = "crc32"
+map = "0f38"
+prefix = "f2"
+opcode = 0xF0
+enc = "reg_rm"
+size = "v"
+src = "b"
+
+[[form]]
+op = "crc32"
+map = "0f38"
+prefix = "f2"
+opcode = 0xF1
+enc = "reg_rm"
+size = "v"
 
 # Groups whose digits select an operation: [opcode, size, immediate, encoding].
 [[group]]

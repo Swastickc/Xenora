@@ -32,6 +32,7 @@ pub mod x86_decode;
 pub mod x86_exec;
 pub mod x86_float;
 pub mod x86_simd;
+pub mod x86_strings;
 #[rustfmt::skip]
 pub mod x86_table;
 

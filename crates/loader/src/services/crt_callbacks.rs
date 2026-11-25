@@ -55,40 +55,72 @@ impl Comparator {
     }
 }
 
-/// Binary insertion sort over element indices. Elements stay in place while
-/// the comparator runs and are permuted once at the end.
+/// Bottom-up stable merge sort over original element indices. Each pass
+/// appends at most one index per element, without shifting an existing run.
+/// Elements stay at their original guest addresses until the final write.
 struct Sort {
     base: u64,
     width: u64,
-    count: u64,
     compare: Comparator,
-    sorted: Vec<u64>,
-    next: u64,
-    low: usize,
-    high: usize,
+    indices: Vec<u32>,
+    merged: Vec<u32>,
+    run_len: usize,
+    left: usize,
+    middle: usize,
+    right: usize,
+    end: usize,
 }
 
 impl Sort {
-    fn element(&self, index: u64) -> u64 {
-        self.base + index * self.width
+    fn element(&self, index: u32) -> u64 {
+        self.base + u64::from(index) * self.width
     }
 
     fn probe(&self) -> CallbackStep {
-        let middle = (self.low + self.high) / 2;
-        self.compare
-            .call(self.element(self.next), self.element(self.sorted[middle]))
+        self.compare.call(
+            self.element(self.indices[self.left]),
+            self.element(self.indices[self.right]),
+        )
     }
 
     fn permute(&self, memory: &mut GuestMemory) -> Result<(), ExitReason> {
-        let mut original = vec![0; (self.count * self.width) as usize];
-        memory.read_bytes(self.base, &mut original).map_err(fault)?;
         let width = self.width as usize;
+        let mut original = vec![0; self.indices.len() * width];
+        memory.read_bytes(self.base, &mut original).map_err(fault)?;
         let mut ordered = Vec::with_capacity(original.len());
-        for &index in &self.sorted {
+        for &index in &self.indices {
             let start = index as usize * width;
             ordered.extend_from_slice(&original[start..start + width]);
         }
         memory.write_bytes(self.base, &ordered).map_err(fault)
+    }
+
+    /// Finish pairs with an exhausted run, then prepare the next comparison.
+    fn advance(&mut self, memory: &mut GuestMemory) -> Result<CallbackStep, ExitReason> {
+        let count = self.indices.len();
+        while self.left == self.middle || self.right == self.end {
+            self.merged
+                .extend_from_slice(&self.indices[self.left..self.middle]);
+            self.merged
+                .extend_from_slice(&self.indices[self.right..self.end]);
+
+            let mut start = self.end;
+            if start == count {
+                std::mem::swap(&mut self.indices, &mut self.merged);
+                self.run_len *= 2;
+                if self.run_len >= count {
+                    self.permute(memory)?;
+                    return Ok(CallbackStep::Return(0));
+                }
+                self.merged.clear();
+                start = 0;
+            }
+            self.left = start;
+            self.middle = (start + self.run_len).min(count);
+            self.right = self.middle;
+            self.end = (self.middle + self.run_len).min(count);
+        }
+        Ok(self.probe())
     }
 }
 
@@ -99,25 +131,15 @@ impl CallbackTask for Sort {
         _: u64,
         memory: &mut GuestMemory,
     ) -> Result<CallbackStep, ExitReason> {
-        let middle = (self.low + self.high) / 2;
-        // Inserting after equal elements keeps equal keys in input order.
-        if ordering(result) < 0 {
-            self.high = middle;
+        // Earlier runs win ties, preserving the order of equal keys.
+        let cursor = if ordering(result) <= 0 {
+            &mut self.left
         } else {
-            self.low = middle + 1;
-        }
-        if self.low < self.high {
-            return Ok(self.probe());
-        }
-        self.sorted.insert(self.low, self.next);
-        self.next += 1;
-        if self.next == self.count {
-            self.permute(memory)?;
-            return Ok(CallbackStep::Return(0));
-        }
-        self.low = 0;
-        self.high = self.sorted.len();
-        Ok(self.probe())
+            &mut self.right
+        };
+        self.merged.push(self.indices[*cursor]);
+        *cursor += 1;
+        self.advance(memory)
     }
 }
 
@@ -146,12 +168,15 @@ fn start_sort(
     let sort = Sort {
         base,
         width,
-        count,
         compare,
-        sorted: vec![0],
-        next: 1,
-        low: 0,
-        high: 1,
+        // The byte budget and positive width also bound the index count.
+        indices: (0..count as u32).collect(),
+        merged: Vec::with_capacity(count as usize),
+        run_len: 1,
+        left: 0,
+        middle: 1,
+        right: 1,
+        end: 2,
     };
     let CallbackStep::Call { entry, args } = sort.probe() else {
         unreachable!("a probe always calls the comparator");

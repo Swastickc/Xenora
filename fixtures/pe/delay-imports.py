@@ -29,6 +29,7 @@ NAMES_A, NAMES_B = RDATA + 0x100, RDATA + 0x118
 DELAY_DLL_A, DELAY_DLL_B = RDATA + 0x130, RDATA + 0x150
 DELAY_NAME_A, DELAY_NAME_B = RDATA + 0x170, RDATA + 0x190
 DELAY_DIRECTORY = RDATA + 0x200
+RELOC_DIRECTORY = RDATA + 0x300
 
 # Delay-load address tables and module handles, in writable .data.
 DELAY_IAT_A, DELAY_IAT_B = DATA, DATA + 0x20
@@ -54,21 +55,22 @@ def fixture():
     data[:2] = b"MZ"
     pack_into("<I", data, 0x3C, 0x80)
     data[0x80:0x84] = b"PE\0\0"
-    # AMD64, three sections, 240-byte optional header; relocations stripped,
-    # executable, large-address-aware.
-    pack_into("<HHIIIHH", data, 0x84, 0x8664, 3, 0, 0, 0, 240, 0x23)
+    # AMD64, three sections, 240-byte optional header; executable and
+    # large-address-aware.
+    pack_into("<HHIIIHH", data, 0x84, 0x8664, 3, 0, 0, 0, 240, 0x22)
     opt = 0x98
     pack_into("<H", data, opt, 0x20B)
     pack_into("<III", data, opt + 4, 0x200, 0x600, 0)
     pack_into("<IIQII", data, opt + 16, TEXT, TEXT, BASE, 0x1000, 0x200)
     pack_into("<HHHHHH", data, opt + 40, 6, 0, 0, 0, 6, 0)
     pack_into("<II", data, opt + 56, 0x4000, 0x400)
-    # Console subsystem; NX compatible at a fixed base.
+    # Console subsystem; NX compatible.
     pack_into("<HH", data, opt + 68, 3, 0x100)
     pack_into("<QQQQII", data, opt + 72, 0x10000, 0x1000, 0x10000, 0x1000, 0, 16)
-    # Import table, import address table and delay import descriptor.
+    # Import table, base relocations, import address table and delay imports.
     for index, rva, size in (
         (1, IMPORT_DIRECTORY, 40),
+        (5, RELOC_DIRECTORY, 16),
         (12, IAT, 24),
         (13, DELAY_DIRECTORY, 96),
     ):
@@ -110,6 +112,11 @@ def fixture():
     text(DELAY_NAME_B + 2, b"DelayedBeta")
     put(DELAY_IAT_A, "<QQQ", BASE + STUBS[0], BASE + STUBS[1], 0)
     put(DELAY_IAT_B, "<QQ", BASE + STUBS[2], 0)
+
+    # One page block. The three DIR64 entries relocate the absolute IAT
+    # pointers, and the ABSOLUTE entry pads the block to a 4-byte boundary.
+    # The descriptors and name tables already use RVAs.
+    put(RELOC_DIRECTORY, "<II4H", DATA, 16, 0xA000, 0xA008, 0xA020, 0)
     return data
 
 

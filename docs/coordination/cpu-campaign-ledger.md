@@ -2,6 +2,90 @@
 
 Evidence below is local to the named host unless stated. Nothing here is independently reviewed yet.
 
+## Runtime campaign checkpoint — 25 November 2026
+
+Baseline: main `c76e974`. [The runtime survey][survey] provides the earlier
+import census and package order. This checkpoint records merged work, active
+owners and gaps that still need a focused issue or original guest fixture.
+
+| Area | Merged on main | Open work and dependencies |
+| --- | --- | --- |
+| Process and thread lifecycle | [#339] and [#449] added the guest scheduler and blocking operations. [#469] added startup info and command-line services. [#480] added partial process termination, exit status, stack bounds and thread group affinity. | Full process semantics, feature reporting and additional handle lifecycle cases still need coverage. Keep process termination scoped to the guest. |
+| Synchronization | Unnamed events, mutexes and semaphores, per-thread ownership, waits, and scheduler-backed critical sections, slim reader/writer locks and condition variables. | [#512] covers extended semaphore creation and requested access. Named objects, cancellation, deadlock diagnostics and a memory model for concurrent atomics remain separate work. |
+| Virtual memory | Guest allocation, release, heap and limited protection and query operations. | [#203] tracks reservation, commit and decommit. Coordinate allocation accounting with [#207]. Extended queries, local allocation and guard-page semantics still need scoped work. |
+| Module loading | [#490] added module identity, module-handle lookup and reference management for the executable and built-ins. | [#312] includes synthetic module filenames. Arbitrary mapped DLLs, dependency graphs, forwarded exports, DLL initialization and DLL thread-local storage still need a separately scoped loader contract. |
+| C and C++ runtime | [#452] runs original statically linked C++ exception fixtures. [#460], [#486], [#489], [#492] and [#495] cover floating-point output, math, buffer formatting, bounded stdin and some file positioning. | [#312] owns overlapping CRT changes. C time [#502], wide conversions [#505] and wide streams [#508] have open PRs. General locale support and dynamically linked C++ compatibility remain open. |
+| Exceptions and unwinding | [#452] and [#461] added synthetic C++ exceptions and conversion of selected guest CPU faults to structured exceptions. [#484] preserves explicit process exits from TLS in startup reports. | Swastickc owns [#476] and its [draft #479][#479]. The normal TLS callback return regression is reported there. Exit unwinds, nested exceptions and collided unwinds remain unsupported in that draft. |
+| System information and localization | The guest machine profile, performance counters, system time and calendar conversions are bounded guest services. | [#312] includes processor features, topology and UTC time zone. A broader locale, encoding, and Win32 message/error translation pass still needs a scoped issue and fixtures. |
+| Filesystem | Main has a confined synthetic drive and the first [#493] file batch via [#495]. | [#312] is still conflicting and includes host mounts, metadata, timestamps and moves. [#498], [#500] and [#501] cover further CRT file operations. Preserve existing drive and quota boundaries. |
+| Public platform services | The [guest graphics command path](../runtime/guest-graphics.md) exercises a bounded synthetic D3D-style surface on native Metal. | Window/message dispatch, COM and registry services still need defined guest models. [#312] includes guest-only Winsock loopback. [#306] tracks the native audio path. |
+| Coverage and reporting | The generated typed list and the live import probe have different scopes. Both distinguish stubs from functional handlers. | catminou4 owns [#465]. Coordinate with the different live registry report in [#312]. A wanted-list inventory, provenance, explicit status checks, and a stale-report gate are still tracked in #465. |
+| Guest CPU | [#288] established the shared decoder and SSE2 basis. [#482], [#488] and [#497] added SSSE3 and SSE4.1. | jelly013 has SSE4.2 and further ARM64 lowering in [#499]. AVX, memory ordering [#199], broader floating-point control and exact decoding of unsupported forms still need their own evidence. |
+
+### Verification and coordination
+
+- On Apple M2 Max, macOS 27.2.1 and Rust 1.100.0, the previous main
+  revision `ece8991` passed seven original C exception tests and both C++
+  exception tests. The same main with [#479] applied passed eleven C
+  exception tests and failed both C++ tests with guest status `0xc0000005`.
+  The same eleven C passes and two C++ failures reproduced when [#479]
+  was applied to `c76e974`. Three original CLI startup-report cases
+  passed on the earlier combined tree.
+- With LLDB, the uncaught C++ fixture reached the TLS return address
+  `0xffffffffffff0000` before entry. [#479] routed that fetch through the
+  exception dispatcher and latched a process exit. Stopping at the expected
+  callback return before fetch is the proposed prerequisite. The DBT file
+  overlaps [#499], so the fix needs coordination with both contributors.
+- [#519] adds the two canonical services and four API-set aliases for
+  [#512]. The original guest fixture passed at `-O0`, `-O1`, `-O2`
+  and `-Os`. The workspace run for #519 passed 1,191 tests with 39
+  ignored. The PR is open.
+- Original cross-family fixtures exist for the
+  [hosted multithreaded C++ program][#438] and the
+  [guest-to-Metal workload][#433]. The campaign still needs additional
+  combinations of module loading, exceptions, threading and file operations.
+  Evidence applies to the named synthetic programs. It does not establish
+  Xbox hardware or commercial game execution.
+
+[survey]: https://github.com/ranveersoni98/Xenora/issues/459
+[#199]: https://github.com/ranveersoni98/Xenora/issues/199
+[#203]: https://github.com/ranveersoni98/Xenora/issues/203
+[#207]: https://github.com/ranveersoni98/Xenora/issues/207
+[#288]: https://github.com/ranveersoni98/Xenora/pull/288
+[#306]: https://github.com/ranveersoni98/Xenora/issues/306
+[#312]: https://github.com/ranveersoni98/Xenora/pull/312
+[#339]: https://github.com/ranveersoni98/Xenora/pull/339
+[#433]: https://github.com/ranveersoni98/Xenora/pull/433
+[#438]: https://github.com/ranveersoni98/Xenora/pull/438
+[#449]: https://github.com/ranveersoni98/Xenora/pull/449
+[#452]: https://github.com/ranveersoni98/Xenora/pull/452
+[#460]: https://github.com/ranveersoni98/Xenora/pull/460
+[#461]: https://github.com/ranveersoni98/Xenora/pull/461
+[#465]: https://github.com/ranveersoni98/Xenora/issues/465
+[#469]: https://github.com/ranveersoni98/Xenora/pull/469
+[#476]: https://github.com/ranveersoni98/Xenora/issues/476
+[#479]: https://github.com/ranveersoni98/Xenora/pull/479
+[#480]: https://github.com/ranveersoni98/Xenora/pull/480
+[#482]: https://github.com/ranveersoni98/Xenora/pull/482
+[#484]: https://github.com/ranveersoni98/Xenora/pull/484
+[#486]: https://github.com/ranveersoni98/Xenora/pull/486
+[#488]: https://github.com/ranveersoni98/Xenora/pull/488
+[#489]: https://github.com/ranveersoni98/Xenora/pull/489
+[#490]: https://github.com/ranveersoni98/Xenora/pull/490
+[#492]: https://github.com/ranveersoni98/Xenora/pull/492
+[#493]: https://github.com/ranveersoni98/Xenora/issues/493
+[#495]: https://github.com/ranveersoni98/Xenora/pull/495
+[#497]: https://github.com/ranveersoni98/Xenora/pull/497
+[#498]: https://github.com/ranveersoni98/Xenora/pull/498
+[#499]: https://github.com/ranveersoni98/Xenora/pull/499
+[#500]: https://github.com/ranveersoni98/Xenora/pull/500
+[#501]: https://github.com/ranveersoni98/Xenora/pull/501
+[#502]: https://github.com/ranveersoni98/Xenora/pull/502
+[#505]: https://github.com/ranveersoni98/Xenora/pull/505
+[#508]: https://github.com/ranveersoni98/Xenora/pull/508
+[#512]: https://github.com/ranveersoni98/Xenora/issues/512
+[#519]: https://github.com/ranveersoni98/Xenora/pull/519
+
 ## Continuation checkpoint
 
 - Continuation branch base: `0836936` (tip of `feat/cpu-runtime-expansion`), merged with main `d22f046` (#272, #273, #274) as `56febbb`. The merge had no conflicts.

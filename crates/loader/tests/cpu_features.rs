@@ -230,7 +230,6 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
         ("SSSE3", 1, ECX, 9, &[0x0F, 0x38, 0x00, 0xC1]), // pshufb mm0, mm1
         ("FMA", 1, ECX, 12, &[0xC4, 0xE2, 0x71, 0x98, 0xC2]), // vfmadd132ps xmm0, xmm1, xmm2
         ("CMPXCHG16B", 1, ECX, 13, &[0x48, 0x0F, 0xC7, 0x0E]), // cmpxchg16b [rsi]
-        ("SSE4.2", 1, ECX, 20, &[0xF2, 0x0F, 0x38, 0xF1, 0xC1]), // crc32 eax, ecx
         ("MOVBE", 1, ECX, 22, &[0x0F, 0x38, 0xF0, 0x06]), // movbe eax, [rsi]
         ("AESNI", 1, ECX, 25, &[0x66, 0x0F, 0x38, 0xDC, 0xC1]), // aesenc xmm0, xmm1
         ("XSAVE", 1, ECX, 26, &[0x0F, 0x01, 0xD0]),      // xgetbv
@@ -268,13 +267,15 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
     }
 }
 
-/// SDM Vol. 1, 12.12.2: an application checks for SSE, SSE2, SSE3 and SSSE3 before
-/// SSE4.1. Those are not complete, so the bit stays clear although every SSE4.1
-/// instruction runs. Each has a fixture that the tests of
+/// SDM Vol. 1, 12.12: an application checks for SSE, SSE2, SSE3 and SSSE3 before
+/// SSE4.1, and for SSE, SSE2, SSSE3 and SSE4.1 before most of SSE4.2. Those are not
+/// complete, so the two bits stay clear although every instruction of both runs.
+/// Each has a fixture that the tests of `x86_integer.rs`,
 /// `x86_vector.rs` or `x86_float.rs` run in both engines.
 #[test]
-fn sse4_1_is_complete_but_unreported_while_its_prerequisites_are() {
+fn sse4_is_complete_but_unreported_while_its_prerequisites_are() {
     let fixtures = [
+        include_str!("x86/integer.txt"),
         include_str!("x86/vector.txt"),
         include_str!("x86/float.txt"),
     ]
@@ -285,13 +286,15 @@ fn sse4_1_is_complete_but_unreported_while_its_prerequisites_are() {
             text.split(' ').next() == Some(name) && text.contains(" ptr ") == memory
         })
     };
-    // Every instruction the SDM assigns to the feature. MOVNTDQA has no register
-    // form; PEXTRW belongs to it only as a store.
+    // Every instruction the SDM assigns to the features; POPCNT has its own bit,
+    // which is reported. MOVNTDQA has no register
+    // form; PEXTRW belongs to SSE4.1 only as a store.
     let names = "blendpd blendps blendvpd blendvps dppd dpps extractps insertps mpsadbw packusdw \
                  pblendvb pblendw pcmpeqq pextrb pextrd pextrq phminposuw pinsrb pinsrd pinsrq \
                  pmaxsb pmaxsd pmaxud pmaxuw pminsb pminsd pminud pminuw pmovsxbw pmovsxbd \
                  pmovsxbq pmovsxwd pmovsxwq pmovsxdq pmovzxbw pmovzxbd pmovzxbq pmovzxwd \
-                 pmovzxwq pmovzxdq pmuldq pmulld ptest roundpd roundps roundsd roundss";
+                 pmovzxwq pmovzxdq pmuldq pmulld ptest roundpd roundps roundsd roundss \
+                 crc32 pcmpestri pcmpestrm pcmpgtq pcmpistri pcmpistrm";
     for name in names.split_whitespace() {
         assert!(has(name, false) && has(name, true), "{name}");
     }
@@ -300,9 +303,9 @@ fn sse4_1_is_complete_but_unreported_while_its_prerequisites_are() {
     let [_, _, ecx, edx] = cpuid(1, 0);
     let prerequisites = [edx >> 25, edx >> 26, ecx, ecx >> 9].map(|bit| bit & 1);
     assert_eq!(
-        (prerequisites, ecx >> 19 & 1),
+        (prerequisites, ecx >> 19 & 3),
         ([0; 4], 0),
-        "SSE, SSE2, SSE3 and SSSE3 come before SSE4.1"
+        "SSE, SSE2, SSE3 and SSSE3 come before SSE4"
     );
 }
 

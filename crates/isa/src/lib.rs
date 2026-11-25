@@ -164,6 +164,19 @@ pub enum Instruction {
     BufferStoreDword { data: u8, index: u8, resource: u8 },
     /// `s_waitcnt vmcnt(0)`.
     WaitLoad,
+    /// SMEM `s_buffer_load_dword`, `_x2` and `_x4`: `dwords` consecutive words
+    /// into SGPRs from `dst`, at a byte offset from a buffer descriptor.
+    ScalarBufferLoad {
+        dst: u8,
+        resource: u8,
+        /// Unsigned 20-bit immediate byte offset.
+        offset: u32,
+        /// SGPR holding a further unsigned byte offset; `None` encodes `null`.
+        soffset: Option<u8>,
+        dwords: u8,
+    },
+    /// `s_waitcnt lgkmcnt(0)`.
+    WaitScalarLoad,
     /// `s_waitcnt_vscnt null, 0`.
     WaitStore,
     /// VOP1 unmodified 32-bit vector move.
@@ -306,7 +319,10 @@ impl Instruction {
         match self {
             Self::BufferLoadDword { .. } => "buffer_load_dword",
             Self::BufferStoreDword { .. } => "buffer_store_dword",
-            Self::WaitLoad => "s_waitcnt",
+            Self::WaitLoad | Self::WaitScalarLoad => "s_waitcnt",
+            Self::ScalarBufferLoad { dwords: 1, .. } => "s_buffer_load_dword",
+            Self::ScalarBufferLoad { dwords: 2, .. } => "s_buffer_load_dwordx2",
+            Self::ScalarBufferLoad { .. } => "s_buffer_load_dwordx4",
             Self::WaitStore => "s_waitcnt_vscnt",
             Self::MoveB32 { .. } => "v_mov_b32_e32",
             Self::VectorUnary { op, .. } => op.assembly_name(),
@@ -362,6 +378,28 @@ impl fmt::Display for Instruction {
                 )
             }
             Self::WaitLoad => formatter.write_str(" vmcnt(0)"),
+            Self::WaitScalarLoad => formatter.write_str(" lgkmcnt(0)"),
+            Self::ScalarBufferLoad {
+                dst,
+                resource,
+                offset,
+                soffset,
+                dwords,
+            } => {
+                let last = u16::from(resource) + 3;
+                if dwords == 1 {
+                    write!(formatter, " s{dst}")?;
+                } else {
+                    write!(formatter, " s[{dst}:{}]", u16::from(dst + dwords) - 1)?;
+                }
+                write!(formatter, ", s[{resource}:{last}], ")?;
+                match soffset {
+                    None if offset == 0 => formatter.write_str("null"),
+                    None => write!(formatter, "{offset:#x}"),
+                    Some(register) if offset == 0 => write!(formatter, "s{register}"),
+                    Some(register) => write!(formatter, "s{register} offset:{offset:#x}"),
+                }
+            }
             Self::WaitStore => formatter.write_str(" null, 0"),
             Self::MoveB32 { dst, src } | Self::VectorUnary { dst, src, .. } => {
                 write!(formatter, " v{dst}, {src}")

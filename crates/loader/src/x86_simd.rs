@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Semantic primitives for the SSE to SSE4.1 moves and packed integer forms.
+//! Semantic primitives for the SSE to SSE4.2 moves and packed integer forms.
 //!
 //! Lane 0 is the least significant. Every instruction is all-or-nothing and only
-//! PTEST changes RFLAGS. Floating-point arithmetic is in [`crate::x86_float`].
+//! PTEST changes RFLAGS here. Floating-point arithmetic is in
+//! [`crate::x86_float`], the string compares are in [`crate::x86_strings`].
 
 use crate::cpu::{CpuState, ExitReason, Mxcsr, RFlags};
 use crate::memory::GuestMemory;
@@ -12,6 +13,7 @@ use crate::x86_exec::{
     address, canonical_access, read_mem, read_reg, rm_operand, write_mem, write_reg,
 };
 use crate::x86_float;
+use crate::x86_strings;
 use crate::x86_table::{FORMS, Op};
 
 fn lane_mask(bits: u32) -> u128 {
@@ -270,6 +272,7 @@ fn packed(op: Op, a: u128, b: u128) -> u128 {
         }),
         Op::Pmulld => map(a, b, 32, u64::wrapping_mul),
         Op::Pcmpeqq => map(a, b, 64, |x, y| all_ones(x == y)),
+        Op::Pcmpgtq => map_signed(a, b, 64, |x, y| all_ones(x > y) as i64),
         Op::Packusdw => pack(a, b, 32, saturate_unsigned),
         Op::Pminsb => map_signed(a, b, 8, i64::min),
         Op::Pmaxsb => map_signed(a, b, 8, i64::max),
@@ -446,6 +449,9 @@ pub(crate) fn execute(
                     write_mem(memory, address(cpu, &operand), width, value)?;
                 }
             }
+        }
+        (Op::Pcmpestri | Op::Pcmpestrm | Op::Pcmpistri | Op::Pcmpistrm, _) => {
+            x86_strings::execute(cpu, memory, insn)?;
         }
         (Op::Ptest, _) => {
             let source = read_rm(cpu, memory, insn)?;

@@ -35,7 +35,8 @@ PREFIXES = {"", "66", "f3", "f2"}
 # table, so a form cannot use it.
 TABLES = {("1", ""): "ONE_BYTE", ("0f", ""): "TWO_BYTE", ("0f", "66"): "TWO_BYTE_66",
           ("0f", "f3"): "TWO_BYTE_F3", ("0f", "f2"): "TWO_BYTE_F2",
-          ("0f38", "66"): "THREE_BYTE_38_66", ("0f3a", "66"): "THREE_BYTE_3A_66"}
+          ("0f38", "66"): "THREE_BYTE_38_66", ("0f38", "f2"): "THREE_BYTE_38_F2",
+          ("0f3a", "66"): "THREE_BYTE_3A_66"}
 MAPS = {opcode_map for opcode_map, _ in TABLES}
 SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None", "x": "Xmm"}
 IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word", "ub": "Byte",
@@ -67,6 +68,8 @@ ENCS = {
     "xmm_rm": ("XmmRm", True, {""}),
     "rm_xmm": ("RmXmm", True, {""}),
     "xmm_rm_imm": ("XmmRmImm", True, {"ub"}),
+    # The operand size is that of the length registers.
+    "xmm_rm_length": ("XmmRmLength", True, {"ub"}),
     "rm_imm_xmm": ("RmImmXmm", True, {"ub"}),
     "xmm_gpr": ("XmmGpr", True, {""}),
     "gpr_xmm": ("GprXmm", True, {""}),
@@ -78,7 +81,9 @@ ENCS = {
 # Encodings whose ModRM operand is the destination, so LOCK can apply to it.
 RM_DESTINATIONS = {"rm_reg", "rm", "rm_imm", "rm_one", "rm_cl", "rm_reg_imm", "rm_reg_cl"}
 # Encodings whose ModRM operand is an XMM register or memory of the source width.
-XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
+XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "xmm_rm_length", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
+# Those whose operand size is that of a general register.
+GENERAL_SIZED = {"xmm_rm_length", "reg_xmm", "reg_xmm_imm"}
 # One-byte opcodes that are prefixes or the two-byte escape, never instructions.
 RESERVED = {0x0F, 0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3,
             *range(0x40, 0x50)}
@@ -205,7 +210,7 @@ def load(text):
             fail(f"{where}: source size does not match the encoding")
         if lane and (form["size"] not in ("x", "y") or (form["size"] == "x") != (form["src"] in ("b", "w", "d"))):
             fail(f"{where}: a lane is a byte, word or doubleword by source, or wide by size")
-        if not lane and (form["size"] == "x") != (form["enc"] in XMM_RM - {"reg_xmm", "reg_xmm_imm"}):
+        if not lane and (form["size"] == "x") != (form["enc"] in XMM_RM - GENERAL_SIZED):
             fail(f"{where}: XMM size does not match the encoding")
         if form.get("lock") and (form["enc"] not in RM_DESTINATIONS or form.get("register_only")):
             fail(f"{where}: LOCK needs a memory destination")

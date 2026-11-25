@@ -1139,7 +1139,29 @@ pub(crate) mod handlers {
     }
 
     pub fn fclose(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
-        let outcome = context.state.crt_streams().close(context.memory, stream);
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.close(context.memory, &mut drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn tmpfile(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open_temporary(context.memory, &mut drive)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn tmpnam(context: &mut ServiceContext<'_>, buffer: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.temporary_name(context.memory, &drive, buffer)
+        };
         or_errno(context, outcome)
     }
 

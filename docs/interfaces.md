@@ -555,6 +555,17 @@ later operations fail with `EBADF`. `fseek`, `ftell` and `rewind` remain
 unprovided here; #312 holds them. `remove` is `implemented`, the other five
 `partial`.
 
+**Temporary files (#493, last part).** `tmpfile` opens a stream for
+reading and writing in binary on a file no other stream uses; closing the
+stream deletes the file, as the Microsoft page says. `tmpnam` writes a
+name no file on the drive holds, `tmp` and a decimal counter, into the
+caller's buffer, or into a static buffer allocated once when the argument
+is null, as the CRT keeps one. The counter never rewinds, so a name a
+closed temporary file freed can come back — the page documents the same
+for its names. Both are `implemented`. `freopen` is not served: its close
+semantics on failure are unspecified beyond what the drive model can
+answer honestly, and no fixture demanded it.
+
 ### CRT integer conversion
 
 UCRT and the CRT conversion API set expose strtol, strtoul, wcstol, and

@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- CRT file-system services sqlite3 links against ucrtbase: `_fullpath` with the CRT contract (a null buffer allocates a copy the caller frees, EINVAL for an invalid path, ERANGE when the result does not fit), and `_findfirst64i32`/`_findnext64i32`/`_findclose` over the same search snapshots as the kernel32 find, with errno answers in place of GetLastError and the mingw-w64 `_finddata64i32_t` layout (296 bytes, times at 8/16/24 answering -1 because the drive has no time stamps). The hosted lock fixture grows to 33 checks, all passing through `xenora run` at -O0 and -O2.
 - Byte-range file locking (LockFile, UnlockFile and the Ex forms) with the Windows shared and exclusive conflict rules, console screen-buffer and text-attribute queries that fail with ERROR_INVALID_HANDLE on pipe-backed handles, and the CRT `_getpid` query.
 - Kernel32 queries that real programs such as sqlite3 import: AreFileApisANSI and SetFileApisToANSI/OEM with mode tracking, FlushViewOfFile, which checks the view base because mapped storage is already in guest memory, GetDiskFreeSpace for the confined volume, HeapCompact and HeapValidate. DebugBreak now stops the run with a breakpoint exception (0x80000003) instead of continuing.
 - IsDebuggerPresent answers false and OutputDebugString drops its output, the documented behavior of a machine with no debugger attached.

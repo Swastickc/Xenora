@@ -7,8 +7,12 @@
 // number and the program exits with it. With CRT_WINLOCKS_BREAK one
 // expectation is wrong on purpose.
 
+#include <errno.h>
+#include <io.h>
 #include <process.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <windows.h>
 
 static unsigned checks;
@@ -90,6 +94,38 @@ int main(void) {
         UnmapViewOfFile(view);
     if (mapping)
         CloseHandle(mapping);
+
+    // The CRT directory scan is what sqlite's unix-style file control uses.
+    CHECK("scan directory", CreateDirectoryW(L"C:\\scan", NULL));
+    HANDLE created = CreateFileW(L"C:\\scan\\a.txt", GENERIC_WRITE, 0, NULL,
+                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK("scan file a", created != INVALID_HANDLE_VALUE && CloseHandle(created));
+    created = CreateFileW(L"C:\\scan\\b.txt", GENERIC_WRITE, 0, NULL,
+                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK("scan file b", created != INVALID_HANDLE_VALUE && CloseHandle(created));
+
+    struct _finddata64i32_t data;
+    intptr_t scan = _findfirst64i32("c:\\scan\\*.txt", &data);
+    CHECK("find first", scan != -1 && strcmp(data.name, "a.txt") == 0 && data.size == 0);
+    errno = 0;
+    CHECK("find next", scan != -1 && _findnext64i32(scan, &data) == 0
+                                    && strcmp(data.name, "b.txt") == 0);
+    CHECK("find exhausted", scan != -1 && _findnext64i32(scan, &data) == -1 && errno == ENOENT);
+    CHECK("find close", scan != -1 && _findclose(scan) == 0);
+    errno = 0;
+    CHECK("find missing", _findfirst64i32("c:\\scan\\*.jpg", &data) == -1 && errno == ENOENT);
+
+    char *absolute = _fullpath(NULL, "scan\\a.txt", 0);
+    CHECK("full path allocates", absolute && strcmp(absolute, "c:\\scan\\a.txt") == 0);
+    free(absolute);
+    char small[8];
+    errno = 0;
+    CHECK("full path range", _fullpath(small, "scan\\a.txt", sizeof small) == NULL
+                                 && errno == ERANGE);
+    char exact[16];
+    CHECK("full path exact",
+          _fullpath(exact, "scan\\a.txt", sizeof exact) == exact
+              && strcmp(exact, "c:\\scan\\a.txt") == 0);
 
     CHECK("process id", (DWORD)_getpid() == GetCurrentProcessId());
     CHECK("close", CloseHandle(first) && CloseHandle(second));

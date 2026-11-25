@@ -5,7 +5,7 @@
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
     ERROR_NOACCESS, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_LOCKED, ERROR_NOT_SUPPORTED, GuestObject,
-    KERNEL32, ServicesState,
+    KERNEL32, ServicesState, crt::UCRT,
 };
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const FILE_API: &str = "api-ms-win-core-file-l1-1-0.dll";
+const CRT_FILESYSTEM_API: &str = "api-ms-win-crt-filesystem-l1-1-0.dll";
 const INVALID_HANDLE: u64 = u64::MAX;
 const READ: u32 = 0x8000_0000;
 const WRITE: u32 = 0x4000_0000;
@@ -298,7 +299,7 @@ fn share_mask(access: u32) -> u32 {
 /// matching entries sorted by name, and the first answer is written before
 /// the handle exists, as the contract requires.
 fn find_first(
-    state: &Arc<ServicesState>,
+    state: &ServicesState,
     memory: &mut GuestMemory,
     path: &str,
     output: u64,
@@ -359,6 +360,39 @@ fn find_first(
     }
     objects.insert_handle(handle, GuestObject::Search(Search { entries, next: 1 }));
     Ok(handle)
+}
+
+/// The display form of a normalized drive name, `c:\name`, or nothing for
+/// an empty or invalid name.
+fn full_name(name: &str) -> Option<String> {
+    if name.is_empty() || !name.split('\\').all(valid_component) {
+        return None;
+    }
+    Some(format!("c:\\{name}"))
+}
+
+/// The CRT `_finddata64i32_t` layout of mingw-w64: attributes at 0, the
+/// three 64-bit times at 8/16/24, the 32-bit size at 32, the narrow name at
+/// 36, 296 bytes in all. The drive does not track times yet, so the times
+/// answer -1, which is what a volume without time stamps reports.
+fn crt_write_finddata64i32(
+    memory: &mut GuestMemory,
+    output: u64,
+    entry: &SearchEntry,
+) -> Result<(), MemoryError> {
+    if output == 0 {
+        return Err(MemoryError::UnmappedAddress(0));
+    }
+    let mut bytes = [0u8; 296];
+    bytes[0..4].copy_from_slice(&entry.attributes.to_le_bytes());
+    for slot in [8, 16, 24] {
+        bytes[slot..slot + 8].copy_from_slice(&(-1i64).to_le_bytes());
+    }
+    bytes[32..36].copy_from_slice(&(entry.size as u32).to_le_bytes());
+    let name = entry.name.as_bytes();
+    let length = name.len().min(259);
+    bytes[36..36 + length].copy_from_slice(&name[..length]);
+    memory.write_bytes(output, &bytes)
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -800,10 +834,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Some(name) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
                 return full.fail(cpu.gs_base, INVALID_NAME, 0);
             };
-            if name.is_empty() || !name.split('\\').all(valid_component) {
+            let Some(full_path) = full_name(&name) else {
                 return full.fail(cpu.gs_base, INVALID_NAME, 0);
-            }
-            let full_path = format!("c:\\{name}");
+            };
             // args: rcx input, rdx buffer size in characters, r8 buffer, r9 file-part output.
             let size = args.rdx as usize;
             let buffer = args.r8;
@@ -1184,6 +1217,124 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 Ok(1)
             }
         });
+    }
+
+    // The CRT file-system services the runtime library links against
+    // `ucrtbase.dll`. `_fullpath` is GetFullPathName of the narrow form with
+    // the CRT contract: a null buffer means the caller wants a heap copy it
+    // frees, an empty or invalid path sets EINVAL, and a buffer that is too
+    // small - or a result longer than the 260 characters a null buffer gets -
+    // sets ERANGE. The display form is lowercase because the drive's names
+    // are case-folded.
+    registry.register(UCRT, "_fullpath", |args, cpu, memory| {
+        let fail = |memory: &mut GuestMemory, error: u32| -> Result<u64, ExitReason> {
+            super::crt::set_errno(memory, cpu.gs_base, error)?;
+            Ok(0)
+        };
+        let Some(name) = read_guest_path_a(memory, args.rdx).map_err(ExitReason::MemoryFault)?
+        else {
+            return fail(memory, super::crt_files::EINVAL);
+        };
+        let Some(full_path) = full_name(&name) else {
+            return fail(memory, super::crt_files::EINVAL);
+        };
+        let bytes = full_path.as_bytes();
+        let needed = bytes.len() + 1;
+        let buffer = if args.rcx == 0 {
+            if needed > 260 {
+                return fail(memory, super::crt_files::ERANGE);
+            }
+            match memory.map_heap_allocation(crate::memory::PROCESS_HEAP, needed.max(1)) {
+                Ok(address) if address != 0 => address,
+                _ => return fail(memory, super::crt_files::ENOMEM),
+            }
+        } else {
+            if args.r8 < needed as u64 {
+                return fail(memory, super::crt_files::ERANGE);
+            }
+            args.rcx
+        };
+        if memory.write_bytes(buffer, bytes).is_err()
+            || memory.write_u8(buffer + bytes.len() as u64, 0).is_err()
+        {
+            return fail(memory, super::crt_files::ENOMEM);
+        }
+        Ok(buffer)
+    });
+
+    // The CRT search is the same snapshot the kernel32 search hands out;
+    // only the record layout and the error channel differ: errno and -1
+    // instead of GetLastError and INVALID_HANDLE_VALUE. A search that finds
+    // nothing sets ENOENT.
+    let crt_first = Arc::clone(state);
+    registry.register(UCRT, "_findfirst64i32", move |args, cpu, memory| {
+        let Some(path) = read_guest_path_a(memory, args.rcx).map_err(ExitReason::MemoryFault)?
+        else {
+            super::crt::set_errno(memory, cpu.gs_base, super::crt_files::EINVAL)?;
+            return Ok(u64::MAX);
+        };
+        match find_first(&crt_first, memory, &path, args.rdx, crt_write_finddata64i32) {
+            Ok(handle) => Ok(handle),
+            Err(code) => {
+                let errno = match code {
+                    FILE_NOT_FOUND | PATH_NOT_FOUND => super::crt_files::ENOENT,
+                    ERROR_NOACCESS => super::crt_files::EACCES,
+                    ERROR_NOT_ENOUGH_MEMORY => super::crt_files::ENOMEM,
+                    _ => super::crt_files::EINVAL,
+                };
+                super::crt::set_errno(memory, cpu.gs_base, errno)?;
+                Ok(u64::MAX)
+            }
+        }
+    });
+
+    let crt_next = Arc::clone(state);
+    registry.register(UCRT, "_findnext64i32", move |args, cpu, memory| {
+        let error = {
+            let mut objects = crt_next.objects.lock().expect("guest object state");
+            let Some(GuestObject::Search(search)) = objects.handles.get_mut(&args.rcx) else {
+                super::crt::set_errno(memory, cpu.gs_base, super::crt_files::EINVAL)?;
+                return Ok(u64::MAX);
+            };
+            let Some(entry) = search.entries.get(search.next) else {
+                drop(objects);
+                super::crt::set_errno(memory, cpu.gs_base, super::crt_files::ENOENT)?;
+                return Ok(u64::MAX);
+            };
+            if crt_write_finddata64i32(memory, args.rdx, entry).is_err() {
+                Some(super::crt_files::EACCES)
+            } else {
+                search.next += 1;
+                None
+            }
+        };
+        if let Some(error) = error {
+            super::crt::set_errno(memory, cpu.gs_base, error)?;
+            return Ok(u64::MAX);
+        }
+        Ok(0)
+    });
+
+    let crt_close = Arc::clone(state);
+    registry.register(UCRT, "_findclose", move |args, cpu, memory| {
+        let mut objects = crt_close.objects.lock().expect("guest object state");
+        if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::Search(_))) {
+            drop(objects);
+            super::crt::set_errno(memory, cpu.gs_base, super::crt_files::EBADF)?;
+            return Ok(u64::MAX);
+        }
+        objects.handles.remove(&args.rcx);
+        Ok(0)
+    });
+
+    for symbol in [
+        "_fullpath",
+        "_findfirst64i32",
+        "_findnext64i32",
+        "_findclose",
+    ] {
+        registry.alias(CRT_FILESYSTEM_API, UCRT, symbol);
+        registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }
 
     for symbol in [

@@ -165,6 +165,11 @@ private final class BoundedCollector: @unchecked Sendable {
     }
 }
 
+struct ProgramArgument: Identifiable {
+    let id = UUID()
+    var value = ""
+}
+
 /// The latest run of a chosen executable. Only the latest request publishes.
 @MainActor
 final class ProgramRunModel: ObservableObject {
@@ -172,8 +177,23 @@ final class ProgramRunModel: ObservableObject {
     @Published var running = false
     @Published var result: ProgramRunResult?
     @Published var fileName: String?
-    @Published var argumentText = ""
+    @Published var arguments: [ProgramArgument] = []
     private var latestRequest: UInt64 = 0
+
+    var workerArguments: [String] { arguments.map(\.value) }
+
+    func addArgument() -> UUID {
+        let argument = ProgramArgument()
+        arguments.append(argument)
+        return argument.id
+    }
+
+    /// Returns the neighboring row that should receive focus after removal.
+    func removeArgument(_ id: UUID) -> UUID? {
+        guard let index = arguments.firstIndex(where: { $0.id == id }) else { return nil }
+        arguments.remove(at: index)
+        return index < arguments.count ? arguments[index].id : arguments.last?.id
+    }
 
     func run(_ url: URL, trace: Bool) {
         latestRequest &+= 1
@@ -181,7 +201,7 @@ final class ProgramRunModel: ObservableObject {
         fileName = url.lastPathComponent
         result = nil
         running = true
-        let arguments = argumentText.split(whereSeparator: \.isWhitespace).map(String.init)
+        let arguments = workerArguments
         Task {
             let outcome = await Task.detached {
                 ProgramRunner.run(url, trace: trace, programArguments: arguments)
@@ -252,21 +272,23 @@ extension View {
 
 /// Run controls and results for the inspected file.
 struct ProgramRunView: View {
+    private enum ArgumentFocus: Hashable {
+        case row(UUID), add
+    }
+
     let url: URL?
     @ObservedObject var model: ProgramRunModel
     @ObservedObject var hud: HudSettings
+    @FocusState private var argumentFocus: ArgumentFocus?
 
     var body: some View {
         Section("Run executable (experimental)") {
-            HStack {
-                TextField("Program arguments", text: $model.argumentText)
-                    .textFieldStyle(.roundedBorder)
-                Button(model.running ? "Running…" : "Run") {
-                    if let url { model.run(url, trace: hud.enabled) }
-                }
-                .disabled(url == nil || model.running)
-                .keyboardShortcut("r")
+            argumentEditor
+            Button(model.running ? "Running…" : "Run") {
+                if let url { model.run(url, trace: hud.enabled) }
             }
+            .disabled(url == nil || model.running)
+            .keyboardShortcut("r")
             if url == nil {
                 Text("Open an executable above to run it.").foregroundStyle(.secondary)
             }
@@ -289,6 +311,31 @@ struct ProgramRunView: View {
             }
             Text("Runs go through the bundled xenora runner with its own process, 15-second deadline and step limit. Most executables stop at an unresolved import or unsupported instruction; running one is not a claim that it is supported.")
                 .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var argumentEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Program arguments").font(.headline)
+            ForEach($model.arguments) { $argument in
+                let position = model.arguments.firstIndex(where: { $0.id == argument.id }) ?? 0
+                HStack {
+                    TextField("Argument \(position + 1)", text: $argument.value)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($argumentFocus, equals: .row(argument.id))
+                    Button("Remove") {
+                        argumentFocus = model.removeArgument(argument.id).map(ArgumentFocus.row) ?? .add
+                    }
+                    .accessibilityLabel("Remove argument \(position + 1)")
+                }
+            }
+            Button("Add argument") {
+                argumentFocus = .row(model.addArgument())
+            }
+            .focused($argumentFocus, equals: .add)
+            Text("One row per argument. A blank row passes an empty argument.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }

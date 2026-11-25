@@ -49,6 +49,8 @@ remains unsupported.
 - Avoided resolver allocations for permitted guest data reads and writes contained in one mapping, preserving checked fallback for split spans and faults (#105).
 - Extended the read-only RDNA2 planning CLI (`python3 -m qa rdna2`) with family/status filters, compact summaries, Codex-ready manifests under `artifacts/`, active-claim exclusion (family claims exclude those families; path-only claims block overlapping permitted files), coverage reconcile against `semantic_coverage` without inflating counts, and inventory diffs. Covered by `tests/qa/test_rdna2_plan.py`; planning only, no GPU production edits.
 
+- The macOS Run panel accepts one literal program argument per row, preserving order, spaces, and empty values (#544).
+
 ### Fixed
 - The PE loader ignores thread-local storage directory bytes outside the optional header's declared directory count, so padding is not treated as TLS metadata (#573).
 - Structured startup reports now preserve the guest exit status when a thread-local storage callback ends the process before the entry point. The report keeps TLS as the last completed stage (#483).

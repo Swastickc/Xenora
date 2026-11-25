@@ -1122,6 +1122,65 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
+    // GetFileAttributesEx reports the standard info level: attributes,
+    // three FILETIMEs and the 64-bit size. The confined file system has no
+    // time dimension, so the timestamps read zero - documented rather than
+    // invented. The size is the truth of the memory-backed contents.
+    for (symbol, narrow) in [
+        ("GetFileAttributesExA", true),
+        ("GetFileAttributesExW", false),
+    ] {
+        let attrex = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            if args.rdx != 0 {
+                return attrex.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+            }
+            let reader = if narrow { guest_path_a } else { guest_path };
+            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+                return attrex.fail(cpu.gs_base, INVALID_NAME, 0);
+            };
+            let objects = attrex.objects.lock().expect("guest object state");
+            let (attributes, size) = if objects.directories.contains(&path) {
+                (0x10u32, 0u64)
+            } else if let Some(data) = objects.files.get(&path) {
+                (0x80u32, data.len() as u64)
+            } else {
+                let parent = parent(&path);
+                let error = if parent.is_empty() || objects.directories.contains(parent) {
+                    FILE_NOT_FOUND
+                } else {
+                    PATH_NOT_FOUND
+                };
+                return attrex.fail(cpu.gs_base, error, 0);
+            };
+            let mut block = [0u8; 36];
+            block[0..4].copy_from_slice(&attributes.to_le_bytes());
+            block[28..32].copy_from_slice(&(size as u32).to_le_bytes());
+            block[32..36].copy_from_slice(&((size >> 32) as u32).to_le_bytes());
+            if memory.write_bytes(args.r8, &block).is_err() {
+                return attrex.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            Ok(1)
+        });
+    }
+
+    // Console queries on pipe-backed handles. sqlite asks whether standard
+    // output is a console to pick interactive mode; xenora's standard handles
+    // are pipes, and Windows itself answers ERROR_INVALID_HANDLE when the
+    // handle is not a console, so failing here is the honest truth rather
+    // than a stub. SetConsoleCtrlHandler accepts the registration: no console
+    // is attached, so control events never occur and the handler never runs,
+    // which matches what a detached process observes.
+    let console_query = Arc::clone(state);
+    registry.register(KERNEL32, "GetConsoleScreenBufferInfo", move |args, cpu, _memory| {
+        console_query.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0)
+    });
+    let console_attr = Arc::clone(state);
+    registry.register(KERNEL32, "SetConsoleTextAttribute", move |args, cpu, _memory| {
+        console_attr.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0)
+    });
+    registry.register(KERNEL32, "SetConsoleCtrlHandler", move |_, _, _| Ok(1));
+
     // LockFileEx routes through an OVERLAPPED carrying the offset in its
     // first two 32-bit fields; the flags pick exclusive/shared and whether a
     // conflicting lock fails at once. xenora has no async completion, so the
@@ -1227,11 +1286,16 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "DeleteFileW",
         "DeleteFileA",
         "LockFile",
+        "GetConsoleScreenBufferInfo",
+        "SetConsoleTextAttribute",
+        "SetConsoleCtrlHandler",
         "UnlockFile",
         "LockFileEx",
         "UnlockFileEx",
         "GetFileAttributesW",
         "GetFileAttributesA",
+        "GetFileAttributesExA",
+        "GetFileAttributesExW",
         "MoveFileW",
         "FindFirstFileW",
         "FindNextFileW",

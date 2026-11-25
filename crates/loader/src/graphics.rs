@@ -2078,12 +2078,16 @@ impl GraphicsContext {
                     if bindings.root_signature.is_some() {
                         return Err(GraphicsError::Unsupported("textured indexed draws"));
                     }
-                    let vertices = self.fetch_indexed_triangle(
+                    let indices = self.resolve_triangle_indices(
                         memory,
                         index_buffer,
-                        (vertex_resource, vertex_offset, vertex_stride),
                         *start_index_location,
                         *base_vertex_location,
+                    )?;
+                    let vertices = self.fetch_indexed_positions(
+                        memory,
+                        (vertex_resource, vertex_offset, vertex_stride),
+                        indices,
                     )?;
                     draw_count += 1;
                     let pixels = if let Some(renderer) = backend_renderer {
@@ -2220,29 +2224,20 @@ impl GraphicsContext {
         })
     }
 
-    /// The three float4 positions one indexed triangle fetches: index `k` is
-    /// read at `offset + (start + k) * size` of the index buffer, and vertex
-    /// `index + base_vertex` at `offset + vertex * stride` of the vertex buffer.
-    fn fetch_indexed_triangle(
+    /// Decode three indices from the bound view and apply the signed base vertex.
+    fn resolve_triangle_indices(
         &self,
         memory: &GuestMemory,
         index_buffer: Option<(GraphicsHandle, usize, IndexFormat)>,
-        (vertex_resource, vertex_offset, vertex_stride): (Option<GraphicsHandle>, usize, usize),
         start: u32,
         base_vertex: i32,
-    ) -> Result<[[f32; 4]; 3], GraphicsError> {
-        let resource = |handle: Option<GraphicsHandle>| {
-            handle
-                .and_then(|handle| self.resources.get(&handle))
-                .ok_or(GraphicsError::InvalidResourceHandle)
-        };
+    ) -> Result<[usize; 3], GraphicsError> {
         let (index_handle, index_offset, format) =
             index_buffer.ok_or(GraphicsError::InvalidResourceHandle)?;
-        let index_res = resource(Some(index_handle))?;
-        let vertex_res = resource(vertex_resource)?;
-        if vertex_stride < 16 {
-            return Err(GraphicsError::InvalidDescriptor);
-        }
+        let index_res = self
+            .resources
+            .get(&index_handle)
+            .ok_or(GraphicsError::InvalidResourceHandle)?;
         let size = format.size();
         let mut raw_indices = [0u8; 12];
         let raw_indices = &mut raw_indices[..3 * size];
@@ -2251,15 +2246,33 @@ impl GraphicsContext {
             .and_then(|bytes| bytes.checked_add(index_offset))
             .ok_or(GraphicsError::IndexOutOfRange)?;
         Self::read_resource(index_res, memory, first, raw_indices)?;
-        let mut vertices = [[0.0f32; 4]; 3];
-        for (row, index) in vertices.iter_mut().zip(raw_indices.chunks_exact(size)) {
-            let index = if size == 2 {
-                u32::from(u16::from_le_bytes([index[0], index[1]]))
-            } else {
-                u32::from_le_bytes(index.try_into().unwrap())
+        let mut indices = [0; 3];
+        for (vertex, encoded) in indices.iter_mut().zip(raw_indices.chunks_exact(size)) {
+            let index = match format {
+                IndexFormat::R16Uint => u32::from(u16::from_le_bytes(encoded.try_into().unwrap())),
+                IndexFormat::R32Uint => u32::from_le_bytes(encoded.try_into().unwrap()),
             };
-            let vertex = usize::try_from(i64::from(index) + i64::from(base_vertex))
+            *vertex = usize::try_from(i64::from(index) + i64::from(base_vertex))
                 .map_err(|_| GraphicsError::IndexOutOfRange)?;
+        }
+        Ok(indices)
+    }
+
+    /// Fetch the float4 position of each vertex selected by the index view.
+    fn fetch_indexed_positions(
+        &self,
+        memory: &GuestMemory,
+        (vertex_resource, vertex_offset, vertex_stride): (Option<GraphicsHandle>, usize, usize),
+        indices: [usize; 3],
+    ) -> Result<[[f32; 4]; 3], GraphicsError> {
+        let vertex_res = vertex_resource
+            .and_then(|handle| self.resources.get(&handle))
+            .ok_or(GraphicsError::InvalidResourceHandle)?;
+        if vertex_stride < 16 {
+            return Err(GraphicsError::InvalidDescriptor);
+        }
+        let mut vertices = [[0.0f32; 4]; 3];
+        for (row, vertex) in vertices.iter_mut().zip(indices) {
             let at = vertex
                 .checked_mul(vertex_stride)
                 .and_then(|bytes| bytes.checked_add(vertex_offset))

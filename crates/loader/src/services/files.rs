@@ -692,7 +692,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             } else {
                 guest_path(memory, args.rcx)
             };
-            if matches!(path, Ok(None) | Err(_)) {
+            // A null root names the root of the current directory.
+            if args.rcx != 0 && matches!(path, Ok(None) | Err(_)) {
                 return disk.fail(cpu.gs_base, ERROR_NOACCESS, 0);
             }
             let objects = disk.objects.lock().expect("guest object state");
@@ -1082,29 +1083,40 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     registry.register(KERNEL32, "SetConsoleCtrlHandler", move |_, _, _| Ok(1));
 
     // LockFileEx routes through an OVERLAPPED carrying the offset in its
-    // first two 32-bit fields; the flags pick exclusive/shared and whether a
-    // conflicting lock fails at once. xenora has no async completion, so the
-    // overlapped event field is ignored and the call completes synchronously,
-    // which is the documented fast path when the region is free. Shared and
-    // exclusive locks conflict exactly as Windows specifies.
-    for (symbol, unlock) in [("LockFileEx", false), ("UnlockFileEx", true)] {
+    // Offset and OffsetHigh fields, at byte 16 after the two pointer-sized
+    // Internal fields of the x64 layout; LOCKFILE_EXCLUSIVE_LOCK picks exclusive over
+    // shared. LockFileEx takes (handle, flags, reserved, length low/high,
+    // overlapped) while UnlockFileEx has no flags, so the length starts one
+    // argument earlier. xenora has no async completion: the call completes
+    // synchronously, which is the documented path when the region is free.
+    // A conflict always fails with ERROR_LOCK_VIOLATION, also without
+    // LOCKFILE_FAIL_IMMEDIATELY, where Windows would wait for the holder;
+    // waiting cannot end while the run is single-threaded.
+    for (symbol, unlock, length_arg) in [("LockFileEx", false, 3), ("UnlockFileEx", true, 2)] {
         let lock_state = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, memory| {
             let handle = args.rcx;
-            let overlapped = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            let overlapped = args
+                .get(length_arg + 2, memory)
+                .map_err(ExitReason::MemoryFault)?;
             let mut fields = [0u8; 8];
             memory
-                .read_bytes(overlapped, &mut fields)
+                .read_bytes(overlapped.wrapping_add(16), &mut fields)
                 .map_err(ExitReason::MemoryFault)?;
             let offset = u64::from(u32::from_le_bytes(
                 fields[0..4].try_into().expect("4 bytes"),
             )) | u64::from(u32::from_le_bytes(
                 fields[4..8].try_into().expect("4 bytes"),
             )) << 32;
-            let length = u64::from(args.get(3, memory).map_err(ExitReason::MemoryFault)? as u32)
-                << 32
-                | u64::from(args.get(2, memory).map_err(ExitReason::MemoryFault)? as u32);
-            let exclusive = args.rdx & 2 != 0;
+            let length = u64::from(
+                args.get(length_arg + 1, memory)
+                    .map_err(ExitReason::MemoryFault)? as u32,
+            ) << 32
+                | u64::from(
+                    args.get(length_arg, memory)
+                        .map_err(ExitReason::MemoryFault)? as u32,
+                );
+            let exclusive = !unlock && args.rdx & 2 != 0;
             let mut objects = lock_state.objects.lock().expect("guest object state");
             let path = match objects.handles.get(&handle) {
                 Some(GuestObject::File(file)) => file.path.clone(),

@@ -78,9 +78,8 @@ fn parse_c_declarations(
         let cleaned = line
             .replace("extern ", "")
             .replace("__DARWIN_ALIAS(", "/* alias */ ")
-            .replace("__DARWIN_ALIAS_C(", "/* alias */ ")
-            .replace("_LIBC_CSTR", "char *")
-            .replace("_LIBC_UNSAFE_INDEXABLE", "");
+            .replace("__DARWIN_ALIAS_C(", "/* alias */ ");
+        let cleaned = strip_pointer_annotations(&cleaned);
 
         let Some(open_paren) = cleaned.find('(') else {
             continue;
@@ -133,15 +132,28 @@ fn parse_c_declarations(
     added
 }
 
+fn is_c_identifier_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn strip_pointer_annotations(line: &str) -> String {
+    line.split_inclusive(|ch| !is_c_identifier_continue(ch))
+        .map(|segment| {
+            let word = segment.trim_end_matches(|ch| !is_c_identifier_continue(ch));
+            match word {
+                "_LIBC_CSTR" | "_LIBC_UNSAFE_INDEXABLE" => &segment[word.len()..],
+                _ => segment,
+            }
+        })
+        .collect()
+}
+
 /// Split the trailing identifier from a simple named declarator and keep any
 /// pointer stars with the type, including when a star touches the name.
 fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
-    let type_end = declaration
-        .trim_end_matches(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
-        .len();
+    let type_end = declaration.trim_end_matches(is_c_identifier_continue).len();
     let (type_str, name) = declaration.split_at(type_end);
-    let type_str = type_str.trim_end();
-    if type_str.is_empty()
+    if !type_str.ends_with(|ch: char| ch.is_whitespace() || ch == '*')
         || !name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_')
         || is_c_qualifier(name)
         || matches!(
@@ -160,7 +172,7 @@ fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
     {
         return None;
     }
-    Some((type_str, name))
+    Some((type_str.trim_end(), name))
 }
 
 fn is_c_qualifier(word: &str) -> bool {
@@ -324,6 +336,22 @@ mod tests {
         let pointers = catalog.lookup("example.dll", "pointers").unwrap();
         assert_eq!(pointers.params[4].name, "arg4");
         assert_eq!(pointers.params[5].name, "arg5");
+    }
+
+    #[test]
+    fn header_pointer_annotations_do_not_change_the_type_or_symbol() {
+        let mut catalog = MetadataCatalog::new();
+        let declarations = "
+            char *_LIBC_CSTR find_LIBC_CSTR(char *_LIBC_CSTR input);
+        ";
+        assert_eq!(
+            parse_c_declarations(&mut catalog, "example.dll", "test.h", declarations),
+            1
+        );
+        let signature = catalog.lookup("example.dll", "find_LIBC_CSTR").unwrap();
+        assert_eq!(signature.return_type, AbiType::StringAnsi);
+        assert_eq!(signature.params[0].name, "input");
+        assert_eq!(signature.params[0].abi_type, AbiType::StringAnsi);
     }
 
     #[test]

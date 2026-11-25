@@ -13,6 +13,9 @@ const PREFERRED: u64 = 0x1_4000_0000;
 const RELOC_FILE: usize = 0x400;
 const COFF_CHARACTERISTICS: usize = 0x44 + 18;
 const RELOCS_STRIPPED: u16 = 1;
+const OPTIONAL_HEADER: usize = 0x44 + 20;
+const RELOC_DIRECTORY_RVA: usize = OPTIONAL_HEADER + 152;
+const RELOC_SECTION: usize = OPTIONAL_HEADER + 240 + 40;
 
 /// .text at RVA 0x1000 (file 0x200) holding two pointers, .reloc at RVA 0x2000 (file 0x400).
 /// `NumberOfRvaAndSizes` and the relocation table bytes are parameters.
@@ -301,6 +304,108 @@ fn directory_past_end_of_file_is_rejected() {
             rva: 0x2000,
             size: 0x300
         }
+    );
+}
+
+#[test]
+fn directory_entering_unbacked_virtual_space_is_rejected_before_fixups() {
+    const DIRECTORY_RVA: u32 = 0x21f4;
+    let mut table = block(0x1000, &[0xA010, 0x0000]);
+    table.extend(block(0x1000, &[0xA018, 0x0000]));
+    let size = table.len() as u32;
+    let base = PREFERRED + 0x1000;
+
+    for virtual_size in [0x200u32, 0x1000] {
+        let mut bytes = build(16, &[], size);
+        bytes[RELOC_DIRECTORY_RVA..RELOC_DIRECTORY_RVA + 4]
+            .copy_from_slice(&DIRECTORY_RVA.to_le_bytes());
+        bytes[RELOC_SECTION + 8..RELOC_SECTION + 12].copy_from_slice(&virtual_size.to_le_bytes());
+        // The first block fits. The next block's bytes exist physically, but
+        // its RVA lies in a gap (0x200) or the zero-filled tail (0x1000).
+        bytes[0x5f4..].copy_from_slice(&table[..12]);
+        bytes.extend_from_slice(&table[12..]);
+
+        let (result, memory) = relocate(&bytes, base);
+        assert_eq!(
+            result.unwrap_err(),
+            RelocationError::DirectoryOutOfBounds {
+                rva: DIRECTORY_RVA,
+                size,
+            },
+            "virtual size {virtual_size:#x}"
+        );
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1010).unwrap(),
+            PREFERRED + 0x1100
+        );
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1018).unwrap(),
+            PREFERRED + 0x2000
+        );
+    }
+}
+
+#[test]
+fn split_block_header_uses_each_sections_raw_offset() {
+    const DIRECTORY_RVA: u32 = 0x2ffc;
+    const CONTINUATION_FILE: usize = 0x1800;
+    let table = block(0x1000, &[0xA010, 0xA018]);
+    let mut bytes = build(16, &[], table.len() as u32);
+    bytes.resize(CONTINUATION_FILE + 0x200, 0);
+    bytes[0x46..0x48].copy_from_slice(&3u16.to_le_bytes());
+    bytes[OPTIONAL_HEADER + 56..OPTIONAL_HEADER + 60].copy_from_slice(&0x4000u32.to_le_bytes());
+    bytes[RELOC_DIRECTORY_RVA..RELOC_DIRECTORY_RVA + 4]
+        .copy_from_slice(&DIRECTORY_RVA.to_le_bytes());
+    bytes[RELOC_SECTION + 16..RELOC_SECTION + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+
+    let continuation = RELOC_SECTION + 40;
+    bytes[continuation..continuation + 6].copy_from_slice(b".cont\0");
+    for (offset, value) in [
+        (8, 0x200u32),
+        (12, 0x3000),
+        (16, 0x200),
+        (20, CONTINUATION_FILE as u32),
+        (36, 0x4200_0040),
+    ] {
+        bytes[continuation + offset..continuation + offset + 4]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+
+    // The page RVA is the last word of .reloc. The block size and entries
+    // start at the next section's RVA, past a gap in the physical file.
+    let first_word = RELOC_FILE + 0xffc;
+    bytes[first_word..first_word + 4].copy_from_slice(&table[..4]);
+    bytes[CONTINUATION_FILE..CONTINUATION_FILE + table.len() - 4].copy_from_slice(&table[4..]);
+
+    let base = PREFERRED + 0x1000;
+    let (result, memory) = relocate(&bytes, base);
+    let report = result.expect("relocate split directory");
+    assert_eq!(report.total_entries, 2);
+    assert_eq!(report.applied_dir64, 2);
+    assert_eq!(report.skipped_absolute, 0);
+    assert_eq!(
+        memory.read_u64_bypass(base + 0x1010).unwrap(),
+        base + 0x1100
+    );
+    assert_eq!(
+        memory.read_u64_bypass(base + 0x1018).unwrap(),
+        base + 0x2000
+    );
+
+    // Include the next, empty block header in the directory. Its reported
+    // offset is in the continuation section and the first block stays applied.
+    bytes[RELOC_DIRECTORY_RVA + 4..RELOC_DIRECTORY_RVA + 8]
+        .copy_from_slice(&(table.len() as u32 + 8).to_le_bytes());
+    let (result, memory) = relocate(&bytes, base);
+    assert_eq!(
+        result.unwrap_err(),
+        RelocationError::MalformedBlockHeader {
+            offset: CONTINUATION_FILE + table.len() - 4,
+        }
+    );
+    assert_eq!(
+        memory.read_u64_bypass(base + 0x1018).unwrap(),
+        base + 0x2000
     );
 }
 

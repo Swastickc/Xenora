@@ -6,7 +6,7 @@
 //! is loaded at a base address different from its preferred PE `image_base`.
 
 use crate::memory::{GuestMemory, MemoryError};
-use crate::pe::ParsedPe;
+use crate::pe::{ParsedPe, PeSection};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -104,6 +104,109 @@ pub struct RelocationReport {
     pub delta: i64,
 }
 
+struct RelocationSpan<'a> {
+    rva: u32,
+    file_offset: usize,
+    bytes: &'a [u8],
+}
+
+impl<'a> RelocationSpan<'a> {
+    fn from_section(section: &PeSection, file: &'a [u8], rva: u32, end: u32) -> Option<Self> {
+        let section_offset = rva.checked_sub(section.virtual_address)?;
+        let available = section.raw_data_size.checked_sub(section_offset)?;
+        if available == 0 || section.raw_data_ptr == 0 {
+            return None;
+        }
+        let len = available.min(end - rva) as usize;
+        let file_offset = (section.raw_data_ptr as usize).checked_add(section_offset as usize)?;
+        Some(Self {
+            rva,
+            file_offset,
+            bytes: file.get(file_offset..file_offset.checked_add(len)?)?,
+        })
+    }
+
+    fn end_rva(&self) -> u32 {
+        self.rva + self.bytes.len() as u32
+    }
+}
+
+struct RelocationReader<'a> {
+    current: RelocationSpan<'a>,
+    following: std::vec::IntoIter<RelocationSpan<'a>>,
+}
+
+impl<'a> RelocationReader<'a> {
+    fn new(pe: &ParsedPe, file: &'a [u8], rva: u32, size: u32) -> Option<Self> {
+        let end = rva.checked_add(size)?;
+        if end > pe.size_of_image {
+            return None;
+        }
+        let current = pe
+            .sections
+            .iter()
+            .find_map(|section| RelocationSpan::from_section(section, file, rva, end))?;
+        let mut covered = current.end_rva();
+        let mut following = Vec::new();
+        if covered < end {
+            // Section headers can be out of RVA order. Verify every handoff
+            // before applying any fixups, and borrow the bytes from the file.
+            following.extend(pe.sections.iter().filter_map(|section| {
+                let start = section.virtual_address;
+                if start < covered || start >= end {
+                    return None;
+                }
+                RelocationSpan::from_section(section, file, start, end)
+            }));
+            following.sort_unstable_by_key(|span| span.rva);
+            for span in &following {
+                if span.rva != covered {
+                    return None;
+                }
+                covered = span.end_rva();
+            }
+            if covered != end {
+                return None;
+            }
+        }
+        Some(Self {
+            current,
+            following: following.into_iter(),
+        })
+    }
+
+    // The caller checks how many directory bytes remain before every read.
+    fn advance_if_empty(&mut self) {
+        if self.current.bytes.is_empty() {
+            self.current = self
+                .following
+                .next()
+                .expect("validated relocation directory has more bytes");
+        }
+    }
+
+    fn read<const N: usize>(&mut self) -> [u8; N] {
+        if let Some((value, rest)) = self.current.bytes.split_first_chunk::<N>() {
+            self.current.bytes = rest;
+            self.current.file_offset += N;
+            return *value;
+        }
+
+        let mut result = [0; N];
+        let mut output = result.as_mut_slice();
+        while !output.is_empty() {
+            self.advance_if_empty();
+            let len = output.len().min(self.current.bytes.len());
+            let (chunk, rest) = self.current.bytes.split_at(len);
+            output[..len].copy_from_slice(chunk);
+            output = &mut output[len..];
+            self.current.bytes = rest;
+            self.current.file_offset += len;
+        }
+        result
+    }
+}
+
 /// Applies PE base relocations when the image is loaded at a nonpreferred base.
 ///
 /// An image with the COFF relocations-stripped flag can use only its preferred base.
@@ -135,37 +238,27 @@ pub fn apply_relocations(
         return Ok(report);
     }
 
-    let reloc_file_offset =
-        pe.rva_to_file_offset(reloc_rva)
-            .ok_or(RelocationError::DirectoryOutOfBounds {
-                rva: reloc_rva,
-                size: reloc_size,
-            })?;
-
-    if reloc_file_offset
-        .checked_add(reloc_size as usize)
-        .is_none_or(|end| end > bytes.len())
-    {
-        return Err(RelocationError::DirectoryOutOfBounds {
+    let mut reader = RelocationReader::new(pe, bytes, reloc_rva, reloc_size).ok_or(
+        RelocationError::DirectoryOutOfBounds {
             rva: reloc_rva,
             size: reloc_size,
-        });
-    }
+        },
+    )?;
 
     let mut read_bytes = 0usize;
     let max_read = reloc_size as usize;
 
     while read_bytes < max_read {
+        reader.advance_if_empty();
+        let block_start = reader.current.file_offset;
         // A partial block header after the last block is malformed, not padding.
         if max_read - read_bytes < 8 {
             return Err(RelocationError::MalformedBlockHeader {
-                offset: reloc_file_offset + read_bytes,
+                offset: block_start,
             });
         }
-        let block_start = reloc_file_offset + read_bytes;
-        let page_rva = u32::from_le_bytes(bytes[block_start..block_start + 4].try_into().unwrap());
-        let block_size =
-            u32::from_le_bytes(bytes[block_start + 4..block_start + 8].try_into().unwrap());
+        let page_rva = u32::from_le_bytes(reader.read());
+        let block_size = u32::from_le_bytes(reader.read());
 
         // A block is an 8-byte header followed by whole 2-byte entries.
         if block_size < 8 || block_size % 2 != 0 {
@@ -173,7 +266,7 @@ pub fn apply_relocations(
                 offset: block_start,
             });
         }
-        if read_bytes + (block_size as usize) > max_read {
+        if (block_size as usize) > max_read - read_bytes {
             return Err(RelocationError::BlockSizeOutOfBounds {
                 block_size,
                 max_size: max_read - read_bytes,
@@ -181,10 +274,8 @@ pub fn apply_relocations(
         }
 
         let num_entries = (block_size as usize - 8) / 2;
-        for i in 0..num_entries {
-            let entry_offset = block_start + 8 + i * 2;
-            let entry_val =
-                u16::from_le_bytes(bytes[entry_offset..entry_offset + 2].try_into().unwrap());
+        for _ in 0..num_entries {
+            let entry_val = u16::from_le_bytes(reader.read());
             let reloc_type = (entry_val >> 12) as u8;
             let offset_in_page = (entry_val & 0x0FFF) as u32;
 

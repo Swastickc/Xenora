@@ -103,6 +103,7 @@ class SigningTests(unittest.TestCase):
             ("flags=0x2\nTimestamp=Nov 25, 2026\n", ENTITLEMENTS, "Hardened Runtime"),
             ("flags=0x10000(runtime)\nSigned Time=Nov 25, 2026\n", ENTITLEMENTS, "secure timestamp"),
             (DEVELOPER_DETAILS, {"com.apple.security.get-task-allow": True}, "unexpected entitlements"),
+            (DEVELOPER_DETAILS, {"com.apple.security.cs.allow-jit": 1}, "unexpected entitlements"),
         ]:
             with self.subTest(expected=expected):
                 commands = Recorder()
@@ -116,6 +117,7 @@ class SigningTests(unittest.TestCase):
         for response, expected in [
             ("unexpected raw output", "invalid JSON"),
             ('{"status": "Invalid"}', "did not accept"),
+            (json.dumps({"status": "Invalid", "id": SUBMISSION}), SUBMISSION),
             ('{"status": "Accepted"}', "no valid submission ID"),
             ('{"status": "Accepted", "id": "wrong"}', "no valid submission ID"),
         ]:

@@ -80,6 +80,8 @@ def _appledouble_target(parts: list[str], is_dir: bool) -> str | None:
 
 
 def _validate_archive(archive: Path) -> None:
+    if archive.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("preview ZIP exceeds its on-disk size limit")
     with ZipFile(archive) as source:
         seen = set()
         app_members = set()

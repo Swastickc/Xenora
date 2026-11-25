@@ -19,7 +19,8 @@ _DEVELOPER_ID = (
     " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
     " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
 )
-_JIT_ENTITLEMENTS = {"com.apple.security.cs.allow-jit": True}
+_ALLOW_JIT = "com.apple.security.cs.allow-jit"
+_JIT_ENTITLEMENTS = {_ALLOW_JIT: True}
 
 
 def _signing_targets(app: Path) -> tuple[Path, Path]:
@@ -60,7 +61,7 @@ def _verify_developer_id(app: Path, *, run) -> None:
             actual = plistlib.loads(entitlements.encode("utf-8"))
         except (ValueError, plistlib.InvalidFileException, ExpatError):
             raise RuntimeError(f"{target.name} signature lacks valid entitlements") from None
-        if actual != _JIT_ENTITLEMENTS:
+        if not isinstance(actual, dict) or actual.keys() != _JIT_ENTITLEMENTS.keys() or actual[_ALLOW_JIT] is not True:
             raise RuntimeError(f"{target.name} signature has unexpected entitlements")
 
 
@@ -111,14 +112,19 @@ def notarize(app: Path, submission_zip: Path, *, profile: str, run) -> str:
         result = json.loads(response)
     except (TypeError, ValueError):
         raise RuntimeError("Notarization returned invalid JSON") from None
-    if not isinstance(result, dict) or result.get("status") != "Accepted":
-        raise RuntimeError("Apple did not accept the notarization submission")
+    if not isinstance(result, dict):
+        raise RuntimeError("Notarization returned no submission record")
     submission_id = result.get("id")
     try:
         if not isinstance(submission_id, str) or str(UUID(submission_id)) != submission_id.lower():
             raise ValueError()
     except ValueError:
-        raise RuntimeError("Notarization returned no valid submission ID") from None
+        submission_id = None
+    if result.get("status") != "Accepted":
+        diagnostic = f" (submission {submission_id})" if submission_id else ""
+        raise RuntimeError(f"Apple did not accept the notarization submission{diagnostic}")
+    if submission_id is None:
+        raise RuntimeError("Notarization returned no valid submission ID")
 
     run(["xcrun", "stapler", "staple", app])
     run(["xcrun", "stapler", "validate", app])

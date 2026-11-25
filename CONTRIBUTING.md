@@ -65,7 +65,9 @@ is stapled to the app and verified again after the final ZIP is extracted.
 Use `verify --require-developer-id <directory>` to require the Developer ID
 workflow when verifying a preview. The check accepts a valid Apple Developer ID
 signature and does not identify the repository's publisher. Keychain credentials
-stay outside the repository and the output.
+stay outside the repository and the output. Before distribution, review Apple's
+warnings for the submission ID in `manifest.json` with
+`xcrun notarytool log <submission-id> --keychain-profile <profile>`.
 
 The preview tool leaves release creation and public distribution to the
 maintainers. See the [remaining attribution and corresponding-source

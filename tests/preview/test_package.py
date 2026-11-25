@@ -105,6 +105,12 @@ class PreviewPackageTests(unittest.TestCase):
                     run=lambda args: self.fail("ditto ran for oversized input"),
                 )
 
+    def test_extract_rejects_oversized_zip_before_opening_it(self):
+        self.archive.write_bytes(b"not a ZIP")
+        with patch.object(package, "MAX_ARCHIVE_BYTES", 5):
+            with self.assertRaisesRegex(ValueError, "on-disk size limit"):
+                package.extract_app(self.archive, self.destination, run=self.fail)
+
     def test_inspect_records_both_binaries_without_paths_or_execution(self):
         app = self.make_app(self.root)
         calls = []

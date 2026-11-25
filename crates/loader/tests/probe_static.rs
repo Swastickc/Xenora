@@ -158,7 +158,7 @@ fn probe_distinguishes_aliases_from_unavailable_services() {
 
     for (index, (rva, name)) in [
         (0x1180u64, "GetCurrentProcess"),
-        (0x11a0u64, "CreateThread"),
+        (0x11a0u64, "TerminateProcess"),
         (0x11c0u64, "getcurrentprocess"),
     ]
     .into_iter()

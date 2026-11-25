@@ -547,6 +547,86 @@ d3 4c be 10 | ror dword ptr [rsi + 4*rdi + 16], cl
 48 d3 4c be 10 | ror qword ptr [rsi + 4*rdi + 16], cl
 49 c1 cd 3f | ror r13, 63
 49 c1 cd 00 | ror r13, 0
+d0 d3 | rcl bl, 1
+d0 54 be 10 | rcl byte ptr [rsi + 4*rdi + 16], 1
+c0 d3 03 | rcl bl, 3
+c0 54 be 10 03 | rcl byte ptr [rsi + 4*rdi + 16], 3
+c0 d3 07 | rcl bl, 7
+c0 54 be 10 07 | rcl byte ptr [rsi + 4*rdi + 16], 7
+d2 d3 | rcl bl, cl
+d2 54 be 10 | rcl byte ptr [rsi + 4*rdi + 16], cl
+41 c0 d5 07 | rcl r13b, 7
+41 c0 d5 00 | rcl r13b, 0
+66 d1 d3 | rcl bx, 1
+66 d1 54 be 10 | rcl word ptr [rsi + 4*rdi + 16], 1
+66 c1 d3 03 | rcl bx, 3
+66 c1 54 be 10 03 | rcl word ptr [rsi + 4*rdi + 16], 3
+66 c1 d3 07 | rcl bx, 7
+66 c1 54 be 10 07 | rcl word ptr [rsi + 4*rdi + 16], 7
+66 d3 d3 | rcl bx, cl
+66 d3 54 be 10 | rcl word ptr [rsi + 4*rdi + 16], cl
+66 41 c1 d5 0f | rcl r13w, 15
+66 41 c1 d5 00 | rcl r13w, 0
+d1 d3 | rcl ebx, 1
+d1 54 be 10 | rcl dword ptr [rsi + 4*rdi + 16], 1
+c1 d3 03 | rcl ebx, 3
+c1 54 be 10 03 | rcl dword ptr [rsi + 4*rdi + 16], 3
+c1 d3 07 | rcl ebx, 7
+c1 54 be 10 07 | rcl dword ptr [rsi + 4*rdi + 16], 7
+d3 d3 | rcl ebx, cl
+d3 54 be 10 | rcl dword ptr [rsi + 4*rdi + 16], cl
+41 c1 d5 1f | rcl r13d, 31
+41 c1 d5 00 | rcl r13d, 0
+48 d1 d3 | rcl rbx, 1
+48 d1 54 be 10 | rcl qword ptr [rsi + 4*rdi + 16], 1
+48 c1 d3 03 | rcl rbx, 3
+48 c1 54 be 10 03 | rcl qword ptr [rsi + 4*rdi + 16], 3
+48 c1 d3 07 | rcl rbx, 7
+48 c1 54 be 10 07 | rcl qword ptr [rsi + 4*rdi + 16], 7
+48 d3 d3 | rcl rbx, cl
+48 d3 54 be 10 | rcl qword ptr [rsi + 4*rdi + 16], cl
+49 c1 d5 3f | rcl r13, 63
+49 c1 d5 00 | rcl r13, 0
+d0 db | rcr bl, 1
+d0 5c be 10 | rcr byte ptr [rsi + 4*rdi + 16], 1
+c0 db 03 | rcr bl, 3
+c0 5c be 10 03 | rcr byte ptr [rsi + 4*rdi + 16], 3
+c0 db 07 | rcr bl, 7
+c0 5c be 10 07 | rcr byte ptr [rsi + 4*rdi + 16], 7
+d2 db | rcr bl, cl
+d2 5c be 10 | rcr byte ptr [rsi + 4*rdi + 16], cl
+41 c0 dd 07 | rcr r13b, 7
+41 c0 dd 00 | rcr r13b, 0
+66 d1 db | rcr bx, 1
+66 d1 5c be 10 | rcr word ptr [rsi + 4*rdi + 16], 1
+66 c1 db 03 | rcr bx, 3
+66 c1 5c be 10 03 | rcr word ptr [rsi + 4*rdi + 16], 3
+66 c1 db 07 | rcr bx, 7
+66 c1 5c be 10 07 | rcr word ptr [rsi + 4*rdi + 16], 7
+66 d3 db | rcr bx, cl
+66 d3 5c be 10 | rcr word ptr [rsi + 4*rdi + 16], cl
+66 41 c1 dd 0f | rcr r13w, 15
+66 41 c1 dd 00 | rcr r13w, 0
+d1 db | rcr ebx, 1
+d1 5c be 10 | rcr dword ptr [rsi + 4*rdi + 16], 1
+c1 db 03 | rcr ebx, 3
+c1 5c be 10 03 | rcr dword ptr [rsi + 4*rdi + 16], 3
+c1 db 07 | rcr ebx, 7
+c1 5c be 10 07 | rcr dword ptr [rsi + 4*rdi + 16], 7
+d3 db | rcr ebx, cl
+d3 5c be 10 | rcr dword ptr [rsi + 4*rdi + 16], cl
+41 c1 dd 1f | rcr r13d, 31
+41 c1 dd 00 | rcr r13d, 0
+48 d1 db | rcr rbx, 1
+48 d1 5c be 10 | rcr qword ptr [rsi + 4*rdi + 16], 1
+48 c1 db 03 | rcr rbx, 3
+48 c1 5c be 10 03 | rcr qword ptr [rsi + 4*rdi + 16], 3
+48 c1 db 07 | rcr rbx, 7
+48 c1 5c be 10 07 | rcr qword ptr [rsi + 4*rdi + 16], 7
+48 d3 db | rcr rbx, cl
+48 d3 5c be 10 | rcr qword ptr [rsi + 4*rdi + 16], cl
+49 c1 dd 3f | rcr r13, 63
+49 c1 dd 00 | rcr r13, 0
 d0 e3 | shl bl, 1
 d0 64 be 10 | shl byte ptr [rsi + 4*rdi + 16], 1
 c0 e3 03 | shl bl, 3
@@ -667,6 +747,78 @@ d3 7c be 10 | sar dword ptr [rsi + 4*rdi + 16], cl
 48 d3 7c be 10 | sar qword ptr [rsi + 4*rdi + 16], cl
 49 c1 fd 3f | sar r13, 63
 49 c1 fd 00 | sar r13, 0
+66 44 0f a4 cb 01 | shld bx, r9w, 1
+66 0f a4 54 be 10 01 | shld word ptr [rsi + 4*rdi + 16], dx, 1
+66 44 0f a4 cb 03 | shld bx, r9w, 3
+66 0f a4 54 be 10 03 | shld word ptr [rsi + 4*rdi + 16], dx, 3
+66 44 0f a4 cb 07 | shld bx, r9w, 7
+66 0f a4 54 be 10 07 | shld word ptr [rsi + 4*rdi + 16], dx, 7
+66 44 0f a5 cb | shld bx, r9w, cl
+66 0f a5 54 be 10 | shld word ptr [rsi + 4*rdi + 16], dx, cl
+66 41 0f a4 c5 0f | shld r13w, ax, 15
+66 41 0f a4 cd 00 | shld r13w, cx, 0
+66 0f a4 db 05 | shld bx, bx, 5
+66 45 0f a4 d4 10 | shld r12w, r10w, 16
+44 0f a4 cb 01 | shld ebx, r9d, 1
+0f a4 54 be 10 01 | shld dword ptr [rsi + 4*rdi + 16], edx, 1
+44 0f a4 cb 03 | shld ebx, r9d, 3
+0f a4 54 be 10 03 | shld dword ptr [rsi + 4*rdi + 16], edx, 3
+44 0f a4 cb 07 | shld ebx, r9d, 7
+0f a4 54 be 10 07 | shld dword ptr [rsi + 4*rdi + 16], edx, 7
+44 0f a5 cb | shld ebx, r9d, cl
+0f a5 54 be 10 | shld dword ptr [rsi + 4*rdi + 16], edx, cl
+41 0f a4 c5 1f | shld r13d, eax, 31
+41 0f a4 cd 00 | shld r13d, ecx, 0
+0f a4 db 05 | shld ebx, ebx, 5
+45 0f a4 d4 20 | shld r12d, r10d, 32
+4c 0f a4 cb 01 | shld rbx, r9, 1
+48 0f a4 54 be 10 01 | shld qword ptr [rsi + 4*rdi + 16], rdx, 1
+4c 0f a4 cb 03 | shld rbx, r9, 3
+48 0f a4 54 be 10 03 | shld qword ptr [rsi + 4*rdi + 16], rdx, 3
+4c 0f a4 cb 07 | shld rbx, r9, 7
+48 0f a4 54 be 10 07 | shld qword ptr [rsi + 4*rdi + 16], rdx, 7
+4c 0f a5 cb | shld rbx, r9, cl
+48 0f a5 54 be 10 | shld qword ptr [rsi + 4*rdi + 16], rdx, cl
+49 0f a4 c5 3f | shld r13, rax, 63
+49 0f a4 cd 00 | shld r13, rcx, 0
+48 0f a4 db 05 | shld rbx, rbx, 5
+4d 0f a4 d4 40 | shld r12, r10, 64
+66 44 0f ac cb 01 | shrd bx, r9w, 1
+66 0f ac 54 be 10 01 | shrd word ptr [rsi + 4*rdi + 16], dx, 1
+66 44 0f ac cb 03 | shrd bx, r9w, 3
+66 0f ac 54 be 10 03 | shrd word ptr [rsi + 4*rdi + 16], dx, 3
+66 44 0f ac cb 07 | shrd bx, r9w, 7
+66 0f ac 54 be 10 07 | shrd word ptr [rsi + 4*rdi + 16], dx, 7
+66 44 0f ad cb | shrd bx, r9w, cl
+66 0f ad 54 be 10 | shrd word ptr [rsi + 4*rdi + 16], dx, cl
+66 41 0f ac c5 0f | shrd r13w, ax, 15
+66 41 0f ac cd 00 | shrd r13w, cx, 0
+66 0f ac db 05 | shrd bx, bx, 5
+66 45 0f ac d4 10 | shrd r12w, r10w, 16
+44 0f ac cb 01 | shrd ebx, r9d, 1
+0f ac 54 be 10 01 | shrd dword ptr [rsi + 4*rdi + 16], edx, 1
+44 0f ac cb 03 | shrd ebx, r9d, 3
+0f ac 54 be 10 03 | shrd dword ptr [rsi + 4*rdi + 16], edx, 3
+44 0f ac cb 07 | shrd ebx, r9d, 7
+0f ac 54 be 10 07 | shrd dword ptr [rsi + 4*rdi + 16], edx, 7
+44 0f ad cb | shrd ebx, r9d, cl
+0f ad 54 be 10 | shrd dword ptr [rsi + 4*rdi + 16], edx, cl
+41 0f ac c5 1f | shrd r13d, eax, 31
+41 0f ac cd 00 | shrd r13d, ecx, 0
+0f ac db 05 | shrd ebx, ebx, 5
+45 0f ac d4 20 | shrd r12d, r10d, 32
+4c 0f ac cb 01 | shrd rbx, r9, 1
+48 0f ac 54 be 10 01 | shrd qword ptr [rsi + 4*rdi + 16], rdx, 1
+4c 0f ac cb 03 | shrd rbx, r9, 3
+48 0f ac 54 be 10 03 | shrd qword ptr [rsi + 4*rdi + 16], rdx, 3
+4c 0f ac cb 07 | shrd rbx, r9, 7
+48 0f ac 54 be 10 07 | shrd qword ptr [rsi + 4*rdi + 16], rdx, 7
+4c 0f ad cb | shrd rbx, r9, cl
+48 0f ad 54 be 10 | shrd qword ptr [rsi + 4*rdi + 16], rdx, cl
+49 0f ac c5 3f | shrd r13, rax, 63
+49 0f ac cd 00 | shrd r13, rcx, 0
+48 0f ac db 05 | shrd rbx, rbx, 5
+4d 0f ac d4 40 | shrd r12, r10, 64
 66 41 0f af d9 | imul bx, r9w
 66 0f af 5c be 10 | imul bx, word ptr [rsi + 4*rdi + 16]
 66 44 6b c1 f9 | imul r8w, cx, -7
@@ -932,6 +1084,8 @@ f3 4c 0f bd 54 be 10 | lzcnt r10, qword ptr [rsi + 4*rdi + 16]
 c6 44 be 10 5a | mov byte ptr [rsi + 4*rdi + 16], 0x5a
 41 86 d9 | xchg bl, r9b
 86 54 be 10 | xchg byte ptr [rsi + 4*rdi + 16], dl
+a0 20 20 00 00 00 00 00 00 | movabs al, byte ptr [0x2020]
+a2 20 20 00 00 00 00 00 00 | movabs byte ptr [0x2020], al
 66 44 89 cb | mov bx, r9w
 66 44 8b 54 be 10 | mov r10w, word ptr [rsi + 4*rdi + 16]
 66 89 54 be 10 | mov word ptr [rsi + 4*rdi + 16], dx
@@ -939,6 +1093,8 @@ c6 44 be 10 5a | mov byte ptr [rsi + 4*rdi + 16], 0x5a
 66 c7 44 be 10 5a 00 | mov word ptr [rsi + 4*rdi + 16], 0x5a
 66 41 87 d9 | xchg bx, r9w
 66 87 54 be 10 | xchg word ptr [rsi + 4*rdi + 16], dx
+66 a1 20 20 00 00 00 00 00 00 | movabs ax, word ptr [0x2020]
+66 a3 20 20 00 00 00 00 00 00 | movabs word ptr [0x2020], ax
 44 89 cb | mov ebx, r9d
 44 8b 54 be 10 | mov r10d, dword ptr [rsi + 4*rdi + 16]
 89 54 be 10 | mov dword ptr [rsi + 4*rdi + 16], edx
@@ -946,6 +1102,8 @@ c6 44 be 10 5a | mov byte ptr [rsi + 4*rdi + 16], 0x5a
 c7 44 be 10 5a 00 00 00 | mov dword ptr [rsi + 4*rdi + 16], 0x5a
 41 87 d9 | xchg ebx, r9d
 87 54 be 10 | xchg dword ptr [rsi + 4*rdi + 16], edx
+a1 20 20 00 00 00 00 00 00 | movabs eax, dword ptr [0x2020]
+a3 20 20 00 00 00 00 00 00 | movabs dword ptr [0x2020], eax
 4c 89 cb | mov rbx, r9
 4c 8b 54 be 10 | mov r10, qword ptr [rsi + 4*rdi + 16]
 48 89 54 be 10 | mov qword ptr [rsi + 4*rdi + 16], rdx
@@ -953,6 +1111,8 @@ c7 44 be 10 5a 00 00 00 | mov dword ptr [rsi + 4*rdi + 16], 0x5a
 48 c7 44 be 10 5a 00 00 00 | mov qword ptr [rsi + 4*rdi + 16], 0x5a
 49 87 d9 | xchg rbx, r9
 48 87 54 be 10 | xchg qword ptr [rsi + 4*rdi + 16], rdx
+48 a1 20 20 00 00 00 00 00 00 | movabs rax, qword ptr [0x2020]
+48 a3 20 20 00 00 00 00 00 00 | movabs qword ptr [0x2020], rax
 0f c0 cb | xadd bl, cl
 45 0f c0 e1 | xadd r9b, r12b
 0f c0 d0 | xadd al, dl
@@ -1033,10 +1193,20 @@ b7 21 | mov bh, 0x21
 f8 | clc
 f9 | stc
 f5 | cmc
+9f | lahf
+9e | sahf
 90 | nop
 0f a2 | cpuid
 0f 1f 40 08 | nop dword ptr [rax + 8]
 f3 90 | pause
+0f ae e8 | lfence
+0f ae f0 | mfence
+0f ae f8 | sfence
+db e3 | fninit
+0f c3 5c be 10 | movnti dword ptr [rsi + 4*rdi + 16], ebx
+48 0f c3 5c be 10 | movnti qword ptr [rsi + 4*rdi + 16], rbx
+44 0f c3 4c be 10 | movnti dword ptr [rsi + 4*rdi + 16], r9d
+4c 0f c3 74 be 10 | movnti qword ptr [rsi + 4*rdi + 16], r14
 41 51 | push r9
 53 | push rbx
 6a fb | push -5
@@ -1046,3 +1216,23 @@ ff 74 be 10 | push qword ptr [rsi + 4*rdi + 16]
 41 5c | pop r12
 8f 44 be 10 | pop qword ptr [rsi + 4*rdi + 16]
 c9 | leave
+91 | xchg eax, ecx
+48 92 | xchg rax, rdx
+66 93 | xchg ax, bx
+94 | xchg eax, esp
+48 95 | xchg rax, rbp
+66 96 | xchg ax, si
+97 | xchg eax, edi
+49 90 | xchg rax, r8
+66 41 91 | xchg ax, r9w
+41 92 | xchg eax, r10d
+49 93 | xchg rax, r11
+66 41 94 | xchg ax, r12w
+41 95 | xchg eax, r13d
+49 96 | xchg rax, r14
+66 41 97 | xchg ax, r15w
+66 41 90 | xchg r8w, ax
+49 90 | xchg r8, rax
+41 90 | xchg r8d, eax
+91 | xchg ecx, eax
+66 41 97 | xchg r15w, ax

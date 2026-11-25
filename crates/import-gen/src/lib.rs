@@ -27,6 +27,7 @@
 pub mod apiset;
 pub mod classify;
 pub mod codegen;
+pub mod demangle;
 pub mod ingest;
 pub mod manifest;
 pub mod metadata;
@@ -37,6 +38,7 @@ pub mod verify;
 pub use apiset::{get_api_sets_for_canonical, resolve_api_set_canonical};
 pub use classify::{Classification, SymbolDb};
 pub use codegen::{GeneratedFiles, generate};
+pub use demangle::demangle;
 pub use ingest::{ingest_header_file, ingest_standard_system_headers};
 pub use manifest::Manifest;
 pub use metadata::{AbiType, CallingConvention, FunctionSignature, MetadataCatalog};

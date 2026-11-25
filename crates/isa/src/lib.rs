@@ -20,7 +20,8 @@ pub use rdna2::{
 };
 pub use semantics_gen::{
     ScalarAluOp, ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp, ScalarUnaryOp,
-    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSwapOp, VectorUnaryOp,
+    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorCompareVop3Op,
+    VectorSwapOp, VectorUnaryOp,
 };
 
 impl VectorAluOp {
@@ -227,6 +228,14 @@ pub enum Instruction {
         src0: VectorSource,
         src1: u8,
     },
+    /// VOP3A 32-bit integer compare writing a Wave32 mask to s0-s105 or `vcc_lo`.
+    /// Both sources are VGPR indices.
+    VectorCompareVop3 {
+        op: VectorCompareVop3Op,
+        sdst: u8,
+        src0: u8,
+        src1: u8,
+    },
     /// VOP2 32-bit per-lane integer operation from the semantic registry.
     /// `src0` is a VGPR, `s0-s105`, `vcc_lo`, an inline integer or a literal;
     /// `src1` is a VGPR. Inactive lanes keep `dst`.
@@ -309,6 +318,7 @@ impl Instruction {
             Self::ScalarImmediate { op, .. } => op.mnemonic(),
             Self::ScalarImmediateCompare { op, .. } => op.mnemonic(),
             Self::VectorCompare { op, .. } => op.assembly_name(),
+            Self::VectorCompareVop3 { op, .. } => op.assembly_name(),
             Self::VectorAlu { op, .. } => op.assembly_name(),
             Self::BranchSccZero { .. } => "s_cbranch_scc0",
             Self::BranchExecZero { .. } => "s_cbranch_execz",
@@ -393,6 +403,9 @@ impl fmt::Display for Instruction {
             Self::VectorCompare { src0, src1, .. } => {
                 write!(formatter, " vcc_lo, {src0}, v{src1}")
             }
+            Self::VectorCompareVop3 {
+                sdst, src0, src1, ..
+            } => write!(formatter, " {}, v{src0}, v{src1}", ScalarDestination(sdst)),
             Self::VectorAlu {
                 op,
                 dst,

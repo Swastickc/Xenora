@@ -625,3 +625,89 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
 }
+
+/// What a path names on the drive, for the C runtime's file streams.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DriveEntry {
+    File,
+    Directory,
+    /// Nothing has this name. `parent` says whether its directory exists.
+    Missing {
+        parent: bool,
+    },
+}
+
+/// The drive as the C runtime's file streams (`crt_files.rs`) use it. They read
+/// and write the same files as the handle services above. A stream is not a
+/// handle: it takes no part in sharing, and a file it has open can be deleted
+/// or moved, after which its operations fail.
+impl super::ObjectState {
+    /// A narrow file name as the drive stores it: ASCII, either slash, any
+    /// case, with or without `C:\`. `None` for a name the drive rejects.
+    pub(super) fn drive_path(name: &[u8]) -> Option<String> {
+        if !name.is_ascii() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(name)
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        let path = path.strip_prefix("c:\\").unwrap_or(&path).to_owned();
+        path.split('\\').all(valid_component).then_some(path)
+    }
+
+    pub(super) fn drive_entry(&self, path: &str) -> DriveEntry {
+        if self.files.contains_key(path) {
+            DriveEntry::File
+        } else if self.directories.contains(path) {
+            DriveEntry::Directory
+        } else {
+            let parent = parent(path);
+            DriveEntry::Missing {
+                parent: parent.is_empty() || self.directories.contains(parent),
+            }
+        }
+    }
+
+    /// Create an empty file. False when the drive already holds as many files
+    /// as it can.
+    pub(super) fn drive_create(&mut self, path: &str) -> bool {
+        if self.files.len() >= MAX_FILES {
+            return false;
+        }
+        self.files.insert(path.to_owned(), Vec::new());
+        true
+    }
+
+    pub(super) fn drive_file(&self, path: &str) -> Option<&[u8]> {
+        self.files.get(path).map(Vec::as_slice)
+    }
+
+    /// Empty a file. False when it does not exist.
+    pub(super) fn drive_truncate(&mut self, path: &str) -> bool {
+        self.files.get_mut(path).map(Vec::clear).is_some()
+    }
+
+    /// Write `bytes` at `position`, growing the file as needed. `None` when
+    /// the file does not exist; `Some(false)`, with nothing written, when the
+    /// write would pass the drive's size bound.
+    pub(super) fn drive_write(&mut self, path: &str, position: u64, bytes: &[u8]) -> Option<bool> {
+        let used: usize = self.files.values().map(Vec::len).sum();
+        let data = self.files.get_mut(path)?;
+        let Some(end) = position
+            .checked_add(bytes.len() as u64)
+            .filter(|end| *end <= MAX_BYTES as u64)
+        else {
+            return Some(false);
+        };
+        let (start, end) = (position as usize, end as usize);
+        let growth = end.saturating_sub(data.len());
+        if growth > MAX_BYTES - used {
+            return Some(false);
+        }
+        if growth != 0 {
+            data.resize(end, 0);
+        }
+        data[start..end].copy_from_slice(bytes);
+        Some(true)
+    }
+}

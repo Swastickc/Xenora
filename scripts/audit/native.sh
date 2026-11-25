@@ -17,10 +17,13 @@ python3 - <<'PY'
 import json
 from pathlib import Path
 import subprocess
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
 
 executables = set()
 for filename in ("native-build.jsonl", "native-tests.jsonl"):
-    for line in (Path("artifacts") / filename).read_text().splitlines():
+    for line in (Path("artifacts") / filename).read_text(encoding="utf-8").splitlines():
         entry = json.loads(line)
         if entry.get("executable"):
             executables.add(entry["executable"])
@@ -32,11 +35,11 @@ if not executables:
     raise SystemExit("No Cargo executable or loadable dependency artifacts found.")
 for path in sorted(executables):
     subprocess.run(["file", path], check=True)
-    archs = subprocess.check_output(["lipo", "-archs", path], text=True).strip()
+    archs = subprocess.check_output(["lipo", "-archs", path], encoding="utf-8").strip()
     print(archs, flush=True)
     if archs != "arm64":
         raise SystemExit(f"Non-ARM64 build artifact: {path}")
-    linkage = subprocess.check_output(["otool", "-L", path], text=True)
+    linkage = subprocess.check_output(["otool", "-L", path], encoding="utf-8")
     print(linkage, end="", flush=True)
     if any(name in linkage.casefold() for name in ("vulkan", "moltenvk")):
         raise SystemExit(f"Unexpected graphics linkage: {path}")

@@ -166,7 +166,13 @@ impl Manifest {
             if let Classification::Manual { reason } | Classification::Unsupported { reason } =
                 &e.classification
             {
-                md.push_str(&format!("- `{}!{}` — {reason}\n", e.module, e.symbol));
+                match crate::demangle(&e.symbol) {
+                    Some(name) => md.push_str(&format!(
+                        "- `{}!{}` (`{name}`) — {reason}\n",
+                        e.module, e.symbol
+                    )),
+                    None => md.push_str(&format!("- `{}!{}` — {reason}\n", e.module, e.symbol)),
+                }
             }
         }
         md

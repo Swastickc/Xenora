@@ -48,20 +48,19 @@ file of its encoding (`rdna2/vop3.toml`) and has exactly these fields:
 | `of` | The `name` of the declared base form |
 | `family` | The encoding family of this variant; must differ from the form's |
 | `opcode` | The XML opcode in that family |
-| `operands` | An operand rule of that family whose kind can encode the base form (today `vop3_vgpr2` for VOP2 vector forms) |
+| `operands` | An operand rule of that family that can encode the base form (`vop3_vgpr2` for VOP2 vector forms, `vop3_cmp_vgpr2` for VOPC integer compares) |
 | `spec`, `verify` | As for a form |
 
-Everything else (operation, signedness, effects, source order) is inherited
-from the base form, and the XML check runs on that inherited declaration with
-the variant's family, opcode and operand rule, so the VOP3 operand widths and
-formats must agree with it. The generator emits one enum per variant rule (`VectorAluVop3Op` for
-`vop3_vgpr2`) holding exactly the declared variants, with `from_word` (encoding
+The variant inherits the operation, signedness, source order and SCC and EXEC
+effects. Its operand rule determines where the result is written. The XML
+check uses the variant's family, opcode and operand rule to validate the
+inherited declaration. The generator emits one enum per variant rule
+(`VectorAluVop3Op` or `VectorCompareVop3Op`) with `from_word` (encoding
 bits, then an explicit match on the OP field), `base()` (the inherited form),
 `assembly_name()` and `semantics()`, and one `FORMS` row per variant after the
 forms. Because the enum has no undeclared members, an instruction cannot name a
-VOP3 encoding that does not exist. Every explicit XML operand of the variant,
-destination included, must have the data format of the base operand in the same
-role (destination, then the sources in rule order). A variant-only rule says so
+VOP3 encoding that does not exist. Corresponding explicit XML operands must
+have the same data format by role. A variant-only rule says so
 in the data (`variant_only = true`), so the RDNA2 planner does not count it as a
 rule that can host new forms. A
 variant-only rule (one marked `variant_of` in the generator) cannot be used by a
@@ -75,7 +74,15 @@ the registry: VGPR destination, two VGPR sources, ABS, OP_SEL, CLAMP, OMOD and
 NEG clear, and SRC2 the assembler's unused inline zero. `v_add_nc_u32_e64` is its
 first variant; adding the VOP3 encoding of another VOP2 form under this rule is
 one `[[encoding_variant]]` entry. Wider VOP3 operand rules (scalar and inline
-sources, legal modifiers) come with the VOP3 batch.
+sources, legal modifiers) need separate rules.
+
+`vop3_cmp_vgpr2` uses the same VGPR source and modifier restrictions and
+specifies a scalar destination. It requires a base form with a `lane_mask`
+write to implicit VCC, and generates an `sdst_lane_mask` effect on the
+variant row. The generator checks the base VCC output and the variant's
+explicit scalar mask destination against the XML. An SDST of 106 selects
+`vcc_lo`. See [the compare contract](vector-compare.md#11-vop3a-encoding-_e64)
+for Wave32 lowering and allowed consumers.
 
 ## Fields
 
@@ -199,7 +206,8 @@ integer as SRC0 and a VGPR pair as VSRC1. All three declare a `relation`,
 `scc = "unchanged"`, `vcc = "lane_mask"` and `wave = "wave32"`. The XML's implicit
 64-bit VCC output must be present and is accounted for by `lane_mask`. Signedness
 still matters for `eq` and `lg`, because the MSL lowering casts signed operands.
-`v_cmpx_*` (EXEC writes), the VOP3 encoding and Wave64 stay unsupported.
+The VOP3A variants redirect the same Wave32 mask to SDST. EXEC-writing
+compares (`v_cmpx_*`) and Wave64 stay unsupported.
 
 A SOPC compare must use an operand rule of the compare kind (`sopc_scalar`: two
 sources, no destination), a unary operation one of the unary kind (`sop1_sgpr`:

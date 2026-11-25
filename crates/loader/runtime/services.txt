@@ -116,6 +116,93 @@ service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
     ref sysinfoapi.h GetSystemTimeAsFileTime
     test system_time_comes_from_the_injected_clock
 
+# Standard streams and formatted output for a hosted C program. Output to
+# stdout and stderr is captured, and a stream from fopen is a file. A pointer
+# that is no stream, reading stdin, and floating-point and wide conversions
+# stop the guest with the runtime-limit fault.
+
+service ucrtbase.dll __acrt_iob_func(index: u32) -> ptr
+    handler standard_stream
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails stops the guest for an index above 2 or when the streams cannot be allocated
+    ref corecrt_wstdio.h __acrt_iob_func
+    test standard_streams_are_three_stable_file_objects
+
+service ucrtbase.dll __stdio_common_vfprintf(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vfprintf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled
+    ref corecrt_stdio_config.h __stdio_common_vfprintf; Microsoft Learn, vfprintf and format specification syntax
+    test formatted_output_reaches_the_captured_standard_streams
+
+service ucrtbase.dll fwrite(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64
+    handler fwrite
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails 0 with errno EINVAL for a null buffer or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h fwrite
+    test fwrite_and_fputs_write_to_the_captured_standard_streams
+
+service ucrtbase.dll fputs(text: ptr, stream: ptr) -> i32
+    handler fputs
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h fputs
+    test fwrite_and_fputs_write_to_the_captured_standard_streams
+
+service ucrtbase.dll fflush(stream: ptr) -> i32
+    handler fflush
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails stops the guest for a pointer that is no stream
+    ref stdio.h fflush
+    test fflush_and_setvbuf_return_their_documented_results
+
+service ucrtbase.dll setvbuf(stream: ptr, buffer: ptr, mode: i32, size: u64) -> i32
+    handler setvbuf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream
+    ref stdio.h setvbuf
+    test fflush_and_setvbuf_return_their_documented_results
+
+# Files for a hosted C program, on the in-memory drive the handle services use.
+
+service ucrtbase.dll fopen(name: ptr, mode: ptr) -> ptr
+    handler fopen
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM
+    ref stdio.h fopen
+    test a_file_written_through_a_stream_reads_back_line_by_line
+
+service ucrtbase.dll fclose(stream: ptr) -> i32
+    handler fclose
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream
+    ref stdio.h fclose
+    test a_file_written_through_a_stream_reads_back_line_by_line
+
+service ucrtbase.dll fgets(buffer: ptr, count: i32, stream: ptr) -> ptr
+    handler fgets
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails null at end of file; null with errno EINVAL or EBADF; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h fgets
+    test fgets_reads_lines_within_its_count
+
+service ucrtbase.dll perror(message: ptr) -> void
+    handler perror
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails never
+    ref stdio.h perror
+    test perror_writes_the_message_and_the_error_text_to_stderr
+
 service kernel32.dll GetLastError() -> u32
     handler get_last_error
     status partial
@@ -132,6 +219,51 @@ service kernel32.dll SetLastError(code: u32) -> void
     ref errhandlingapi.h SetLastError
     test last_error_is_set_by_failures_and_by_the_guest
 
+# What a hosted C program's startup code hands to `main`. The three pointer
+# functions and the two initialization functions are listed by Microsoft only
+# by name; crates/loader/src/services/crt_arguments.rs says what is documented,
+# inferred and Xenora's choice.
+
+service ucrtbase.dll __p___argc() -> ptr
+    handler argc_pointer
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails stops the guest when the variable cannot be allocated
+    ref Microsoft Learn, C runtime library reference, __argc, __argv, __wargv
+    test program_arguments_reach_the_guest_as_argc_and_argv
+
+service ucrtbase.dll __p___argv() -> ptr
+    handler argv_pointer
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails stops the guest when the variable cannot be allocated
+    ref Microsoft Learn, C runtime library reference, __argc, __argv, __wargv
+    test program_arguments_reach_the_guest_as_argc_and_argv
+
+service ucrtbase.dll __p__environ() -> ptr
+    handler environ_pointer
+    status partial
+    alias api-ms-win-crt-environment-l1-1-0.dll
+    fails stops the guest when the variable cannot be allocated
+    ref Microsoft Learn, C runtime library reference, _environ, _wenviron
+    test the_environment_table_is_empty_and_ends_with_a_null_pointer
+
+service ucrtbase.dll _configure_narrow_argv(mode: i32) -> i32
+    handler configure_narrow_argv
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails EINVAL for a mode other than 0, 1 or 2; stops the guest when the table cannot be allocated
+    ref corecrt_startup.h _configure_narrow_argv
+    test program_arguments_reach_the_guest_as_argc_and_argv
+
+service ucrtbase.dll _initialize_narrow_environment() -> i32
+    handler initialize_narrow_environment
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails stops the guest when the table cannot be allocated
+    ref corecrt_startup.h _initialize_narrow_environment
+    test the_environment_table_is_empty_and_ends_with_a_null_pointer
+
 service kernel32.dll VirtualAlloc(address: ptr, size: u64, kind: u32, protect: u32) -> ptr
     handler virtual_alloc
     status partial
@@ -147,6 +279,34 @@ service kernel32.dll VirtualFree(address: ptr, size: u64, kind: u32) -> bool32
     fails 0 with ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS
     ref memoryapi.h VirtualFree
     test virtual_memory_is_mapped_released_and_bounded
+
+# Stubs. A program built with the mingw-w64 runtime imports these three and
+# does not call them on a normal run. They exist so that its imports bind. A
+# call stops the guest with the runtime-limit fault and changes nothing.
+
+service kernel32.dll VirtualProtect(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32
+    handler virtual_protect
+    status stub
+    alias api-ms-win-core-memory-l1-1-0.dll
+    fails always: stops the guest with the runtime-limit fault; no protection changes
+    ref memoryapi.h VirtualProtect
+    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
+
+service kernel32.dll VirtualQuery(address: ptr, information: out<48>, length: u64) -> u64
+    handler virtual_query
+    status stub
+    alias api-ms-win-core-memory-l1-1-0.dll
+    fails always: stops the guest with the runtime-limit fault; nothing is written
+    ref memoryapi.h VirtualQuery
+    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
+
+service ucrtbase.dll __C_specific_handler(record: ptr, frame: ptr, context: ptr, dispatcher: ptr) -> i32
+    handler c_specific_handler
+    status stub
+    alias api-ms-win-crt-private-l1-1-0.dll
+    fails always: stops the guest with the runtime-limit fault; no exception is dispatched
+    ref Microsoft Learn, x64 exception handling, language-specific handler
+    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
 
 service ucrtbase.dll sqrt(x: f64) -> f64
     handler sqrt
@@ -179,3 +339,78 @@ service ucrtbase.dll fabsf(x: f32) -> f32
     fails never
     ref math.h fabsf (ISO C, IEC 60559 abs)
     test floating_arguments_and_results_use_xmm_registers
+
+# What a C program's startup code configures before `main`. Each value is
+# recorded and returned as documented; nothing in the runtime acts on it.
+
+service ucrtbase.dll _set_app_type(kind: i32) -> void
+    handler set_app_type
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails never
+    ref corecrt_startup.h _set_app_type
+    test crt_app_type_and_math_error_handler_are_recorded
+
+service ucrtbase.dll _set_new_mode(mode: i32) -> i32
+    handler set_new_mode
+    status partial
+    alias api-ms-win-crt-heap-l1-1-0.dll
+    fails -1 with errno EINVAL for a mode other than 0 or 1
+    ref new.h _set_new_mode
+    test crt_startup_modes_return_the_previous_setting
+
+service ucrtbase.dll _configthreadlocale(request: i32) -> i32
+    handler configure_thread_locale
+    status partial
+    alias api-ms-win-crt-locale-l1-1-0.dll
+    fails -1 with errno EINVAL for a request other than 0, 1 or 2
+    ref locale.h _configthreadlocale
+    test crt_startup_modes_return_the_previous_setting
+
+service ucrtbase.dll __setusermatherr(handler: ptr) -> void
+    handler set_user_math_error
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref corecrt_startup.h __setusermatherr
+    test crt_app_type_and_math_error_handler_are_recorded
+
+service ucrtbase.dll _set_invalid_parameter_handler(handler: ptr) -> ptr
+    handler set_invalid_parameter_handler
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails never
+    ref stdlib.h _set_invalid_parameter_handler
+    test crt_startup_handlers_return_the_previous_handler
+
+service ucrtbase.dll __p__fmode() -> ptr
+    handler file_mode_pointer
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails stops the guest when the variable cannot be allocated
+    ref Microsoft Learn, C runtime library reference, __p__fmode
+    test crt_file_mode_variables_are_guest_memory
+
+service ucrtbase.dll __p__commode() -> ptr
+    handler commit_mode_pointer
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails stops the guest when the variable cannot be allocated
+    ref Microsoft Learn, C runtime library reference, __p__commode
+    test crt_file_mode_variables_are_guest_memory
+
+service ucrtbase.dll signal(signal: i32, handler: ptr) -> ptr
+    handler signal
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails SIG_ERR with errno EINVAL for a signal the documentation does not list
+    ref signal.h signal
+    test crt_startup_handlers_return_the_previous_handler
+
+service kernel32.dll SetUnhandledExceptionFilter(filter: ptr) -> ptr
+    handler set_unhandled_exception_filter
+    status partial
+    alias api-ms-win-core-errorhandling-l1-1-0.dll
+    fails never
+    ref errhandlingapi.h SetUnhandledExceptionFilter
+    test crt_startup_handlers_return_the_previous_handler

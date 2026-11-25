@@ -42,9 +42,9 @@ The latest verified milestones include **translated gfx1030 vertex and pixel sha
 | X15 — Executable compatibility | Static PE inspection reports sections, relocations, thread-local storage (TLS) callbacks, imports and entry-point instructions | Static probe implemented |
 | X16 — Guest memory and threading | Virtual memory mapping, thread scheduling, synchronization primitives and atomic operations | Implemented subset |
 | X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Implemented subset |
-| X18 — Graphics API translation | Translate supported Xbox graphics commands, resource descriptors, command queues, barriers and fences into Metal operations | Planned |
+| X18 — Graphics API translation | Translate supported graphics commands, resource descriptors, command queues, barriers and fences into Metal operations. A guest-callable command path with devices, queues, allocators, command lists, resources, draws and framebuffer readback is implemented; barriers, fences and Xbox-specific commands are not | Implemented subset |
 | X19 — Advanced GPU features | Indirect rendering, asynchronous compute, additional texture formats and ray-tracing compatibility research | Planned |
-| X20 — Integrated guest runtime | Connect CPU recompilation, executable loading, system services and graphics translation into one persistent runtime | Planned |
+| X20 — Integrated guest runtime | Connect CPU recompilation, executable loading, system services and graphics translation into one persistent runtime. One guest run now drives CPU execution, system services and graphics into a checked framebuffer, but no persistent runtime and no production CLI or app path exists yet | Implemented subset |
 | X21 — Application compatibility | Execute increasingly complex independently authored applications through the complete guest CPU and GPU pipeline | Planned |
 | X22 — First application boot | Establish a reproducible startup and error-reporting path for supported game-like applications | Planned |
 | X23 — Initial game compatibility | Investigate startup and execution of legally supported game software, identifying missing runtime and graphics behavior | Long-term goal |
@@ -309,7 +309,7 @@ These require a Metal-capable Apple Silicon Mac.
 scripts/test-gpu.sh
 ```
 
-The native test suite enables Metal API and shader validation and tests the supported compute, rendering and texture paths.
+The native test suite enables Metal API and shader validation and tests the supported compute, rendering and texture paths. The full semantic-review batch defaults to a 300-second timeout; set `XENORA_SEMANTIC_TIMEOUT` to raise or lower it for a slower or faster host. On macOS, the script uses a Python 3 fallback when GNU `timeout` is unavailable.
 
 ### Verify guest execution
 

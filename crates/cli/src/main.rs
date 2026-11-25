@@ -6,6 +6,9 @@ mod shaders;
 
 use std::process::ExitCode;
 
+/// Where `probe` writes and `imports sync` reads without `--report`.
+const DEFAULT_REPORT_DIR: &str = "diagnostics/probe";
+
 fn main() -> ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("info") => {
@@ -46,7 +49,7 @@ fn main() -> ExitCode {
             let args: Vec<String> = std::env::args().collect();
             let mut pe_path: Option<String> = None;
             let mut mode = "static".to_string();
-            let mut report_dir = "diagnostics/gta6-candidate-e95020b2".to_string();
+            let mut report_dir = DEFAULT_REPORT_DIR.to_string();
 
             let mut i = 2;
             while i < args.len() {
@@ -373,7 +376,7 @@ fn run_imports_generate_cli(args: &[String]) -> ExitCode {
 }
 
 fn run_imports_sync_cli(args: &[String]) -> ExitCode {
-    let mut report_dir = "diagnostics/gta6-candidate-e95020b2".to_string();
+    let mut report_dir = DEFAULT_REPORT_DIR.to_string();
     let mut check_mode = false;
 
     let mut i = 0;

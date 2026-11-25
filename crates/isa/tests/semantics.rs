@@ -2,11 +2,12 @@
 
 use xenora_isa::meta::{EncodingFamily, FORMS as META_FORMS};
 use xenora_isa::semantics::{
-    CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, MaskEffect, SCHEMA, SccEffect, Signedness, Wave,
+    CarryIn, FORM_IDS, FORMS, GENERATED_SCHEMA, MaskEffect, OperandRule, SCHEMA, SccEffect,
+    Signedness, Wave,
 };
 use xenora_isa::{
     CompareRelation, ScalarAluOp, ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp,
-    ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp,
+    ScalarUnaryOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorCompareVop3Op,
 };
 
 #[test]
@@ -261,8 +262,38 @@ fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
         assert_eq!(row.swap_sources, base.swap_sources);
         assert_eq!(op.assembly_name(), format!("{}_e64", op.base().mnemonic()));
     }
+    for base_op in VectorCompareOp::ALL {
+        let base = base_op.semantics();
+        let mut variants = VectorCompareVop3Op::ALL
+            .into_iter()
+            .filter(|op| op.base() == base_op);
+        if base.width != 32 {
+            assert_eq!(variants.next(), None, "{}", base.name);
+            continue;
+        }
+        let op = variants
+            .next()
+            .expect("32-bit VOPC form must have a VOP3A encoding");
+        assert_eq!(variants.next(), None);
+        let row = op.semantics();
+        assert_eq!((row.name, row.family), (base.name, EncodingFamily::Vop3));
+        assert_eq!(row.operation, base.operation);
+        assert_eq!(row.signedness, base.signedness);
+        assert_eq!(row.relation, base.relation);
+        assert_eq!(row.scc, SccEffect::Unchanged);
+        assert_eq!(row.exec, MaskEffect::Unchanged);
+        assert_eq!(row.wave, Wave::Wave32);
+        assert_eq!(row.width, 32);
+        assert_eq!(row.vcc, MaskEffect::SdstLaneMask);
+        assert_eq!(row.operands, OperandRule::Vop3CmpVgpr2);
+        assert_eq!(op.assembly_name(), format!("{}_e64", base_op.mnemonic()));
+    }
     dispatch_selects_exactly(EncodingFamily::Vop3, |word| {
-        VectorAluVop3Op::from_word(word).map(|op| op.semantics().name)
+        let alu = VectorAluVop3Op::from_word(word);
+        let compare = VectorCompareVop3Op::from_word(word);
+        assert!(alu.is_none() || compare.is_none(), "{word:#x}");
+        alu.map(|op| op.semantics().name)
+            .or_else(|| compare.map(|op| op.semantics().name))
     });
     // No first word of the other 64-bit families (VOP3B shares VOP3's
     // encoding bits) selects a variant.
@@ -272,6 +303,12 @@ fn vop3_variant_dispatch_selects_exactly_the_registry_vop3_rows() {
     {
         assert_eq!(
             VectorAluVop3Op::from_word(meta.bits as u32),
+            None,
+            "{}",
+            meta.name
+        );
+        assert_eq!(
+            VectorCompareVop3Op::from_word(meta.bits as u32),
             None,
             "{}",
             meta.name

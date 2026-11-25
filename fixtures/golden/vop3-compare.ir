@@ -1,0 +1,59 @@
+0000: t0 = load.u32 input[index]
+000c: t1 = const.u32 0x00000000
+0010: t2 = const.u32 0x00000001
+0014: t3 = const.u32 0x40000001
+001c: t4 = const.u32 0x00000001
+0020: t5 = wave.mask v_cmp_f_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+002c: t6 = lshl.b32 t1, t2
+0030: t7 = xor.b32 t6, t5
+0034: t8 = wave.mask v_cmp_lt_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0040: t9 = lshl.b32 t7, t2
+0044: t10 = xor.b32 t9, t8
+0048: t11 = wave.mask v_cmp_eq_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0054: t12 = lshl.b32 t10, t2
+0058: t13 = xor.b32 t12, t11
+005c: t14 = wave.mask v_cmp_le_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0068: t15 = lshl.b32 t13, t2
+006c: t16 = xor.b32 t15, t14
+0070: t17 = wave.mask v_cmp_gt_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+007c: t18 = lshl.b32 t16, t2
+0080: t19 = xor.b32 t18, t17
+0084: t20 = wave.mask v_cmp_ne_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0090: t21 = lshl.b32 t19, t2
+0094: t22 = xor.b32 t21, t20
+0098: t23 = wave.mask v_cmp_ge_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+00a4: t24 = lshl.b32 t22, t2
+00a8: t25 = xor.b32 t24, t23
+00ac: t26 = wave.mask v_cmp_t_i32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+00b8: t27 = lshl.b32 t25, t2
+00bc: t28 = xor.b32 t27, t26
+00c0: t29 = wave.mask v_cmp_f_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+00cc: t30 = lshl.b32 t28, t2
+00d0: t31 = xor.b32 t30, t29
+00d4: t32 = wave.mask v_cmp_lt_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+00e0: t33 = lshl.b32 t31, t2
+00e4: t34 = xor.b32 t33, t32
+00e8: t35 = wave.mask v_cmp_eq_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+00f4: t36 = lshl.b32 t34, t2
+00f8: t37 = xor.b32 t36, t35
+00fc: t38 = wave.mask v_cmp_le_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0108: t39 = lshl.b32 t37, t2
+010c: t40 = xor.b32 t39, t38
+0110: t41 = wave.mask v_cmp_gt_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+011c: t42 = lshl.b32 t40, t2
+0120: t43 = xor.b32 t42, t41
+0124: t44 = wave.mask v_cmp_ne_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0130: t45 = lshl.b32 t43, t2
+0134: t46 = xor.b32 t45, t44
+0138: t47 = wave.mask v_cmp_ge_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0144: t48 = lshl.b32 t46, t2
+0148: t49 = xor.b32 t48, t47
+014c: t50 = wave.mask v_cmp_t_u32_e64 t0, t3 -> vcc_lo exec=0xffffffff
+0158: t51 = lshl.b32 t49, t2
+015c: t52 = xor.b32 t51, t50
+0160: t53 = wave.mask v_cmp_eq_u32_e64 t0, t3 -> s8 exec=0xffffffff
+0168: t54 = wave.mask v_cmp_gt_u32_e64 t3, t0 -> vcc_lo exec=0xffffffff
+0170: branch.vccz t54 -> 0x0178
+0174: t56 = xor.b32 t4, t52
+0178: t57 = join.vccz t54, t56, t52
+0178: store.u32 output[index], t57

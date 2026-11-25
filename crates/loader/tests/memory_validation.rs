@@ -5,7 +5,7 @@
 //! Expected behavior follows x86-64 data access rules: an access is valid when
 //! every byte it touches is mapped with the required permission, whether or not
 //! it is aligned or crosses into an adjacent mapping. A faulting access changes
-//! nothing.
+//! nothing and reports the lowest address it may not touch (#175).
 
 use xenora_loader::{GuestMemory, MemoryError, MemoryPermissions as P};
 
@@ -56,7 +56,7 @@ fn region_end_is_exclusive() {
     lone.map_region(A, 0x1000, P::READ_ONLY).unwrap();
     assert_eq!(
         lone.read_u32(A + 0xFFD),
-        Err(MemoryError::UnmappedAddress(A + 0xFFD))
+        Err(MemoryError::UnmappedAddress(A + 0x1000))
     );
     assert_eq!(
         lone.read_u8(A - 1),
@@ -90,7 +90,7 @@ fn spanning_into_a_gap_fails_without_partial_write() {
     m.map_region(A + 0x2000, 0x1000, P::READ_WRITE).unwrap();
     assert_eq!(
         m.write_u64(A + 0xFFC, u64::MAX),
-        Err(MemoryError::UnmappedAddress(A + 0xFFC))
+        Err(MemoryError::UnmappedAddress(A + 0x1000))
     );
     assert_eq!(m.read_u32(A + 0xFFC), Ok(0x1111_1111));
 }
@@ -101,7 +101,7 @@ fn spanning_into_a_forbidden_region_fails_atomically() {
     assert_eq!(
         m.write_u64(A + 0xFFC, u64::MAX),
         Err(MemoryError::PermissionViolation {
-            address: A + 0xFFC,
+            address: A + 0x1000,
             required: "write"
         })
     );
@@ -123,7 +123,7 @@ fn loader_bypass_ignores_permissions_but_not_mapping() {
     assert_eq!(m.read_u32(A), Ok(7));
     assert_eq!(
         m.write_u64_bypass(A + 0x1FFC, 0),
-        Err(MemoryError::UnmappedAddress(A + 0x1FFC))
+        Err(MemoryError::UnmappedAddress(A + 0x2000))
     );
 }
 

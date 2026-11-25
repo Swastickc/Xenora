@@ -3,7 +3,8 @@
 //! PE32+ (64-bit Portable Executable) format parser and section loader for Xenora.
 //!
 //! Parses standard PE32+ headers (DOS header, COFF header, Optional Header 64)
-//! and loads valid section headers into `GuestMemory` with appropriate permissions.
+//! and loads the headers and each section into `GuestMemory` with appropriate
+//! permissions.
 
 use crate::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use std::fmt;
@@ -19,6 +20,11 @@ pub enum PeError {
     InvalidSectionHeaders,
     SectionMappingError(MemoryError),
     InvalidEntryPoint,
+    /// The headers cannot be mapped at the image base: `SizeOfHeaders` is
+    /// zero, ends before the section table does, runs past the end of the
+    /// file, or its pages reach into a section; or the bytes given to the
+    /// loader do not hold the PE32+ headers that were parsed.
+    InvalidHeaderSize,
 }
 
 impl fmt::Display for PeError {
@@ -42,6 +48,12 @@ impl fmt::Display for PeError {
             Self::InvalidSectionHeaders => write!(f, "invalid or corrupt section headers"),
             Self::SectionMappingError(e) => write!(f, "failed to map section: {e}"),
             Self::InvalidEntryPoint => write!(f, "entry point address is outside executable code"),
+            Self::InvalidHeaderSize => write!(
+                f,
+                "the PE headers cannot be mapped: SizeOfHeaders is zero, shorter than the section \
+                 table, longer than the file or reaches into a section, or the bytes do not match \
+                 the parsed headers"
+            ),
         }
     }
 }
@@ -80,6 +92,9 @@ pub struct LoadedImage {
     pub pe: ParsedPe,
     pub memory: GuestMemory,
     pub entry_point: u64,
+    /// Guest address of the `ImageBase` field in the mapped optional header.
+    /// Startup writes the load base there once relocations have been applied.
+    pub(crate) image_base_field: u64,
 }
 
 // Windows PE Characteristic Constants
@@ -94,9 +109,14 @@ pub const PE32_PLUS_MAGIC: u16 = 0x020B;
 /// PE32+ optional header length up to and including NumberOfRvaAndSizes.
 const PE32_PLUS_MIN_OPTIONAL_HEADER: usize = 112;
 const SECTION_HEADER_SIZE: usize = 40;
-/// Host memory budget for all mapped sections of one image. This is a loader policy
-/// limit, not a property of the PE format.
+/// Host memory budget for the mapped headers and sections of one image. This is a
+/// loader policy limit, not a property of the PE format.
 const MAX_MAPPED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+/// The mapped headers end on a guest page boundary.
+const HEADER_PAGE: u64 = 0x1000;
+/// `ImageBase` and `SizeOfHeaders` within the PE32+ optional header.
+const OPTIONAL_IMAGE_BASE: usize = 24;
+const OPTIONAL_SIZE_OF_HEADERS: usize = 60;
 
 fn read_u16(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
@@ -270,24 +290,90 @@ impl ParsedPe {
         None
     }
 
-    /// Load this parsed PE into a fresh `GuestMemory` instance, mapping all sections.
+    /// Where the headers are and how much to map for them: the file length of
+    /// the headers, the page-rounded length of the mapping, and the file offset
+    /// of the optional header's `ImageBase` field. Nothing is copied or
+    /// allocated here.
+    ///
+    /// A caller may pass bytes other than the ones parsed, so the header
+    /// layout is read again from `bytes` with every access checked, and must
+    /// be a PE32+ optional header that agrees with the parsed metadata.
+    fn headers_for(&self, bytes: &[u8]) -> Result<(usize, u64, usize), PeError> {
+        let field = |at: usize, len: usize| at.checked_add(len).and_then(|end| bytes.get(at..end));
+        let u16_at = |at: usize| Some(u16::from_le_bytes(field(at, 2)?.try_into().ok()?));
+        let u32_at = |at: usize| Some(u32::from_le_bytes(field(at, 4)?.try_into().ok()?));
+        let layout = || {
+            let coff = (u32_at(0x3C)? as usize).checked_add(4)?;
+            let sections = u16_at(coff.checked_add(2)?)?;
+            let optional_size = usize::from(u16_at(coff.checked_add(16)?)?);
+            let optional = coff.checked_add(20)?;
+            let image_base = optional.checked_add(OPTIONAL_IMAGE_BASE)?;
+            let agrees = u16_at(optional)? == PE32_PLUS_MAGIC
+                && optional_size >= PE32_PLUS_MIN_OPTIONAL_HEADER
+                && sections == self.number_of_sections
+                && u64::from_le_bytes(field(image_base, 8)?.try_into().ok()?) == self.image_base
+                && u32_at(optional.checked_add(OPTIONAL_SIZE_OF_HEADERS)?)? == self.size_of_headers;
+            let table_end = optional
+                .checked_add(optional_size)?
+                .checked_add(usize::from(sections).checked_mul(SECTION_HEADER_SIZE)?)?;
+            agrees.then_some((image_base, table_end))
+        };
+        let (image_base, table_end) = layout().ok_or(PeError::InvalidHeaderSize)?;
+
+        // A size of zero is shorter than any section table.
+        let len = self.size_of_headers as usize;
+        if len < table_end || len > bytes.len() {
+            return Err(PeError::InvalidHeaderSize);
+        }
+        let mapped = u64::from(self.size_of_headers).next_multiple_of(HEADER_PAGE);
+        let reaches_a_section = self.sections.iter().any(|sec| {
+            sec.virtual_size.max(sec.raw_data_size) > 0 && u64::from(sec.virtual_address) < mapped
+        });
+        if reaches_a_section {
+            return Err(PeError::InvalidHeaderSize);
+        }
+        Ok((len, mapped, image_base))
+    }
+
+    /// Load this parsed PE into a fresh `GuestMemory` instance, mapping the
+    /// headers and all sections.
     pub fn load_into_memory(&self, bytes: &[u8]) -> Result<LoadedImage, PeError> {
         self.load_at_base(bytes, self.image_base)
     }
 
     pub(crate) fn load_at_base(&self, bytes: &[u8], base: u64) -> Result<LoadedImage, PeError> {
-        // Each section becomes a zero-filled host allocation, so bound the total before
-        // allocating anything. Sections may not overlap, so the sum is the mapped size.
-        let mapped: u64 = self
+        let (headers_len, headers_mapped, image_base_field) = self.headers_for(bytes)?;
+
+        // The headers and each section become zero-filled host allocations, so bound
+        // the total before allocating anything. Sections may not overlap, so the sum
+        // is the mapped size.
+        let mapped = self
             .sections
             .iter()
             .map(|sec| u64::from(sec.virtual_size.max(sec.raw_data_size)))
-            .sum();
+            .sum::<u64>()
+            + headers_mapped;
         if mapped > MAX_MAPPED_IMAGE_BYTES {
             return Err(PeError::SectionMappingError(MemoryError::AllocationFailed));
         }
 
         let mut memory = GuestMemory::new();
+
+        // Windows maps the headers read-only at the image base, and programs read
+        // them: a C runtime finds its own sections this way before `main`. The
+        // budget above is checked first, and the file bytes are the initial data
+        // of the mapping, so nothing else is copied.
+        memory
+            .map_region_with_data(
+                base,
+                headers_mapped as usize,
+                MemoryPermissions::READ_ONLY,
+                &bytes[..headers_len],
+            )
+            .map_err(PeError::SectionMappingError)?;
+        let image_base_field = base
+            .checked_add(image_base_field as u64)
+            .ok_or(PeError::InvalidHeaderSize)?;
 
         for sec in &self.sections {
             let base_addr = base
@@ -323,6 +409,7 @@ impl ParsedPe {
             pe: self.clone(),
             memory,
             entry_point,
+            image_base_field,
         })
     }
 }

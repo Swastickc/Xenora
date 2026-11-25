@@ -1,6 +1,202 @@
 # VOP3 encodings of the gfx1030 semantic registry; included by ../rdna2.toml.
 # Data only; see the root file for the field meanings.
 
+# ---- Wave32 VOPC compares in VOP3A (#215) ----
+
+# VDST encodes the scalar lane-mask destination, including vcc_lo (selector 106).
+# The two sources are VGPRs. Modifiers are clear and SRC2 is inline zero.
+[operand_rules.vop3_cmp_vgpr2]
+family = "VOP3"
+dst = { field = "VDST", class = "sgpr", min = 0, max = 106 }
+src = [
+  { field = "SRC0", class = "vgpr" },
+  { field = "SRC1", class = "vgpr" },
+]
+max_literals = 0
+variant_only = true
+unsupported = [
+  "dst_vcc_hi", "dst_exec", "dst_ttmp", "dst_m0", "dst_null",
+  "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+  "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
+]
+
+# Opcodes come from the pinned XML's default ENC_VOP3 records.
+[[encoding_variant]]
+of = "V_CMP_LT_I32"
+family = "VOP3"
+opcode = 129
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_EQ_I32"
+family = "VOP3"
+opcode = 130
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_LE_I32"
+family = "VOP3"
+opcode = 131
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_GT_I32"
+family = "VOP3"
+opcode = 132
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_NE_I32"
+family = "VOP3"
+opcode = 133
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_GE_I32"
+family = "VOP3"
+opcode = 134
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_LT_U32"
+family = "VOP3"
+opcode = 193
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_EQ_U32"
+family = "VOP3"
+opcode = 194
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_LE_U32"
+family = "VOP3"
+opcode = 195
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_GT_U32"
+family = "VOP3"
+opcode = 196
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_NE_U32"
+family = "VOP3"
+opcode = 197
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_GE_U32"
+family = "VOP3"
+opcode = 198
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_F_I32"
+family = "VOP3"
+opcode = 128
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_T_I32"
+family = "VOP3"
+opcode = 135
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_F_U32"
+family = "VOP3"
+opcode = 192
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_CMP_T_U32"
+family = "VOP3"
+opcode = 199
+operands = "vop3_cmp_vgpr2"
+spec = [
+  { document = "guide", section = "3.9", page = 19 },
+  { document = "guide", section = "13.3.4", page = 257 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
 # ---- VOP3 encoding variants of registry forms (#215) ----
 # An [[encoding_variant]] re-encodes a form declared in another family file: it
 # names the form (`of`), this family, the XML opcode here and the operand rule
@@ -31,6 +227,133 @@ unsupported = [
 of = "V_ADD_NC_U32"
 family = "VOP3"
 opcode = 293
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 134 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+# ABS and NEG apply to floating-point inputs (guide 6.2.1) and OMOD
+# applies to floating-point results (6.2.2). These integer forms use neither.
+# OP_SEL selects 16-bit halves (13.3.4). CLAMP saturates integer results
+# (6.5), which these registry forms do not declare. SGPR, inline and literal
+# sources remain outside this operand rule.
+
+[[encoding_variant]]
+of = "V_MUL_I32_I24"
+family = "VOP3"
+opcode = 265
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 131 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MUL_HI_I32_I24"
+family = "VOP3"
+opcode = 266
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 132 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MUL_U32_U24"
+family = "VOP3"
+opcode = 267
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 132 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MUL_HI_U32_U24"
+family = "VOP3"
+opcode = 268
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 132 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MIN_I32"
+family = "VOP3"
+opcode = 273
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 133 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MAX_I32"
+family = "VOP3"
+opcode = 274
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 133 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MIN_U32"
+family = "VOP3"
+opcode = 275
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 133 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_MAX_U32"
+family = "VOP3"
+opcode = 276
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 133 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_XNOR_B32"
+family = "VOP3"
+opcode = 286
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 134 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_SUB_NC_U32"
+family = "VOP3"
+opcode = 294
+operands = "vop3_vgpr2"
+spec = [
+  { document = "guide", section = "12.12", page = 167 },
+  { document = "guide", section = "12.7", page = 134 },
+]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[encoding_variant]]
+of = "V_SUBREV_NC_U32"
+family = "VOP3"
+opcode = 295
 operands = "vop3_vgpr2"
 spec = [
   { document = "guide", section = "12.12", page = 167 },

@@ -22,7 +22,7 @@
 //! MUL_I32_I24, MUL_HI_I32_I24, MUL_U32_U24, MUL_HI_U32_U24, MIN/MAX (I32,
 //! U32), XNOR and ADD/SUB/SUBREV_NC_U32 (any SRC0 a VOPC compare takes; a
 //! shift-and-add multiplier and floor division for the high half, the ripple
-//! adder for add and subtract), VOP3 add-no-carry, MUBUF
+//! adder for add and subtract), VOP3A integer arithmetic and compares, MUBUF
 //! load/store and the two waits plus `s_endpgm`. Anything else is a controlled
 //! error. The arithmetic shift is evaluated as a floor division by a power of
 //! two rather than with a host signed shift, so the oracle does not share the
@@ -72,18 +72,20 @@ enum Insn {
     /// SOPK opcode 0 or 2-16 on SGPR `SDST` (s0-s105) with the raw SIMM16.
     SImm(u32, u8, u16),
     BranchScc0(usize),
-    BranchMaskZero {
+    BranchMask {
         target: usize,
         register: usize,
+        nonzero: bool,
     },
     Branch(usize),
     VMov(u8, Src),
     VMovFromSgpr(u8, u8),
     /// `v_mov_b32_e32 vD, vcc_lo`.
     VMovFromVcc(u8),
-    /// VOPC compare into VCC_LO: relation 0 f, 1 lt, 2 eq, 3 le, 4 gt, 5 ne, 6 ge, 7 t.
+    /// Integer vector compare into `dst`: relation 0 f, 1 lt, 2 eq, 3 le, 4 gt, 5 ne, 6 ge, 7 t.
     /// `bits` is 16, 32 or 64; 64-bit register operands name the low register of a pair.
     VCmp {
+        dst: u8,
         relation: u8,
         signed: bool,
         bits: u32,
@@ -207,6 +209,7 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                 return Ok(lanes.iter().map(|lane| lane.written.unwrap()).collect());
             }
             Insn::VCmp {
+                dst,
                 relation,
                 signed,
                 bits,
@@ -226,10 +229,12 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                     offset,
                 )
                 .map(|mask| {
-                    sgpr[106] = Some(mask);
-                    // VCC_HI has no known value after a compare (contract 3).
-                    sgpr[107] = None;
-                    vcc_lane_derived = execution_mask != 0;
+                    sgpr[usize::from(dst)] = Some(mask);
+                    if dst == 106 {
+                        // VCC_HI has no known value after a VCC compare (contract 3).
+                        sgpr[107] = None;
+                        vcc_lane_derived = execution_mask != 0;
+                    }
                     None
                 })
             }
@@ -301,12 +306,17 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                         index_of(program, target, offset).map(Some)
                     }
                 }),
-            Insn::BranchMaskZero { target, register } => {
+            Insn::BranchMask {
+                target,
+                register,
+                nonzero,
+            } => {
+                let takes = |mask| (mask != 0) == nonzero;
                 if register == 106 && vcc_lane_derived {
                     let live = lanes.iter().find(|lane| lane.error.is_none()).unwrap();
                     check_runtime_region(program, pc, target, live, &sgpr, execution_mask, offset)
                         .and_then(|()| {
-                            if sgpr[106] == Some(0) {
+                            if takes(sgpr[106].unwrap()) {
                                 index_of(program, target, offset).map(Some)
                             } else {
                                 Ok(None)
@@ -316,7 +326,7 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                     sgpr[register]
                         .ok_or_else(|| format!("{offset:#x}: uninitialized mask"))
                         .and_then(|mask| {
-                            if mask == 0 {
+                            if takes(mask) {
                                 index_of(program, target, offset).map(Some)
                             } else {
                                 Ok(None)
@@ -690,7 +700,7 @@ fn read_vgpr(lane: &Lane, reg: u8, offset: usize) -> Result<u32, String> {
     lane.vgpr[reg as usize].ok_or_else(|| format!("{offset:#x}: uninitialized v{reg}"))
 }
 
-/// Evaluate one VOPC compare for the whole wave and return the new VCC_LO.
+/// Evaluate one integer vector compare for the whole wave and return its mask.
 fn compare(
     lanes: &[Lane],
     sgpr: &[Option<u32>; 128],
@@ -1214,7 +1224,7 @@ fn decode(code: &[u8]) -> Result<Vec<(usize, Insn)>, String> {
         offset += len;
     }
     for &(at, insn) in &program {
-        if let Insn::Branch(target) | Insn::BranchScc0(target) | Insn::BranchMaskZero { target, .. } =
+        if let Insn::Branch(target) | Insn::BranchScc0(target) | Insn::BranchMask { target, .. } =
             insn
             && !program.iter().any(|(boundary, _)| *boundary == target)
         {
@@ -1315,6 +1325,7 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
             return Err(fail("unsupported VOPC operand"));
         }
         let insn = Insn::VCmp {
+            dst: 106,
             relation: relation as u8,
             signed,
             bits,
@@ -1337,14 +1348,34 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         let insn = Insn::VInt(vop2_op, (first >> 17) as u8, src0, (first >> 9) as u8);
         return Ok((insn, len));
     }
-    if first & 0xffff_0000 == 0xd525_0000 {
-        let second = word(code, offset + 4)?;
+    if first >> 26 == 0b110101 {
+        let dst = first as u8;
+        let opcode = (first >> 16) & 0x3ff;
+        let second = word(code, offset + 4).map_err(|_| fail("truncated VOP3A"))?;
         let src0 = second & 0x1ff;
         let src1 = (second >> 9) & 0x1ff;
         if first & 0xff00 != 0 || second >> 18 != 128 || src0 < 256 || src1 < 256 {
-            return Err(fail("bad VOP3 add form"));
+            return Err(fail("unsupported VOP3A modifiers or sources"));
         }
-        return Ok((Insn::VAddNc(first as u8, src0 as u8, src1 as u8), 8));
+        // Guide §§3.9, 12.7.1 and 12.9.1: re-encoded VOP2 writes a VGPR,
+        // while VOPC uses the destination field for the scalar mask.
+        let (src0, src1) = (src0 as u8, src1 as u8);
+        let insn = match opcode {
+            128..=135 | 192..=199 if dst <= 106 => Insn::VCmp {
+                dst,
+                relation: (opcode % 8) as u8,
+                signed: opcode < 192,
+                bits: 32,
+                src0: CmpSrc::Vgpr(src0),
+                src1,
+            },
+            293 => Insn::VAddNc(dst, src0, src1),
+            265..=268 | 273..=276 | 286 | 294..=295 => {
+                Insn::VInt(opcode - 256, dst, CmpSrc::Vgpr(src0), src1)
+            }
+            _ => return Err(fail("unsupported VOP3A opcode or destination")),
+        };
+        return Ok((insn, 8));
     }
     // SOP1: ENCODING 0b10_1111101 in bits 23-31, SDST 16-22, OP 8-15.
     let sop1_op = (first >> 8) & 0xff;
@@ -1429,15 +1460,16 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         return Ok((Insn::BranchScc0(branch_target(first, offset)?), 4));
     }
     let tested_register = match first >> 16 {
-        0xbf86 => Some(106),
+        0xbf86 | 0xbf87 => Some(106),
         0xbf88 => Some(126),
         _ => None,
     };
     if let Some(register) = tested_register {
         return Ok((
-            Insn::BranchMaskZero {
+            Insn::BranchMask {
                 target: branch_target(first, offset)?,
                 register,
+                nonzero: first >> 16 == 0xbf87,
             },
             4,
         ));

@@ -307,23 +307,27 @@ impl Arm64Assembler {
     }
 
     /// RBIT Xd, Xn: reverse the bit order of the source.
+    /// Panics if a register number exceeds 31.
     pub fn rbit_64(&mut self, xd: u8, xn: u8) {
-        self.emit(0xdac0_0000 | ((u32::from(xn) & 0x1f) << 5) | (u32::from(xd) & 0x1f));
+        assert!(xd <= XZR && xn <= XZR, "RBIT register must be in 0..=31");
+        self.emit(0xdac0_0000 | (u32::from(xn) << 5) | u32::from(xd));
     }
 
     /// CLZ Xd, Xn: count the leading zero bits of the source.
+    /// Panics if a register number exceeds 31.
     pub fn clz_64(&mut self, xd: u8, xn: u8) {
-        self.emit(0xdac0_1000 | ((u32::from(xn) & 0x1f) << 5) | (u32::from(xd) & 0x1f));
+        assert!(xd <= XZR && xn <= XZR, "CLZ register must be in 0..=31");
+        self.emit(0xdac0_1000 | (u32::from(xn) << 5) | u32::from(xd));
     }
 
     /// LSLV Xd, Xn, Xm: shift the source left by the amount in Xm.
+    /// Panics if a register number exceeds 31.
     pub fn lslv_64(&mut self, xd: u8, xn: u8, xm: u8) {
-        self.emit(
-            0x9ac2_2000
-                | ((u32::from(xm) & 0x1f) << 16)
-                | ((u32::from(xn) & 0x1f) << 5)
-                | (u32::from(xd) & 0x1f),
+        assert!(
+            xd <= XZR && xn <= XZR && xm <= XZR,
+            "LSLV register must be in 0..=31"
         );
+        self.emit(0x9ac0_2000 | (u32::from(xm) << 16) | (u32::from(xn) << 5) | u32::from(xd));
     }
 
     /// LDR Qt, [Xn, #offset] (offset a multiple of 16)
@@ -424,6 +428,46 @@ impl Arm64Assembler {
     pub fn adds_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
         self.emit(
             0x2b000000
+                | ((wm as u32 & 0x1f) << 16)
+                | ((wn as u32 & 0x1f) << 5)
+                | (wd as u32 & 0x1f),
+        );
+    }
+
+    /// ADCS (64-bit, flags updating): ADCS Xd, Xn, Xm computes Xn + Xm + C.
+    pub fn adcs_reg_64(&mut self, xd: u8, xn: u8, xm: u8) {
+        self.emit(
+            0xba000000
+                | ((xm as u32 & 0x1f) << 16)
+                | ((xn as u32 & 0x1f) << 5)
+                | (xd as u32 & 0x1f),
+        );
+    }
+
+    /// ADCS (32-bit, flags updating): ADCS Wd, Wn, Wm computes Wn + Wm + C.
+    pub fn adcs_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x3a000000
+                | ((wm as u32 & 0x1f) << 16)
+                | ((wn as u32 & 0x1f) << 5)
+                | (wd as u32 & 0x1f),
+        );
+    }
+
+    /// SBCS (64-bit, flags updating): SBCS Xd, Xn, Xm computes Xn - Xm - !C.
+    pub fn sbcs_reg_64(&mut self, xd: u8, xn: u8, xm: u8) {
+        self.emit(
+            0xfa000000
+                | ((xm as u32 & 0x1f) << 16)
+                | ((xn as u32 & 0x1f) << 5)
+                | (xd as u32 & 0x1f),
+        );
+    }
+
+    /// SBCS (32-bit, flags updating): SBCS Wd, Wn, Wm computes Wn - Wm - !C.
+    pub fn sbcs_reg_32(&mut self, wd: u8, wn: u8, wm: u8) {
+        self.emit(
+            0x7a000000
                 | ((wm as u32 & 0x1f) << 16)
                 | ((wn as u32 & 0x1f) << 5)
                 | (wd as u32 & 0x1f),
@@ -582,22 +626,35 @@ impl Arm64Assembler {
         self.emit(0xf2800000 | (hw << 21) | ((imm16 as u32) << 5) | (xd as u32 & 0x1f));
     }
 
-    /// Load a full 64-bit constant into register Xd.
-    pub fn load_imm_64(&mut self, xd: u8, val: u64) {
-        let w0 = (val & 0xffff) as u16;
-        let w1 = ((val >> 16) & 0xffff) as u16;
-        let w2 = ((val >> 32) & 0xffff) as u16;
-        let w3 = ((val >> 48) & 0xffff) as u16;
+    /// MOVN (64-bit with shift): MOVN Xd, #imm16, LSL #shift writes
+    /// NOT (imm16 << shift), so every other halfword becomes 0xFFFF.
+    pub fn movn_64(&mut self, xd: u8, imm16: u16, shift_idx: u8) {
+        let hw = (shift_idx & 3) as u32;
+        self.emit(0x92800000 | (hw << 21) | ((imm16 as u32) << 5) | (xd as u32 & 0x1f));
+    }
 
-        self.movz_64(xd, w0, 0);
-        if w1 != 0 || (w2 == 0 && w3 == 0) {
-            self.movk_64(xd, w1, 1);
+    /// Load a full 64-bit constant into register Xd with the fewest MOVZ or
+    /// MOVN plus MOVK instructions: one for each halfword that differs from
+    /// the background the first instruction leaves, and always at least one.
+    /// MOVZ leaves zero halfwords and MOVN leaves 0xFFFF ones, so MOVN is used
+    /// when more halfwords are 0xFFFF than zero.
+    pub fn load_imm_64(&mut self, xd: u8, val: u64) {
+        let halves: [u16; 4] = std::array::from_fn(|i| (val >> (16 * i)) as u16);
+        let zeros = halves.iter().filter(|&&h| h == 0).count();
+        let ones = halves.iter().filter(|&&h| h == 0xffff).count();
+        let background = if ones > zeros { 0xffff } else { 0 };
+        // The first halfword that differs from the background, or halfword 0
+        // when none does (val is 0 or all ones).
+        let first = halves.iter().position(|&h| h != background).unwrap_or(0);
+        if background == 0 {
+            self.movz_64(xd, halves[first], first as u8);
+        } else {
+            self.movn_64(xd, !halves[first], first as u8);
         }
-        if w2 != 0 || w3 != 0 {
-            self.movk_64(xd, w2, 2);
-        }
-        if w3 != 0 {
-            self.movk_64(xd, w3, 3);
+        for (index, &half) in halves.iter().enumerate().skip(first + 1) {
+            if half != background {
+                self.movk_64(xd, half, index as u8);
+            }
         }
     }
 
@@ -779,11 +836,150 @@ mod tests {
     }
 
     #[test]
+    fn rbit_clz_lslv_encodings_match_llvm() {
+        // A64 words from Apple Clang's integrated assembler and llvm-objdump.
+        let mut asm = Arm64Assembler::new();
+        asm.rbit_64(X10, X9); // rbit x10, x9
+        asm.rbit_64(X0, XZR); // rbit x0, xzr
+        asm.clz_64(X10, X10); // clz x10, x10
+        asm.clz_64(XZR, X30); // clz xzr, x30
+        asm.lslv_64(X11, X11, X10); // lslv x11, x11, x10
+        asm.lslv_64(X0, X1, X0); // lslv x0, x1, x0
+        asm.lslv_64(XZR, X30, XZR); // lslv xzr, x30, xzr
+        assert_eq!(
+            asm.instructions(),
+            [
+                0xdac0012a, 0xdac003e0, 0xdac0114a, 0xdac013df, 0x9aca216b, 0x9ac02020, 0x9adf23df,
+            ]
+        );
+    }
+
+    #[test]
+    fn rbit_clz_lslv_reject_out_of_range_registers() {
+        let invalid_operands: [fn(&mut Arm64Assembler); 7] = [
+            |asm| asm.rbit_64(32, X0),
+            |asm| asm.rbit_64(X0, 32),
+            |asm| asm.clz_64(32, X0),
+            |asm| asm.clz_64(X0, 32),
+            |asm| asm.lslv_64(32, X0, X0),
+            |asm| asm.lslv_64(X0, 32, X0),
+            |asm| asm.lslv_64(X0, X0, 32),
+        ];
+        for (index, emit) in invalid_operands.into_iter().enumerate() {
+            let mut asm = Arm64Assembler::new();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| emit(&mut asm)));
+            assert!(result.is_err(), "invalid operand case {index} was accepted");
+            assert!(asm.instructions().is_empty());
+        }
+    }
+
+    #[test]
     fn unsigned_offset_stores_scale_by_access_size() {
         let mut asm = Arm64Assembler::new();
         asm.str_uoff_64(X21, SP, 32);
         asm.ldr_uoff_64(X9, X19, 128);
         asm.str_uoff_32(X0, X19, 136);
         assert_eq!(asm.instructions(), &[0xf90013f5, 0xf9404269, 0xb9008a60]);
+    }
+
+    /// Constants at the halfword boundaries the MOVZ/MOVN choice depends on.
+    const IMMEDIATE_EDGES: [u64; 16] = [
+        0,
+        1,
+        0xffff,
+        0x1_0000,
+        0x8000_0000,
+        0xffff_ffff,
+        0x1_0000_0000,
+        0x1234_0000_0000_0000,
+        0x0000_0001_0000_0005,
+        0x1234_5678_9abc_def0,
+        0x7fff_ffff_ffff_ffff,
+        0x8000_0000_0000_0000,
+        0xffff_0000_ffff_ffff,
+        0xffff_ffff_edcc_5678,
+        0xffff_ffff_ffff_1234,
+        u64::MAX,
+    ];
+
+    #[test]
+    fn immediate_sequences_match_llvm_encodings() {
+        // llvm-mc -triple=aarch64-apple-macos -show-encoding.
+        let cases: &[(u64, &[u32])] = &[
+            (0, &[0xd2800000]),                                 // movz x0, #0
+            (u64::MAX, &[0x92800000]),                          // movn x0, #0
+            (0xffff_ffff_ffff_1234, &[0x929db960]),             // movn x0, #0xedcb
+            (0x1234_0000_0000_0000, &[0xd2e24680]),             // movz x0, #0x1234, lsl #48
+            (0xffff_0000_ffff_ffff, &[0x92dfffe0]),             // movn x0, #0xffff, lsl #32
+            (0x0000_0001_0000_0005, &[0xd28000a0, 0xf2c00020]), // movz #5; movk #1, lsl #32
+            // movn x0, #0xa987; movk x0, #0xedcc, lsl #16
+            (0xffff_ffff_edcc_5678, &[0x929530e0, 0xf2bdb980]),
+        ];
+        for &(value, expected) in cases {
+            let mut asm = Arm64Assembler::new();
+            asm.load_imm_64(X0, value);
+            assert_eq!(asm.instructions(), expected, "{value:#x}");
+        }
+        // movz x9, #0xdef0; movk x9, #0x9abc, lsl #16; #0x5678, lsl #32;
+        // #0x1234, lsl #48
+        let mut asm = Arm64Assembler::new();
+        asm.load_imm_64(X9, 0x1234_5678_9abc_def0);
+        assert_eq!(
+            asm.instructions(),
+            &[0xd29bde09, 0xf2b35789, 0xf2cacf09, 0xf2e24689]
+        );
+    }
+
+    /// Fewest MOVZ/MOVN/MOVK instructions for `value`: every halfword that is
+    /// neither zero (after MOVZ) nor 0xFFFF (after MOVN), and at least one.
+    fn shortest_wide_move(value: u64) -> usize {
+        let halves = (0..4).map(|i| (value >> (16 * i)) & 0xffff);
+        let not_zero = halves.clone().filter(|&h| h != 0).count();
+        let not_ones = halves.filter(|&h| h != 0xffff).count();
+        not_zero.min(not_ones).max(1)
+    }
+
+    #[test]
+    fn immediates_run_on_the_host_and_use_the_fewest_wide_moves() {
+        let mut values = IMMEDIATE_EDGES.to_vec();
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..512 {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let raw = state.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            // Force some halfwords to zero or all ones so both MOVZ and MOVN
+            // sequences of every length occur.
+            let mut value = raw;
+            for half in 0..4 {
+                match (raw >> (60 - 2 * half)) & 3 {
+                    0 => value &= !(0xffff << (16 * half)),
+                    1 => value |= 0xffff << (16 * half),
+                    _ => {}
+                }
+            }
+            values.push(value);
+        }
+        let mut jit = crate::jit::JitMemory::new(64 * 1024).unwrap();
+        for value in values {
+            for register in [X0, X9] {
+                let mut asm = Arm64Assembler::new();
+                asm.load_imm_64(register, value);
+                assert_eq!(
+                    asm.instructions().len(),
+                    shortest_wide_move(value),
+                    "{value:#x}"
+                );
+                if register != X0 {
+                    asm.mov_reg_64(X0, register);
+                }
+                asm.ret();
+                let entry = jit.emit_block(asm.instructions()).unwrap();
+                // SAFETY: the block is a complete AAPCS64 leaf function that
+                // writes only X0 (and X9, a caller-saved register) and returns.
+                let function: extern "C" fn() -> u64 = unsafe { std::mem::transmute(entry) };
+                assert_eq!(function(), value, "{value:#x} in x{register}");
+            }
+        }
     }
 }

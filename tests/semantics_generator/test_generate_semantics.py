@@ -177,7 +177,7 @@ def snapshot():
             ["SRC2", [[50, 9]]], ["OMOD", [[59, 2]]], ["NEG", [[61, 3]]],
         ],
         "identifier_mask": 0xFFFF0000,
-        "identifiers": [0xD4000000 | (op << 16) for op in (265, 273, 295)],
+        "identifiers": [0xD4000000 | (op << 16) for op in (129, 265, 273, 295)],
     }
     # Values copied from the AMD XML snapshot: VOP3 encodings of VOP2 forms.
     for name, opcode, data_format in (
@@ -191,6 +191,14 @@ def snapshot():
                 ["SRC1", data_format, "OPR_SRC_NOLDS", 32, True, False, False, True],
             ],
         }
+    variants[("V_CMP_LT_I32", "ENC_VOP3")] = {
+        "instruction": "V_CMP_LT_I32", "encoding": "ENC_VOP3", "opcode": 129,
+        "operands": [
+            ["VDST", "FMT_NUM_M64", "OPR_SREG", 64, False, True, False, True],
+            ["SRC0", I32, "OPR_SRC", 32, True, False, False, True],
+            ["SRC1", I32, "OPR_SRC_NOLDS", 32, True, False, False, True],
+        ],
+    }
     return {
         "source": {"sha256": SHA},
         "encodings": {
@@ -307,6 +315,18 @@ def _variant(of, opcode):
         "spec": [{"document": "guide", "section": "12.12", "page": 167}],
         "verify": ["reference", "independent"],
     }
+
+
+def compare_variants():
+    reg = vector_compares()
+    rule = gen.OPERAND_RULES["vop3_cmp_vgpr2"]
+    reg["operand_rules"]["vop3_cmp_vgpr2"] = dict(
+        copy.deepcopy(rule["shape"]), unsupported=sorted(rule["unsupported"])
+    )
+    reg["encoding_variant"] = [
+        dict(_variant("V_CMP_LT_I32", 129), operands="vop3_cmp_vgpr2")
+    ]
+    return reg
 
 
 def compares():
@@ -859,6 +879,25 @@ class Validate(unittest.TestCase):
 
     def test_accepts_encoding_variants(self):
         self.assertEqual(self.errors(variants()), [])
+
+    def test_compare_variant_routes_mask_to_sdst(self):
+        reg = compare_variants()
+        self.assertEqual(self.errors(reg), [])
+        row = gen.variant_row(reg, reg["encoding_variant"][0])
+        self.assertEqual((row["vcc"], row["width"], row["wave"]), ("sdst_lane_mask", 32, "wave32"))
+
+    def test_rejects_mismatched_compare_variant_destination(self):
+        reg = compare_variants()
+        form(reg, "V_CMP_LT_I32")["vcc"] = "unchanged"
+        self.rejects(reg, "requires a base destination contract of lane_mask, got unchanged")
+
+        reg = compare_variants()
+        reg["operand_rules"]["vop3_cmp_vgpr2"]["dst"]["class"] = "vgpr"
+        self.rejects(reg, "operand rule vop3_cmp_vgpr2: declaration differs")
+
+        snap = snapshot()
+        snap["variants"][("V_CMP_LT_I32", "ENC_VOP3")]["operands"][0][2] = "OPR_VGPR"
+        self.rejects(compare_variants(), "VDST is not a scalar mask destination in the XML", snap)
 
     def test_rejects_a_variant_of_an_undeclared_form(self):
         reg = variants()

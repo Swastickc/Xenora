@@ -639,12 +639,54 @@ final class InspectionModel: ObservableObject {
     @Published var status: Int32 = Int32(XENORA_OK)
     @Published var busy = false
     @Published var importing = false
+    /// Why the last file selection could not be used, shown until the next selection.
+    @Published var selectionError: String?
+
+    /// Shows the read-only file importer, from the button or File > Open Executable….
+    func requestImport() {
+        selectionError = nil
+        importing = true
+    }
+
+    /// Handles the importer's completion. A cancelled picker is not a failure.
+    func importFinished(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            inspect(url)
+        case .failure(let error):
+            if let cocoa = error as? CocoaError, cocoa.code == .userCancelled {
+                return
+            }
+            selectionError = "The selected file could not be opened: \(error.localizedDescription)"
+        }
+    }
+
+    /// Reads and reports one file off the main thread. Replaceable only for the
+    /// `--smoke-inspection-order` check.
+    private let reader: @Sendable (URL) -> (Int32, String)
+    /// Number of the latest `inspect` call. Only that call may publish a result.
+    private var latestRequest: UInt64 = 0
+
+    init(reader: @escaping @Sendable (URL) -> (Int32, String) = InspectionModel.run) {
+        self.reader = reader
+    }
+
+    var failed: Bool { !busy && fileName != nil && status != Int32(XENORA_OK) }
 
     func inspect(_ url: URL) {
+        latestRequest &+= 1
+        let request = latestRequest
+        selectionError = nil
         fileName = url.lastPathComponent
+        report = ""
+        status = Int32(XENORA_OK)
         busy = true
+        let reader = reader
         Task {
-            let (newStatus, newReport) = await Task.detached { InspectionModel.run(url) }.value
+            let (newStatus, newReport) = await Task.detached { reader(url) }.value
+            // A newer selection owns the published state, including `busy`;
+            // an older read that finishes late is discarded.
+            guard request == latestRequest else { return }
             status = newStatus
             report = newReport
             busy = false
@@ -691,11 +733,18 @@ struct InspectorView: View {
     var body: some View {
         Section("Executable inspection (read-only)") {
             HStack {
-                Button("Open Executable…") { model.importing = true }
+                Button("Open Executable…") { model.requestImport() }
                 Text("or drop a file on this window").foregroundStyle(.secondary)
+            }
+            if let error = model.selectionError {
+                Text(error).foregroundStyle(.red)
             }
             if let name = model.fileName {
                 LabeledContent("File", value: model.busy ? "\(name) (inspecting…)" : name)
+                if model.failed {
+                    Text("Inspection of \(name) failed (status \(model.status)).")
+                        .foregroundStyle(.red)
+                }
                 ScrollView {
                     Text(model.report)
                         .font(.system(.caption, design: .monospaced))
@@ -823,7 +872,7 @@ struct ContentView: View {
         }
         .formStyle(.grouped)
         .fileImporter(isPresented: $inspection.importing, allowedContentTypes: [.item]) { result in
-            if case .success(let url) = result { inspection.inspect(url) }
+            inspection.importFinished(result)
         }
         .dropDestination(for: URL.self) { urls, _ in
             guard let url = urls.first, url.isFileURL else { return false }
@@ -841,6 +890,12 @@ struct XenoraApp: App {
 
     var body: some Scene {
         WindowGroup("Xenora") { ContentView(model: model, loop: loop) }
+            .commands {
+                CommandGroup(after: .newItem) {
+                    Button("Open Executable…") { InspectionModel.shared.requestImport() }
+                        .keyboardShortcut("o")
+                }
+            }
     }
 }
 
@@ -1007,6 +1062,78 @@ if CommandLine.arguments.contains("--smoke-frame") {
     let frame = GuestFrame.run()
     print(frame.summary)
     exit(frame.status == XENORA_OK ? 0 : 1)
+}
+
+// `--smoke-inspection-order` checks that only the latest selection publishes an
+// inspection result. Files are never read: an injected reader answers after a delay
+// named by the file. It needs no GPU.
+if CommandLine.arguments.contains("--smoke-inspection-order") {
+    let reader: @Sendable (URL) -> (Int32, String) = { url in
+        // "<delay in ms>-<ok|fail>-<tag>"
+        let parts = url.lastPathComponent.split(separator: "-")
+        Thread.sleep(forTimeInterval: Double(parts[0])! / 1000)
+        let status = parts[1] == "ok" ? Int32(XENORA_OK) : Int32(XENORA_INVALID_ARGUMENT)
+        return (status, "report \(url.lastPathComponent)")
+    }
+    func file(_ name: String) -> URL { URL(fileURLWithPath: "/nonexistent/\(name)") }
+    func pause(_ ms: UInt64) async { try? await Task.sleep(nanoseconds: ms * 1_000_000) }
+
+    Task { @MainActor in
+        var failures: [String] = []
+        @MainActor func expect(_ model: InspectionModel, _ name: String, busy: Bool, report: String, ok: Bool, _ label: String) {
+            let actual = "file=\(model.fileName ?? "-") busy=\(model.busy) status=\(model.status) report=\(model.report)"
+            if model.fileName != name || model.busy != busy || model.report != report
+                || (model.status == Int32(XENORA_OK)) != ok {
+                failures.append("\(label): \(actual)")
+            }
+        }
+        // A slow first read finishing after a fast second one, with either outcome.
+        for (first, second, ok) in [("400-ok-a", "0-ok-b", true), ("400-fail-a", "0-ok-b", true),
+                                    ("400-ok-a", "0-fail-b", false)] {
+            let model = InspectionModel(reader: reader)
+            model.inspect(file(first))
+            model.inspect(file(second))
+            await pause(700)
+            expect(model, second, busy: false, report: "report \(second)", ok: ok, "\(first) then \(second)")
+        }
+        // An older read that finishes first must not clear the newer request's busy state.
+        let model = InspectionModel(reader: reader)
+        model.inspect(file("100-ok-a"))
+        model.inspect(file("500-fail-b"))
+        await pause(300)
+        expect(model, "500-fail-b", busy: true, report: "", ok: true, "while the newer read runs")
+        await pause(500)
+        expect(model, "500-fail-b", busy: false, report: "report 500-fail-b", ok: false, "after the newer read")
+        for failure in failures { print("smoke-inspection-order: FAILED \(failure)") }
+        print("smoke-inspection-order: \(failures.isEmpty ? "ok" : "\(failures.count) failed")")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+    dispatchMain()
+}
+
+// `--smoke-import-result` checks how a file-importer result reaches the inspector:
+// a cancelled picker shows nothing, a failure is shown, and a new selection clears it.
+// No file is opened or read.
+if CommandLine.arguments.contains("--smoke-import-result") {
+    let ok = MainActor.assumeIsolated { () -> Bool in
+        var failures: [String] = []
+        let model = InspectionModel()
+        model.importFinished(.failure(CocoaError(.userCancelled)))
+        if model.selectionError != nil || model.fileName != nil { failures.append("cancel shows a message") }
+        model.importFinished(.failure(CocoaError(.fileReadNoPermission)))
+        if model.selectionError == nil || model.fileName != nil { failures.append("failure is not shown") }
+        model.requestImport()
+        if model.selectionError != nil || !model.importing { failures.append("reopening keeps the old message") }
+        model.importFinished(.failure(CocoaError(.fileReadNoPermission)))
+        model.inspect(URL(fileURLWithPath: "/nonexistent/import-result-check"))
+        if model.selectionError != nil || model.fileName != "import-result-check" {
+            failures.append("a new selection keeps the old message")
+        }
+        for failure in failures { print("smoke-import-result: FAILED \(failure)") }
+        return failures.isEmpty
+    }
+    print("smoke-import-result: \(ok ? "ok" : "failed")")
+    exit(ok ? 0 : 1)
 }
 
 // `--smoke` prints the probe and exits without opening a window, for scripts and CI.

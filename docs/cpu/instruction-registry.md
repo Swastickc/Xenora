@@ -5,14 +5,14 @@ The static PE probe, the interpreter and the native ARM64 dynamic binary transla
 | Part | File | Role |
 | --- | --- | --- |
 | Registry | `crates/loader/x86/instructions.toml` | Opcode map, opcode, ModRM digit, operand encoding, size, immediate, flag effects and public reference. Data only. |
-| Generator | `crates/loader/generate_x86.py` | `validate`, `generate` and `--check`. Rejects overlapping encodings, opcodes that are prefixes, contradictory operand rules, unknown vocabulary and flags both written and undefined. |
+| Generator | `crates/loader/generate_x86.py` | `validate`, `generate` and `--check`. Rejects overlapping encodings, opcodes that are prefixes, contradictory operand rules, a fixed r/m field on a form that could take memory, unknown vocabulary and flags both written and undefined. |
 | Tables | `crates/loader/src/x86_table.rs` | Generated static tables. No metadata is parsed at run time. |
 | Semantics | `crates/loader/src/x86_exec.rs`, `x86_simd.rs`, `x86_float.rs`, `softfloat.rs` | Rust primitives for integer, vector and floating-point forms. Every instruction is all-or-nothing. |
 | Lowering | `crates/loader/src/dbt.rs` | ARM64 for the forms `is_native` accepts. Every other form calls the shared semantics and is counted in `DbtMetrics::interpreter_fallbacks`. |
 
 ## Adding a form
 
-1. Add the form, and its operation if new, to the registry with an Intel SDM or AMD APM reference.
+1. Add the form, and its operation if new, to the registry with an Intel SDM or AMD APM reference. A form that is one exact ModRM byte, not a whole digit, takes `register_only = true` and `rm = N`.
 2. Run `python3 crates/loader/generate_x86.py generate`.
 3. Implement the operation in `x86_exec.rs`. Leave flags the manuals call undefined unchanged.
 4. Add assembly text to `crates/loader/tests/x86/assemble.py`, run it with `generate`, and extend the reference in `tests/x86_integer.rs` or `tests/x86_vector.rs`. A declared form without a fixture fails `every_declared_form_is_executed_by_a_fixture`.
@@ -40,8 +40,9 @@ XMM registers live in `CpuState::xmm`, lane 0 in the low bits, and MXCSR in `Cpu
 
 - a denormal dividend over zero raises divide-by-zero only, not also denormal-operand;
 - flush-to-zero also flushes a tiny result that is exact, raising underflow and precision;
-- DAZ applies before conversion to an integer;
-- an unmasked overflow also records precision.
+- DAZ applies before conversion to an integer.
+
+An unmasked overflow records precision only when rounding with an unbounded exponent is inexact (Intel SDM Vol. 1, D.4.2.3, Table D-16). The known-answer cases in `tests/cpu_known_answers.rs` assert this.
 
 None of it has been compared with x86 hardware.
 
@@ -58,6 +59,29 @@ These rules hold for both engines and are what a guest scheduler has to preserve
 - **Lowering.** The DBT runs these forms on the shared semantics. They are not lowered to ARM64 atomic instructions, which could only be judged against concurrent guest threads.
 
 The SDM cases for these forms in `tests/cpu_known_answers.rs` were written before this implementation, by another contributor. `tests/x86_atomic.rs` adds the LOCK rules, both compare outcomes at every width, unaligned operands and faults. None of it has been compared with x86 hardware, and nothing here establishes multi-thread behaviour.
+
+## Memory ordering and fences
+
+Guest memory accesses are totally ordered today. Each engine runs one guest instruction at a time on one host thread, and every load and store of an instruction completes before the next instruction starts. There is no store buffer and nothing is reordered, so a load always sees the latest earlier store. That is stronger than the ordering the Intel SDM (Vol. 3A, "Memory Ordering") gives a real processor, where a store may sit in a buffer while later loads from other locations run.
+
+MFENCE, LFENCE and SFENCE (`0F AE` with a register ModRM byte and digit 6, 5 or 7; the SDM states that the r/m field is ignored) are therefore accepted and change no register, flag or memory. They have nothing left to enforce. Non-temporal stores are ordinary stores, so SFENCE has no weakly ordered store to wait for either. The memory forms that share those digits, the XSAVE family and CLFLUSH, stay rejected.
+
+This holds only while guest threads do not run on several host threads. ARM64 orders memory more weakly than x86, so an engine that ran guest threads in parallel would have to restore x86's ordering for ordinary accesses and give the fences a real effect. Nothing here provides or tests that. `tests/cpu_known_answers.rs` holds the single-thread cases: a store, a fence and a later load in program order, and no change to any other state. None of it has been compared with x86 hardware.
+
+## x87 state and FNINIT
+
+FNINIT (`DB E3`) is the only x87 instruction. It exists because the mingw-w64 C runtime runs it once before `main`, in `_fpreset`, and a program built with that runtime could not start without it.
+
+`CpuState::x87` holds the control, status and tag words. FNINIT sets them to the values the Intel SDM gives (Vol. 2A, "FINIT/FNINIT"): control `037F` (every exception masked, 64-bit precision, round to nearest), status `0` and tag `FFFF` (every register empty). It changes nothing else, and both engines run the same shared code for it; nothing is lowered to ARM64. The host's floating-point state is never read or written.
+
+What this does not include:
+
+- **No other x87 instruction.** FNSTCW, FLDCW, FNCLEX, FWAIT (so FINIT, which is `9B DB E3`), every load, store and arithmetic form stay rejected. Nothing can read the three words back, so today they are only visible to a host that inspects `CpuState`.
+- **No data registers.** FNINIT leaves them unchanged on a real processor and tags them empty; Xenora has none. The x87 instruction and data pointers and the last opcode, which FNINIT also clears, are not modelled either.
+- **No operating-system start value.** A new `CpuState` holds the FNINIT values. An operating system may start a thread with a different control word, which is not modelled.
+- **CPUID still reports no FPU.** One instruction of the feature is not the feature.
+
+The registry key `rm = 3` makes the form match that one ModRM byte. The other register bytes of `DB /4` are different instructions (`DB E2` is FNCLEX), so the form cannot ignore the r/m field the way the fences do. `fninit_is_the_only_x87_encoding_accepted` in `tests/x86_integer.rs` tries every ModRM byte under the eight x87 opcodes, `D8` to `DF`, in both engines. A segment override or REX prefix before FNINIT is accepted and has no effect, as for other forms without operands. `prefixes_accepted_before_fninit_have_no_effect` pins that as a local rule; it was not derived from a manual statement. The 0x66, F2, F3 and LOCK prefixes are refused. Nothing here has been compared with x86 hardware.
 
 ## String instructions
 
@@ -80,12 +104,12 @@ CPUID (`0F A2`) returns a fixed table that never reads the host. It describes a 
 | 0 | 1, the highest basic leaf | `Xeno` | `uest` | `ra g` |
 | 1 | 0 | 0 | POPCNT (bit 23) | CMOV (bit 15) |
 | 0x8000_0000 | 0x8000_0001, the highest extended leaf | 0 | 0 | 0 |
-| 0x8000_0001 | 0 | 0 | LZCNT (bit 5) | long mode (bit 29) |
+| 0x8000_0001 | 0 | 0 | LAHF/SAHF (bit 0), LZCNT (bit 5) | long mode (bit 29) |
 | any other | 0 | 0 | 0 | 0 |
 
 A feature bit is set only when every instruction of that feature is implemented. That is stricter than "some of it works", and it has consequences:
 
-- SSE and SSE2 are not reported, although most of their instructions exist, because parts are still rejected: RSQRTPS and MFENCE, for example. BMI1 is not reported although TZCNT exists, because ANDN does not. The x87 FPU, MMX, FXSAVE, CMPXCHG8B, the time-stamp counter, LAHF and SYSRET are absent too.
+- SSE and SSE2 are not reported, although most of their instructions exist, because parts are still rejected: RSQRTPS and MASKMOVDQU, for example. BMI1 is not reported although TZCNT exists, because ANDN does not. The x87 FPU is not reported although FNINIT exists. MMX, FXSAVE, CMPXCHG8B, the time-stamp counter and SYSRET are absent too.
 - The table is therefore truthful about Xenora, not plausible as hardware: every real 64-bit processor reports the FPU and SSE2. A guest that tests a bit before using a feature avoids it; a guest that assumes SSE2 because it runs in 64-bit mode still gets every form that exists and an illegal-instruction exit for one that does not.
 - A leaf that is not listed returns zeros, whatever the subleaf. Intel processors answer a leaf above the highest basic one with that leaf's data instead; software is expected to read the highest leaf first.
 
@@ -95,4 +119,4 @@ A feature bit is set only when every instruction of that feature is implemented.
 
 ## Rejected on purpose
 
-LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, RCL, RCR, SHLD, SHRD, LODS, CMPS, SCAS, REPE and REPNE, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, CMPXCHG8B, CMPXCHG16B and fences. The DBT also refuses raw SYSCALL.
+LOCK except as described above, F2 or F3 where it is neither PAUSE nor part of a declared form, F2 combined with F3, address-size overrides, an ignored segment override after FS or GS, 16-bit stack and branch forms, 16-bit BSWAP and MOVSXD, bit tests of memory by a register index, LODS, CMPS, SCAS, REPE and REPNE, every x87 instruction except FNINIT, MMX, the RCP and RSQRT approximations, SSE3 and later, VEX, CMPXCHG8B and CMPXCHG16B. The DBT also refuses raw SYSCALL.

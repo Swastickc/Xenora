@@ -14,8 +14,9 @@ use crate::x86_table::{
 /// Architectural x86-64 instruction length limit, in bytes.
 ///
 /// An instruction may not exceed 15 bytes (Intel SDM Vol. 2A, "Instruction
-/// Length"). Sequences longer than this are not decodable and are rejected as
-/// illegal instructions.
+/// Length"). Decoding stops before a 16th byte would be fetched and reports
+/// [`DecodeError::TooLong`], a general-protection fault (Intel SDM Vol. 3A,
+/// 7.15).
 pub const MAX_INSTRUCTION_LEN: usize = 15;
 
 /// Number of leading legacy segment prefix bytes (0x64 FS, 0x65 GS) at the
@@ -47,6 +48,9 @@ pub struct Form {
     pub has_modrm: bool,
     pub memory_only: bool,
     pub register_only: bool,
+    /// The only ModRM r/m field value the form accepts. Set only on
+    /// register-only forms, so such a form matches exactly one ModRM byte.
+    pub fixed_rm: Option<u8>,
     pub no_rex_b: bool,
     /// A 16-byte memory operand may have any alignment.
     pub unaligned: bool,
@@ -76,6 +80,10 @@ pub enum Encoding {
     RmImm,
     RmOne,
     RmCl,
+    /// `rm` from `rm` and `reg`, with an 8-bit count (SHLD, SHRD).
+    RmRegImm,
+    /// `rm` from `rm` and `reg`, with the count in CL (SHLD, SHRD).
+    RmRegCl,
     AccImm,
     OpReg,
     OpRegImm,
@@ -118,6 +126,9 @@ pub enum Immediate {
     Word,
     /// Zero-extended byte.
     Byte,
+    /// A 64-bit absolute address, decoded into the memory operand (MOV
+    /// `A0`-`A3`, Intel SDM Vol. 2A, 2.2.1.4).
+    Offset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,24 +211,24 @@ pub enum DecodeError<E> {
     Fetch(E),
     /// No declared form matches; carries the byte that decided it.
     Unsupported(u8),
+    /// The instruction would be longer than [`MAX_INSTRUCTION_LEN`] bytes.
+    TooLong,
 }
 
 struct Cursor<F> {
     fetch: F,
     rip: u64,
     len: usize,
-    last: u8,
 }
 
 impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
     fn u8(&mut self) -> Result<u8, DecodeError<E>> {
         if self.len == MAX_INSTRUCTION_LEN {
-            return Err(DecodeError::Unsupported(self.last));
+            return Err(DecodeError::TooLong);
         }
         let byte =
             (self.fetch)(self.rip.wrapping_add(self.len as u64)).map_err(DecodeError::Fetch)?;
         self.len += 1;
-        self.last = byte;
         Ok(byte)
     }
 
@@ -237,6 +248,15 @@ impl<E, F: FnMut(u64) -> Result<u8, E>> Cursor<F> {
     }
 }
 
+/// Whether `byte` is a legacy prefix: an operand-size, address-size, segment,
+/// LOCK or repeat prefix (Intel SDM Vol. 2A, 2.1.1).
+fn is_legacy_prefix(byte: u8) -> bool {
+    matches!(
+        byte,
+        0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3
+    )
+}
+
 /// Decode one instruction at `rip`. `fetch` supplies the byte at an address and
 /// is called only for bytes that belong to the instruction, in order.
 ///
@@ -247,20 +267,28 @@ pub fn decode<E>(
     rip: u64,
     fetch: impl FnMut(u64) -> Result<u8, E>,
 ) -> Result<Insn, DecodeError<E>> {
-    let mut cursor = Cursor {
-        fetch,
-        rip,
-        len: 0,
-        last: 0,
-    };
+    let mut cursor = Cursor { fetch, rip, len: 0 };
     let mut operand_size = false;
     let mut rep = false;
     let mut repne = false;
     let mut lock = false;
     let mut segment = None;
+    let mut rex = 0;
     let mut byte = cursor.u8()?;
     loop {
         let selected = match byte {
+            // REX applies only immediately before the opcode. One that is
+            // followed by a legacy prefix is ignored (Intel SDM Vol. 2A, 2.2.1).
+            0x40..=0x4F => {
+                let next = cursor.u8()?;
+                if !is_legacy_prefix(next) {
+                    rex = byte;
+                    byte = next;
+                    break;
+                }
+                byte = next;
+                continue;
+            }
             0x64 => Segment::Fs,
             0x65 => Segment::Gs,
             0x66 => {
@@ -299,10 +327,6 @@ pub fn decode<E>(
         byte = cursor.u8()?;
     }
 
-    let rex = if byte & 0xF0 == 0x40 { byte } else { 0 };
-    if rex != 0 {
-        byte = cursor.u8()?;
-    }
     let (rex_w, rex_r, rex_x, rex_b) =
         (rex & 8 != 0, (rex & 4) << 1, (rex & 2) << 2, (rex & 1) << 3);
 
@@ -345,9 +369,24 @@ pub fn decode<E>(
             GROUPS[usize::from(index)][usize::from((modrm >> 3) & 7)]
         }
     };
-    let form = FORMS
+    let mut form = FORMS
         .get(usize::from(form_index))
         .ok_or(DecodeError::Unsupported(opcode))?;
+    let mut form_index = form_index;
+    if form.no_rex_b && rex_b != 0 {
+        // 90 is NOP only without REX.B. With it the byte exchanges r8 with the
+        // accumulator, as the first register of the 91..97 row would (Intel
+        // SDM Vol. 2B, "NOP" and "XCHG").
+        match ONE_BYTE[slot + 1] {
+            Entry::Form(index)
+                if !two_byte && !rep && FORMS[usize::from(index)].encoding == Encoding::OpReg =>
+            {
+                form_index = index;
+                form = &FORMS[usize::from(index)];
+            }
+            _ => return Err(DecodeError::Unsupported(opcode)),
+        }
+    }
     if form.has_modrm && matches!(entry, Entry::Form(_)) {
         modrm = cursor.u8()?;
     }
@@ -368,10 +407,6 @@ pub fn decode<E>(
     if operand_size && !takes_operand_size && !overridden {
         return Err(DecodeError::Unsupported(0x66));
     }
-    if form.no_rex_b && rex_b != 0 {
-        return Err(DecodeError::Unsupported(opcode));
-    }
-
     let rm_size = if form.source != 0 { form.source } else { size };
     let register = |field: u8, extension: u8, width: u8| {
         if width == 1 && rex == 0 && field >= 4 {
@@ -397,7 +432,7 @@ pub fn decode<E>(
         reg = register((modrm >> 3) & 7, rex_r, size);
         let mode = modrm >> 6;
         if mode == 3 {
-            if form.memory_only {
+            if form.memory_only || form.fixed_rm.is_some_and(|field| field != modrm & 7) {
                 return Err(DecodeError::Unsupported(opcode));
             }
             rm = Some(RmOperand::Reg(register(modrm & 7, rex_b, rm_size)));
@@ -430,6 +465,16 @@ pub fn decode<E>(
             }
             rm = Some(RmOperand::Mem(operand));
         }
+    } else if form.immediate == Immediate::Offset {
+        // The accumulator and the memory at an absolute address. With the
+        // default 64-bit address size the offset is eight bytes; FS or GS may
+        // override the segment as for any memory operand.
+        rm = Some(RmOperand::Mem(MemOperand {
+            base: None,
+            index: None,
+            disp: cursor.bytes(8)? as i64,
+            segment,
+        }));
     } else if matches!(form.encoding, Encoding::OpReg | Encoding::OpRegImm) {
         reg = register(opcode & 7, rex_b, size);
     } else if form.encoding == Encoding::String {
@@ -449,7 +494,7 @@ pub fn decode<E>(
     }
 
     let mut imm = match form.immediate {
-        Immediate::None => 0,
+        Immediate::None | Immediate::Offset => 0,
         Immediate::SignedByte => cursor.signed(1)?,
         Immediate::SignedFull => cursor.signed(usize::from(size.min(4)))?,
         Immediate::Signed32 => cursor.signed(4)?,

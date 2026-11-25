@@ -1,5 +1,12 @@
 # Independent review
 
+## gfx1030 form acceptance
+
+Use the [AMD RDNA2 desktop GPU (gfx1030) form acceptance rule](shader-form-acceptance.md) for entries that
+promote instruction forms to `fixture verified`. Record only completed runs with
+a named commit, independent runner, host, exact commands and real counts. Raw
+logs stay under ignored `artifacts/acceptance/<commit>/`.
+
 ## R1. First synthetic compute checkpoint, 2026-11-22
 
 Reviewed the integrated working tree before a candidate commit. The findings below cover the first checkpoint.

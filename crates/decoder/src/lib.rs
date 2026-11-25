@@ -5,8 +5,8 @@ use std::fmt;
 pub use xenora_isa::{
     Architecture, CompareRelation, ExportTarget, Instruction, InterpolationPhase, ScalarAluOp,
     ScalarCompareOp, ScalarImmediateCompareOp, ScalarImmediateOp, ScalarSource, ScalarUnaryOp,
-    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorSource, VectorSwapOp,
-    VectorUnaryOp,
+    SoppControlOp, VectorAluOp, VectorAluVop3Op, VectorCompareOp, VectorCompareVop3Op,
+    VectorSource, VectorSwapOp, VectorUnaryOp,
 };
 use xenora_isa::{
     BUFFER_LOAD_DWORD, BUFFER_STORE_DWORD, EXP, IMAGE_SAMPLE_LZ, S_WAITCNT_VSCNT, V_ADD_F32,
@@ -329,6 +329,26 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     }
     if let Some(op) = VectorCompareOp::from_word(first) {
         return vector_compare(op, first, bytes);
+    }
+    if let Some(op) = VectorCompareVop3Op::from_word(first) {
+        let second = word(bytes, 8)?;
+        let sdst = first as u8;
+        if sdst > VCC_LO {
+            return Err(unsupported(
+                op.assembly_name(),
+                "expected a destination of s0-s105 or vcc_lo",
+            ));
+        }
+        let (src0, src1) = vop3_vgpr2_sources(op.assembly_name(), first, second)?;
+        return Ok((
+            Instruction::VectorCompareVop3 {
+                op,
+                sdst,
+                src0,
+                src1,
+            },
+            8,
+        ));
     }
     if let Some(op) = VectorAluVop3Op::from_word(first) {
         let second = word(bytes, 8)?;
@@ -723,29 +743,37 @@ fn move_b32(first: u32, bytes: &[u8]) -> Result<(Instruction, u8), DecodeErrorKi
     Ok((Instruction::MoveB32 { dst, src }, len))
 }
 
-/// Operand rule `vop3_vgpr2`: VDST in bits 0-7 of the first word, SRC0 and SRC1
-/// in bits 0-8 and 9-17 of the second (RDNA 2 ISA section 13.3.4, VOP3A). Both sources
-/// are VGPRs, ABS, OP_SEL, CLAMP, OMOD and NEG are clear, and the unused SRC2 is
-/// the gfx1030 assembler's inline-zero operand encoding.
 fn vop3_vgpr2(
     op: VectorAluVop3Op,
     first: u32,
     second: u32,
 ) -> Result<Instruction, DecodeErrorKind> {
+    let (src0, src1) = vop3_vgpr2_sources(op.assembly_name(), first, second)?;
+    Ok(Instruction::VectorAluVop3 {
+        op,
+        dst: first as u8,
+        src0,
+        src1,
+    })
+}
+
+/// Common VOP3A source and modifier checks (RDNA 2 ISA section 13.3.4).
+/// SRC0 and SRC1 are VGPRs, the unused SRC2 is inline zero, and ABS, OP_SEL,
+/// CLAMP, OMOD and NEG are clear.
+fn vop3_vgpr2_sources(
+    mnemonic: &'static str,
+    first: u32,
+    second: u32,
+) -> Result<(u8, u8), DecodeErrorKind> {
     let src0 = second & 0x1ff;
     let src1 = (second >> 9) & 0x1ff;
     if first & 0xff00 != 0 || second >> 18 != 128 || src0 < 256 || src1 < 256 {
         return Err(unsupported(
-            op.assembly_name(),
+            mnemonic,
             "expected two VGPR sources and no modifiers",
         ));
     }
-    Ok(Instruction::VectorAluVop3 {
-        op,
-        dst: first as u8,
-        src0: src0 as u8,
-        src1: src1 as u8,
-    })
+    Ok((src0 as u8, src1 as u8))
 }
 
 fn scalar_form(

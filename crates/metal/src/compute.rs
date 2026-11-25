@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
 use std::fmt;
 use std::mem::size_of_val;
@@ -37,6 +37,89 @@ const MAX_GROUPS: usize = 64;
 const MAX_GRID_WORDS: usize = MAX_GROUPS * MAX_THREADS_PER_GROUP;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_IN_FLIGHT: usize = 16;
+const MAX_CACHED_PIPELINES: usize = 16;
+const MAX_POOLED_BUFFERS: usize = MAX_IN_FLIGHT * 2;
+const MAX_POOLED_BUFFER_BYTES: usize = 1024 * 1024;
+
+type ComputePipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+type SharedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+
+struct CachedPipeline {
+    source: Box<str>,
+    entry: Box<str>,
+    shader_validation: bool,
+    pipeline: ComputePipeline,
+}
+
+struct IdleBuffer {
+    byte_len: usize,
+    buffer: SharedBuffer,
+}
+
+// SAFETY: Idle buffers are owned by a mutex, never accessed by an in-flight
+// command, and copied only while that mutex is held. Retain/release and shared
+// contents access may occur on the thread that next checks the buffer out.
+unsafe impl Send for IdleBuffer {}
+unsafe impl Sync for IdleBuffer {}
+
+#[derive(Default)]
+struct BufferPool {
+    idle: Vec<IdleBuffer>,
+    idle_bytes: usize,
+    allocations: usize,
+}
+
+impl BufferPool {
+    fn acquire(
+        &mut self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        words: &[u32],
+    ) -> Result<SharedBuffer, MetalError> {
+        let byte_len = size_of_val(words);
+        if let Some(index) = self.idle.iter().position(|idle| idle.byte_len == byte_len) {
+            let idle = self.idle.swap_remove(index);
+            self.idle_bytes -= idle.byte_len;
+            // SAFETY: This shared buffer is idle and has exactly byte_len bytes.
+            // The source slice is initialized and disjoint from Metal storage.
+            unsafe {
+                copy_nonoverlapping(
+                    words.as_ptr().cast::<u8>(),
+                    idle.buffer.contents().cast::<u8>().as_ptr(),
+                    byte_len,
+                );
+            }
+            return Ok(idle.buffer);
+        }
+
+        let bytes = NonNull::from(words).cast::<c_void>();
+        // SAFETY: Metal reads exactly byte_len bytes from the live, initialized
+        // slice and makes its own copy within this call.
+        let buffer = unsafe {
+            device
+                .newBufferWithBytes_length_options(
+                    bytes,
+                    byte_len,
+                    MTLResourceOptions::StorageModeShared,
+                )
+                .ok_or_else(|| {
+                    MetalError::new("newBufferWithBytes", "shared buffer allocation failed")
+                })?
+        };
+        self.allocations += 1;
+        Ok(buffer)
+    }
+
+    fn release(&mut self, buffer: SharedBuffer) {
+        let byte_len = buffer.length();
+        if self.idle.len() >= MAX_POOLED_BUFFERS
+            || byte_len > MAX_POOLED_BUFFER_BYTES.saturating_sub(self.idle_bytes)
+        {
+            return;
+        }
+        self.idle_bytes += byte_len;
+        self.idle.push(IdleBuffer { byte_len, buffer });
+    }
+}
 
 const BC_READBACK: &str = r"
 #include <metal_stdlib>
@@ -148,12 +231,15 @@ impl std::error::Error for MetalError {}
 /// measure a single submission and are not a benchmark distribution.
 #[derive(Debug, Clone)]
 pub struct RunProfile {
+    /// Host library compilation time, or zero when reusing a compute pipeline.
     pub library_seconds: f64,
+    /// Host pipeline creation time, or zero when reusing a compute pipeline.
     pub pipeline_seconds: f64,
     pub gpu_seconds: f64,
     /// Host wall time from the start of setup until wait observes completion.
     pub host_seconds: f64,
-    /// Host time to allocate the input and output shared buffers.
+    /// Host time to acquire and initialize the input and output shared buffers,
+    /// including any new Metal allocations.
     pub alloc_seconds: f64,
     /// Host time to create the command buffer and encode the dispatch.
     pub encode_seconds: f64,
@@ -171,6 +257,10 @@ pub struct NativeCompute {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     submissions: Mutex<SubmissionTable>,
+    // Idle shared buffers are recycled only after their command reaches a terminal state.
+    buffer_pool: Mutex<BufferPool>,
+    // Least recently used first. In-flight submissions retain their own reference.
+    compute_pipelines: Mutex<VecDeque<CachedPipeline>>,
 }
 
 /// A submitted dispatch whose result can be collected by its issuing context.
@@ -243,13 +333,18 @@ struct SubmissionEntry {
     waiting: bool,
 }
 
+struct RetiredBuffers {
+    input: Option<SharedBuffer>,
+    output: SharedBuffer,
+}
+
 /// Owns every resource referenced by the unretained command buffer until
 /// Metal reports Completed or Error.
 struct InFlightResources {
     command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    _pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    _input: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
-    output: Retained<ProtocolObject<dyn MTLBuffer>>,
+    _pipeline: ComputePipeline,
+    _input: Option<SharedBuffer>,
+    output: SharedBuffer,
     _texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     _sampler: Option<Retained<ProtocolObject<dyn MTLSamplerState>>>,
     gate: Option<Retained<ProtocolObject<dyn MTLSharedEvent>>>,
@@ -263,16 +358,17 @@ struct InFlightResources {
 unsafe impl Send for InFlightResources {}
 
 impl SubmissionEntry {
-    fn retire(&mut self, status: MTLCommandBufferStatus) {
+    fn retire(&mut self, status: MTLCommandBufferStatus) -> Option<RetiredBuffers> {
         if !is_terminal(status) {
-            return;
+            return None;
         }
-        let Some(resources) = self.resources.take() else {
-            return;
-        };
+        let resources = self.resources.take()?;
         if let Err(error) = check_command_status(&resources.command, status) {
             self.result = Err(error);
-            return;
+            return Some(RetiredBuffers {
+                input: resources._input,
+                output: resources.output,
+            });
         }
         if let Ok(profile) = &mut self.result {
             profile.gpu_seconds = resources.command.GPUEndTime() - resources.command.GPUStartTime();
@@ -291,6 +387,10 @@ impl SubmissionEntry {
             }
             profile.readback_seconds = readback_start.elapsed().as_secs_f64();
         }
+        Some(RetiredBuffers {
+            input: resources._input,
+            output: resources.output,
+        })
     }
 }
 
@@ -348,6 +448,8 @@ impl NativeCompute {
                 device,
                 queue,
                 submissions: Mutex::default(),
+                buffer_pool: Mutex::default(),
+                compute_pipelines: Mutex::default(),
             })
         })
     }
@@ -359,14 +461,36 @@ impl NativeCompute {
     }
 
     fn retire_completed(&self) {
-        self.submissions().entries.retain(|_, entry| {
-            if !entry.waiting
-                && let Some(resources) = &entry.resources
-            {
-                entry.retire(resources.command.status());
+        let retired = {
+            let mut table = self.submissions();
+            let mut retired = Vec::new();
+            for entry in table.entries.values_mut() {
+                if !entry.waiting
+                    && let Some(resources) = &entry.resources
+                    && let Some(buffers) = entry.retire(resources.command.status())
+                {
+                    retired.push(buffers);
+                }
             }
-            !entry.abandoned || entry.resources.is_some()
-        });
+            table
+                .entries
+                .retain(|_, entry| !entry.abandoned || entry.resources.is_some());
+            retired
+        };
+        self.recycle_buffers(retired);
+    }
+
+    fn recycle_buffers(&self, retired: Vec<RetiredBuffers>) {
+        let mut pool = self
+            .buffer_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for buffers in retired {
+            if let Some(input) = buffers.input {
+                pool.release(input);
+            }
+            pool.release(buffers.output);
+        }
     }
 
     fn begin_submission(&self) -> Instant {
@@ -383,6 +507,31 @@ impl NativeCompute {
     #[doc(hidden)]
     pub fn tracked(&self) -> usize {
         self.submissions().entries.len()
+    }
+
+    #[doc(hidden)]
+    pub fn buffer_allocations(&self) -> usize {
+        self.buffer_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .allocations
+    }
+
+    #[doc(hidden)]
+    pub fn idle_buffer_count(&self) -> usize {
+        self.buffer_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .idle
+            .len()
+    }
+
+    #[doc(hidden)]
+    pub fn idle_buffer_bytes(&self) -> usize {
+        self.buffer_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .idle_bytes
     }
 
     /// Report the selected device's registered name.
@@ -858,21 +1007,29 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             start.elapsed().as_secs_f64()
         });
 
-        let mut table = self.submissions();
-        let entry = table.entries.get_mut(&id).ok_or_else(unknown)?;
-        entry.waiting = false;
-        let host_seconds = if let Some(resources) = &entry.resources {
-            let status = resources.command.status();
-            if !is_terminal(status) {
-                entry.abandoned = true;
-                check_command_status(&resources.command, status)?;
-            }
-            entry.retire(status);
-            None
-        } else {
-            Some(entry.host_start.elapsed().as_secs_f64())
+        let (result, host_seconds, retired) = {
+            let mut table = self.submissions();
+            let entry = table.entries.get_mut(&id).ok_or_else(unknown)?;
+            entry.waiting = false;
+            let mut retired = None;
+            let host_seconds = if let Some(resources) = &entry.resources {
+                let status = resources.command.status();
+                if !is_terminal(status) {
+                    entry.abandoned = true;
+                    check_command_status(&resources.command, status)?;
+                }
+                retired = entry.retire(status);
+                None
+            } else {
+                Some(entry.host_start.elapsed().as_secs_f64())
+            };
+            let result = table.entries.remove(&id).ok_or_else(unknown)?.result;
+            (result, host_seconds, retired)
         };
-        let mut profile = table.entries.remove(&id).ok_or_else(unknown)?.result?;
+        if let Some(buffers) = retired {
+            self.recycle_buffers(vec![buffers]);
+        }
+        let mut profile = result?;
         profile.wait_seconds = wait_seconds;
         if let Some(host_seconds) = host_seconds {
             profile.host_seconds = host_seconds;
@@ -901,7 +1058,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         self.run_profiled_words(source, entry, input, Some(width))
     }
 
-    /// Compile the kernel and report the smaller of the device and pipeline width limits.
+    /// Find or compile the kernel and report the smaller of the device and pipeline width limits.
     ///
     /// Input size and threadgroup count are checked separately at dispatch.
     ///
@@ -911,11 +1068,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
     pub fn max_group_width(&self, source: &str, entry: &str) -> Result<usize, MetalError> {
         validate_source(source, &[entry])?;
         autoreleasepool(|_| {
-            let options = compile_options()?;
-            let library = self.compile_library(source, &options)?;
-            let function = find_function(&library, entry)?;
-            let pipeline = self.compute_pipeline(&function)?;
-            verify_shader_validation(&pipeline)?;
+            let (pipeline, _, _) = self.prepare_compute_pipeline(source, entry)?;
             Ok(self.pipeline_group_width_limit(&pipeline))
         })
     }
@@ -963,15 +1116,8 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         host_start: Instant,
     ) -> Result<Submission<'_>, MetalError> {
         self.submissions().check_capacity()?;
-        let options = compile_options()?;
-        let library_start = Instant::now();
-        let library = self.compile_library(source, &options)?;
-        let library_seconds = library_start.elapsed().as_secs_f64();
-        let function = find_function(&library, entry)?;
-        let pipeline_start = Instant::now();
-        let pipeline = self.compute_pipeline(&function)?;
-        let pipeline_seconds = pipeline_start.elapsed().as_secs_f64();
-        verify_shader_validation(&pipeline)?;
+        let (pipeline, library_seconds, pipeline_seconds) =
+            self.prepare_compute_pipeline(source, entry)?;
 
         let limit = self.pipeline_group_width_limit(&pipeline);
         let width = match group_width {
@@ -999,31 +1145,82 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             ));
         }
         let alloc_start = Instant::now();
-        let input_buffer = match input {
-            ComputeInput::Words(words) => Some(self.new_buffer(words)?),
-            ComputeInput::SampledTexture { coords, .. } => Some(self.new_buffer(coords)?),
+        let mut pool = self
+            .buffer_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut input_buffer = match input {
+            ComputeInput::Words(words) => Some(pool.acquire(&self.device, words)?),
+            ComputeInput::SampledTexture { coords, .. } => {
+                Some(pool.acquire(&self.device, coords)?)
+            }
             ComputeInput::Texture(..) => None,
         };
         let words = vec![0xA5A5_A5A5; input.len()];
-        let output_buffer = self.new_buffer(&words)?;
+        let output_buffer = match pool.acquire(&self.device, &words) {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                if let Some(input) = input_buffer.take() {
+                    pool.release(input);
+                }
+                return Err(error);
+            }
+        };
         let alloc_seconds = alloc_start.elapsed().as_secs_f64();
+        drop(pool);
         let mut table = self.submissions();
-        table.check_capacity()?;
+        if let Err(error) = table.check_capacity() {
+            drop(table);
+            self.recycle_buffers(vec![RetiredBuffers {
+                input: input_buffer,
+                output: output_buffer,
+            }]);
+            return Err(error);
+        }
         let id = table.next_id;
-        table.next_id = id
-            .checked_add(1)
-            .ok_or_else(|| MetalError::new("submission", "submission ids exhausted"))?;
+        table.next_id = match id.checked_add(1) {
+            Some(next) => next,
+            None => {
+                drop(table);
+                self.recycle_buffers(vec![RetiredBuffers {
+                    input: input_buffer,
+                    output: output_buffer,
+                }]);
+                return Err(MetalError::new("submission", "submission ids exhausted"));
+            }
+        };
         let encode_start = Instant::now();
-        let command = self
-            .queue
-            .commandBufferWithUnretainedReferences()
-            .ok_or_else(|| MetalError::new("commandBuffer", "command buffer creation failed"))?;
+        let command = match self.queue.commandBufferWithUnretainedReferences() {
+            Some(command) => command,
+            None => {
+                drop(table);
+                self.recycle_buffers(vec![RetiredBuffers {
+                    input: input_buffer,
+                    output: output_buffer,
+                }]);
+                return Err(MetalError::new(
+                    "commandBuffer",
+                    "command buffer creation failed",
+                ));
+            }
+        };
         if let Some(gate) = gate {
             command.encodeWaitForEvent_value(gate.as_ref(), 1);
         }
-        let encoder = command.computeCommandEncoder().ok_or_else(|| {
-            MetalError::new("computeCommandEncoder", "compute encoder creation failed")
-        })?;
+        let encoder = match command.computeCommandEncoder() {
+            Some(encoder) => encoder,
+            None => {
+                drop(table);
+                self.recycle_buffers(vec![RetiredBuffers {
+                    input: input_buffer,
+                    output: output_buffer,
+                }]);
+                return Err(MetalError::new(
+                    "computeCommandEncoder",
+                    "compute encoder creation failed",
+                ));
+            }
+        };
         encoder.setComputePipelineState(&pipeline);
         // SAFETY: All resources are live, initialized, and were allocated by
         // this device. The kernel uses one input at index zero and writes the
@@ -1108,18 +1305,67 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             })
     }
 
-    fn compute_pipeline(
+    fn prepare_compute_pipeline(
         &self,
-        function: &ProtocolObject<dyn MTLFunction>,
-    ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-        self.device
-            .newComputePipelineStateWithFunction_error(function)
+        source: &str,
+        entry: &str,
+    ) -> Result<(ComputePipeline, f64, f64), MetalError> {
+        let shader_validation = std::env::var("MTL_SHADER_VALIDATION").as_deref() == Ok("1");
+        // Device identity is fixed by this context. All misses use the same
+        // compile options (safe math, precise functions, default language,
+        // no macros) and unspecialized functions. Any configurable options
+        // must become part of the key before they are used here.
+        let mut cache = self
+            .compute_pipelines
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = cache.iter().position(|cached| {
+            cached.source.as_ref() == source
+                && cached.entry.as_ref() == entry
+                && cached.shader_validation == shader_validation
+        }) {
+            let cached = cache.remove(index).expect("position in the locked cache");
+            let pipeline = cached.pipeline.clone();
+            cache.push_back(cached);
+            return Ok((pipeline, 0.0, 0.0));
+        }
+
+        // Serialize cache misses in this context so concurrent requests for
+        // one key share the same build. The submission table is unlocked here.
+        let options = compile_options()?;
+        let library_start = Instant::now();
+        let library = self.compile_library(source, &options)?;
+        let library_seconds = library_start.elapsed().as_secs_f64();
+        let function = find_function(&library, entry)?;
+        let pipeline_start = Instant::now();
+        let pipeline = self
+            .device
+            .newComputePipelineStateWithFunction_error(&function)
             .map_err(|error| {
                 MetalError::new(
                     "newComputePipelineStateWithFunction",
                     error.localizedDescription().to_string(),
                 )
-            })
+            })?;
+        let pipeline_seconds = pipeline_start.elapsed().as_secs_f64();
+        if shader_validation {
+            verify_shader_validation(&pipeline)?;
+        }
+
+        // Bound owned key text to 1 MiB. A valid oversized key can run
+        // uncached, so this budget does not alter source or entry validation.
+        if entry.len() <= MAX_SOURCE_BYTES.saturating_sub(source.len()) {
+            if cache.len() == MAX_CACHED_PIPELINES {
+                cache.pop_front();
+            }
+            cache.push_back(CachedPipeline {
+                source: source.into(),
+                entry: entry.into(),
+                shader_validation,
+                pipeline: pipeline.clone(),
+            });
+        }
+        Ok((pipeline, library_seconds, pipeline_seconds))
     }
 
     fn pipeline_group_width_limit(
@@ -1232,10 +1478,6 @@ fn check_command_status(
 fn verify_shader_validation(
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
 ) -> Result<(), MetalError> {
-    if std::env::var("MTL_SHADER_VALIDATION").as_deref() != Ok("1") {
-        return Ok(());
-    }
-
     if !pipeline.respondsToSelector(sel!(shaderValidation)) {
         return Err(MetalError::new(
             "shaderValidation",

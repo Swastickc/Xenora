@@ -122,7 +122,7 @@ this wave (all 32 except in a final partial wave, see 7). As an unsigned
 ## 4. Rejected (controlled translation/reference error, never a silent no-op)
 
 - V_CMPX_* (writes EXEC: divergent execution; needs its own contract).
-- The VOP3 encoding of any compare (arbitrary SGPR destination, modifiers).
+- VOP3A compares outside the integer subset in section 11.
 - SDWA and DPP forms; float compares; v_cmp_class.
 - 16-bit compares in the decoder and translator (the reference interpreters
   accept the subset in 2a).
@@ -275,12 +275,11 @@ swapped signedness, without the EXEC mask, without the absent-lane bound
 (shader validation aborts on the out-of-range read) or with an inverted join.
 
 The 32-bit readback evidence is local agreement with a specification-derived
-reference on Apple M5 Pro. The 16-bit compiler evidence is CPU-only.
-There is no RDNA 2 or Xbox hardware evidence.
+reference on Apple M5 Pro. There is no RDNA 2 or Xbox hardware evidence.
 
 ## 10. Limitations
 
-- Wave32 only. No `v_cmpx`, VOP3, SDWA, DPP or float compares.
+- Wave32 only. No `v_cmpx`, SDWA, DPP or float compares. VOP3 encodings cover the 32-bit compares only.
 - A lane-derived VCC_LO cannot reach EXEC or any scalar instruction, so there
   is no divergent execution. That needs its own contract.
 - The skipped region of a runtime `s_cbranch_vccz` holds only integer vector
@@ -289,3 +288,38 @@ There is no RDNA 2 or Xbox hardware evidence.
 - Each thread recomputes up to 32 lanes per compare. The cost grows with the
   compare's dependency chain. That is fine for fixtures, and no performance is
   claimed.
+
+## 11. VOP3A encoding (`_e64`)
+
+All sixteen 32-bit signed and unsigned compares in section 2 also have a 64-bit
+VOP3A encoding. The pinned AMD XML supplies each opcode. Bits 7:0 of the first
+word are the scalar destination selector (SDST), in the field named VDST.
+Selectors 0–105 name scalar general-purpose registers (SGPRs), and 106 names
+`vcc_lo`. All other destinations are rejected. Both SRC0 and SRC1 must name
+vector general-purpose registers (VGPRs), and the unused SRC2 must be the
+assembler's inline-zero selector (128). ABS, OP_SEL, CLAMP, OMOD and NEG must
+be clear. The guide describes CLAMP on compares as enabling floating-point
+exception signaling (§6.5, p. 48 and §12.9.1, p. 162).
+
+The AMD guide's compare-specific text (§3.9, pp. 19–20 and §13.3.3, p. 252)
+specifies an SGPR destination for this encoding. The generic VDST label in
+§12.9.1 (p. 162) and §13.3.4 Table 82 (pp. 257–258) describes the VOP3A field
+as a VGPR destination. The pinned XML identifies VDST for these compares as
+`OPR_SREG`, with the Wave64 pair described by `FMT_NUM_M64`. The Wave32 write
+occupies one 32-bit SGPR. The guide defines 32 work-items in §2.1 (pp. 7–8),
+32-bit SGPRs in §3.1 Table 2 (p. 12) and one compare result bit per lane in
+§12.9 (p. 150). Wave64 stays unsupported.
+
+LLVM 23 `llvm-mc` for gfx1030 with `+wavefrontsize32` assembles
+`v_cmp_eq_u32_e64 s4, v1, v2` as bytes `04 00 c2 d4 01 05 02 02`.
+Selecting `vcc_lo` changes the first byte to `6a`. The decoder tests cover
+the assembler's words for all sixteen forms. This is encoding evidence.
+
+The compare replaces all 32 bits of SDST with the lane mask from section 3,
+including zero bits for inactive and absent lanes. It leaves SCC and EXEC
+unchanged. VCC is written only when SDST selects `vcc_lo`, which uses the
+same lowering and consumers as the VOPC form, including `s_cbranch_vccz`.
+Every other SDST is tracked as a runtime-only SGPR result, including under
+empty EXEC. Translation rejects later reads of that result, including reads
+through resource descriptors. The runtime branch region rules in section 6
+also apply here.

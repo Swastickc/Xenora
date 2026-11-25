@@ -47,7 +47,7 @@ pub enum Operation {
     LogicalShiftRight,
     /// Shift S0 right by the masked count in S1, filling with its sign bit.
     ArithmeticShiftRight,
-    /// Compare S0 with S1 under the form's relation; writes only SCC.
+    /// Compare S0 with S1 under the form's relation, producing SCC or a lane mask.
     Compare,
     /// Bitwise complement of S0.
     Not,
@@ -227,7 +227,7 @@ pub enum SccEffect {
     SelectedSrc0,
 }
 
-/// What a form writes to VCC or EXEC.
+/// Where a form writes its lane mask, if any.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaskEffect {
     /// Not written.
@@ -236,6 +236,8 @@ pub enum MaskEffect {
     /// exists) & test(lane n), fully written; `VCC_HI` has no known value after
     /// it (docs/shaders/vector-compare.md section 3).
     LaneMask,
+    /// Wave32 VOP3A compare mask written to SDST, which may be `vcc_lo`.
+    SdstLaneMask,
 }
 
 /// Wave-size restriction.
@@ -288,6 +290,9 @@ pub enum OperandRule {
     /// VGPRs, no input or output modifiers, SRC2 unused. Everything else is
     /// rejected as unsupported.
     Vop3Vgpr2,
+    /// VOP3A compare: VDST encodes s0-s105 or `vcc_lo`; SRC0 and SRC1 are
+    /// VGPRs, SRC2 is unused and all modifiers are clear.
+    Vop3CmpVgpr2,
     /// VOP2 vector: VDST is v0-v255; SRC0 is a VGPR, s0-s105, `vcc_lo`, an inline
     /// integer -16..64 or a literal word; VSRC1 is a VGPR. Everything else is
     /// rejected as unsupported.
@@ -365,7 +370,7 @@ pub struct FormSemantics {
     pub relation: Option<CompareRelation>,
     /// SCC write.
     pub scc: SccEffect,
-    /// VCC write.
+    /// Implicit VCC write or explicit scalar destination for a compare mask.
     pub vcc: MaskEffect,
     /// EXEC write.
     pub exec: MaskEffect,

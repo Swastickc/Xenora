@@ -75,6 +75,29 @@ class GenerateX86(unittest.TestCase):
         self.rejects(self.form('op = "mov"\nopcode = 0xD7\nenc = "reg_rm"\nsize = "v"\nlock = true'), message)
         self.rejects(self.form('op = "xadd"\nopcode = 0xD7\nenc = "rm_reg"\nsize = "v"\nregister_only = true\nlock = true'), message)
 
+    def test_a_fixed_rm_field_needs_a_register_only_digit_form(self):
+        base = 'op = "nop"\nopcode = 0xD9\nenc = "rm_unread"\nsize = "n"\n'
+        message = "needs register_only and a digit"
+        self.rejects(self.form(base + "digit = 0\nrm = 3"), message)
+        self.rejects(self.form(base + "digit = 0\nmemory_only = true\nrm = 3"), message)
+        self.rejects(self.form(base + "register_only = true\nrm = 3"), message)
+        for value in ("8", "-1", "true", '"3"'):
+            self.rejects(self.form(base + f"digit = 0\nregister_only = true\nrm = {value}"), "r/m field value 0-7")
+        # A second form on the same opcode and digit is an overlap, whatever its r/m field.
+        self.rejects(self.form('op = "nop"\nopcode = 0xDB\ndigit = 4\nenc = "rm_unread"\nsize = "n"\n'
+                               "register_only = true\nrm = 2"), "overlapping")
+        # The valid shape loads, and the key reaches the generated table.
+        operations, forms = generate_x86.load(self.form(base + "digit = 0\nregister_only = true\nrm = 7"))
+        self.assertEqual([f["rm"] for f in forms if f["map"] == "1" and f["opcode"] == 0xD9], [7])
+        self.assertIn("register_only: true, fixed_rm: Some(7),", generate_x86.generate(operations, forms))
+
+    def test_fninit_is_the_only_form_with_a_fixed_rm_field_and_the_only_x87_form(self):
+        _, forms = generate_x86.load(REGISTRY)
+        fixed = [(f["op"], f["map"], f["opcode"], f["digit"], f["rm"]) for f in forms if f["rm"] is not None]
+        self.assertEqual(fixed, [("fninit", "1", 0xDB, 4, 3)])
+        x87 = [f["op"] for f in forms if f["map"] == "1" and 0xD8 <= f["opcode"] <= 0xDF]
+        self.assertEqual(x87, ["fninit"])
+
     def test_only_xadd_and_cmpxchg_are_lockable(self):
         _, forms = generate_x86.load(REGISTRY)
         self.assertEqual({form["op"] for form in forms if form.get("lock")}, {"cmpxchg", "xadd"})

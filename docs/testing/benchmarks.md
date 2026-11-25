@@ -96,3 +96,33 @@ correctness checks. The recorded 1-, 5- and 15-minute load averages were
 individual compiler stages and cold/warm timing, tool and capability metadata,
 and noise-based variability reporting. See the
 [generated report](../../benchmarks/results/apple-m5/run-1795352394/report.md).
+
+## Guest service dispatch
+
+`cargo bench --locked -p xenora-loader --bench service_dispatch` measures
+original guest loops that call standard runtime services through a bound
+import table under the ARM64 dynamic binary translator. Before timing, each
+workload checks its result: the loop count reaches zero, the service returns
+its documented value, and `qsort` leaves the array in the order Rust's own sort
+produces. The empty loop is reported separately, so readers can subtract the
+loop and translation overhead. Each figure is the median per-iteration time of
+10 measured batches of 10,000 iterations, after one warm-up batch.
+
+Measured on Apple M2 Pro (12 logical processors), release profile, AC power,
+on the working tree after `ed9b93c`. The 1-minute load average was 7.82, so the
+machine was not idle and results are indicative only.
+
+| Workload | Before (ns) | After the block `strlen` scan (ns) |
+| --- | --- | --- |
+| Empty loop | 21.5 | 20.1 |
+| `GetLastError` | 181.8 | 188.4 |
+| `WaitForSingleObject`, signaled manual-reset event | 281.0 | 284.6 |
+| `strlen`, 63 bytes | 1,990.4 | 223.1 |
+| `HeapAlloc` + `HeapFree`, 64 bytes | 475.0 | 493.3 |
+| `qsort`, 16 ints with a guest comparator | 10,242.0 | 11,396.7 |
+
+The `strlen` change scans 256-unit blocks with one checked read each. It falls
+back to per-unit reads only when a block crosses unmapped or unreadable
+memory, so the existing exact-fault tests still pass. The other rows differ by up to 11 percent between runs on this loaded
+machine; that is run-to-run variation, not a measured change. Raw logs are kept locally under
+`artifacts/system-runtime/bench/`. No comparison with native Windows is made.

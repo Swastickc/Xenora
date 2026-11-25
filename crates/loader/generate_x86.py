@@ -7,9 +7,9 @@
              differs. Never writes.
 
 Rejects unknown keys and vocabulary, overlapping encodings, digit and plain
-forms sharing an opcode, operand constraints that contradict each other, LOCK
-on a form that cannot write memory, and flags declared both written and
-undefined. Standard library only (Python 3.11+).
+forms sharing an opcode, operand constraints that contradict each other, a
+fixed r/m field on a form that could take memory, LOCK on a form that cannot
+write memory, and flags declared both written and undefined. Standard library only (Python 3.11+).
 """
 
 import sys
@@ -27,7 +27,7 @@ RUST = HERE / "src/x86_table.rs"
 TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "group"}
 OPERATION_KEYS = {"reads", "writes", "undefined", "conditional", "terminator", "faults", "ref"}
 FORM_KEYS = {"op", "map", "prefix", "opcode", "count", "digit", "enc", "size", "imm", "src",
-             "memory_only", "register_only", "no_rex_b", "unaligned", "lock"}
+             "memory_only", "register_only", "rm", "no_rex_b", "unaligned", "lock"}
 GROUP_KEYS = {"map", "opcodes", "digits"}
 FLAGS = ["cf", "zf", "sf", "of", "pf", "af"]
 MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
@@ -35,7 +35,7 @@ MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
 PREFIXES = {"": "TWO_BYTE", "66": "TWO_BYTE_66", "f3": "TWO_BYTE_F3", "f2": "TWO_BYTE_F2"}
 SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None", "x": "Xmm"}
 IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word", "ub": "Byte",
-        "rel8": "SignedByte", "rel32": "Signed32"}
+        "rel8": "SignedByte", "rel32": "Signed32", "moffs": "Offset"}
 SRCS = {"": 0, "b": 1, "w": 2, "d": 4, "q": 8, "x": 16}
 # encoding -> (Rust variant, has ModRM, required immediates)
 ENCS = {
@@ -50,7 +50,12 @@ ENCS = {
     "rm_imm": ("RmImm", True, {"ib", "iz"}),
     "rm_one": ("RmOne", True, {""}),
     "rm_cl": ("RmCl", True, {""}),
+    "rm_reg_imm": ("RmRegImm", True, {"ub"}),
+    "rm_reg_cl": ("RmRegCl", True, {""}),
     "acc_imm": ("AccImm", False, {"ib", "iz"}),
+    # The accumulator and an absolute address in place of ModRM (MOV A0-A3).
+    "acc_moffs": ("RegRm", False, {"moffs"}),
+    "moffs_acc": ("RmReg", False, {"moffs"}),
     "op_reg": ("OpReg", False, {""}),
     "op_reg_imm": ("OpRegImm", False, {"ib", "iv"}),
     "imm": ("Imm", False, {"ib", "iz", "iw"}),
@@ -66,7 +71,7 @@ ENCS = {
     "reg_xmm_imm": ("RegXmmImm", True, {"ub"}),
 }
 # Encodings whose ModRM operand is the destination, so LOCK can apply to it.
-RM_DESTINATIONS = {"rm_reg", "rm", "rm_imm", "rm_one", "rm_cl"}
+RM_DESTINATIONS = {"rm_reg", "rm", "rm_imm", "rm_one", "rm_cl", "rm_reg_imm", "rm_reg_cl"}
 # Encodings whose ModRM operand is an XMM register or memory of the source width.
 XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
 # One-byte opcodes that are prefixes or the two-byte escape, never instructions.
@@ -167,6 +172,13 @@ def load(text):
             fail(f"{where}: memory_only and register_only contradict")
         if (form.get("memory_only") or form.get("register_only")) and not modrm:
             fail(f"{where}: operand restriction without ModRM")
+        form.setdefault("rm", None)
+        if form["rm"] is not None:
+            # bool is an int in Python; `rm = true` is not a field value.
+            if type(form["rm"]) is not int or not 0 <= form["rm"] <= 7:
+                fail(f"{where}: rm must be a ModRM r/m field value 0-7")
+            if not form.get("register_only") or form["digit"] is None:
+                fail(f"{where}: a fixed r/m field needs register_only and a digit")
         sourced = form["enc"] in XMM_RM or form["enc"] == "xmm_gpr_imm"
         if sourced != bool(form["src"]) and form["enc"] not in ("reg_rm", "rm"):
             fail(f"{where}: source size does not match the encoding")
@@ -271,6 +283,7 @@ def generate(operations, forms):
             f"source: {SRCS[form['src']]}, has_modrm: {str(ENCS[form['enc']][1]).lower()}, "
             f"memory_only: {str(bool(form.get('memory_only'))).lower()}, "
             f"register_only: {str(bool(form.get('register_only'))).lower()}, "
+            f"fixed_rm: {'None' if form['rm'] is None else 'Some(%d)' % form['rm']}, "
             f"no_rex_b: {str(bool(form.get('no_rex_b'))).lower()}, "
             f"unaligned: {str(bool(form.get('unaligned'))).lower()}, "
             f"lockable: {str(bool(form.get('lock'))).lower()} }},")

@@ -5,8 +5,8 @@ cd "$(dirname "$0")/.."
 
 target=${1:-}
 case "$target" in
-    instruction_stream|fixture|reference) ;;
-    *) printf '%s\n' 'usage: scripts/fuzz.sh <instruction_stream|fixture|reference> [seconds]' >&2; exit 2 ;;
+    instruction_stream|fixture|reference|runtime_services) ;;
+    *) printf '%s\n' 'usage: scripts/fuzz.sh <instruction_stream|fixture|reference|runtime_services> [seconds]' >&2; exit 2 ;;
 esac
 seconds=${2:-600}
 case "$seconds" in

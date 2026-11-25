@@ -1,0 +1,23 @@
+0000: t0 = load.u32 input[index]
+000c: t1 = mul24.i32 t0, t0
+0014: t2 = mulhi24.i32 t1, t0
+001c: t3 = mul24.u32 t1, t0
+0024: t4 = mulhi24.u32 t3, t0
+002c: t5 = min.i32 t0, t1
+0034: t6 = max.i32 t0, t3
+003c: t7 = min.u32 t2, t0
+0044: t8 = max.u32 t4, t1
+004c: t9 = xnor.b32 t0, t4
+0054: t10 = sub.u32 t5, t9
+005c: t11 = sub.u32 t8, t0
+0064: t12 = xor.b32 t1, t2
+0068: t13 = xor.b32 t3, t12
+006c: t14 = xor.b32 t4, t13
+0070: t15 = xor.b32 t5, t14
+0074: t16 = xor.b32 t6, t15
+0078: t17 = xor.b32 t7, t16
+007c: t18 = xor.b32 t8, t17
+0080: t19 = xor.b32 t9, t18
+0084: t20 = xor.b32 t10, t19
+0088: t21 = xor.b32 t11, t20
+008c: store.u32 output[index], t21

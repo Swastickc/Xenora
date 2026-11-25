@@ -4,11 +4,14 @@
 //!
 //! A section's mapped size is max(VirtualSize, SizeOfRawData) and the loader
 //! backs it with zero-filled host memory, so a small file can request a large
-//! allocation. The loader's documented budget is 256 MiB per image.
+//! allocation. The loader's documented budget is 256 MiB per image, and the
+//! page of headers mapped at the image base (#333) counts toward it.
 
 use xenora_loader::{MemoryError, ParsedPe, PeError};
 
 const BUDGET: u32 = 256 * 1024 * 1024;
+/// The image's 0x200 bytes of headers are mapped as one 4 KiB page.
+const HEADERS: u32 = 0x1000;
 
 /// An original synthetic image: one 0x200-byte code section at RVA 0x1000 followed by
 /// uninitialized sections (no raw data) of the given virtual sizes, packed back to back.
@@ -25,6 +28,8 @@ fn build(bss_sizes: &[u32]) -> Vec<u8> {
     pe[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes());
     pe[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
     pe[opt + 24..opt + 32].copy_from_slice(&0x1_4000_0000u64.to_le_bytes());
+    // SizeOfHeaders: everything before the code's raw data.
+    pe[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes());
 
     let mut section = |i: usize, va: u32, vsize: u32, raw: u32, flags: u32| {
         let h = opt + 112 + i * 40;
@@ -56,14 +61,14 @@ fn small_image_loads() {
 
 #[test]
 fn image_exactly_at_budget_loads() {
-    let bytes = build(&[BUDGET - 0x200]);
+    let bytes = build(&[BUDGET - HEADERS - 0x200]);
     let pe = ParsedPe::parse(&bytes).unwrap();
     assert!(pe.load_into_memory(&bytes).is_ok());
 }
 
 #[test]
 fn one_byte_over_budget_is_rejected() {
-    let bytes = build(&[BUDGET - 0x1FF]);
+    let bytes = build(&[BUDGET - HEADERS - 0x1FF]);
     let pe = ParsedPe::parse(&bytes).unwrap();
     assert_eq!(pe.load_into_memory(&bytes).err(), Some(over_budget()));
 }

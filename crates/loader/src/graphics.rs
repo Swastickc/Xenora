@@ -120,10 +120,11 @@ pub enum GraphicsError {
     /// An index buffer format other than DXGI `R16_UINT` (57) or `R32_UINT` (42).
     InvalidIndexFormat(u32),
     /// An indexed draw reads past its index buffer or fetches a vertex,
-    /// after applying the base vertex, outside its vertex buffer.
+    /// after applying the base vertex, outside its vertex buffer, or a flat
+    /// draw reads its vertices outside the vertex buffer.
     IndexOutOfRange,
-    /// A descriptor heap, view, sampler, root signature or binding outside
-    /// the supported texture-binding subset. Nothing is drawn.
+    /// A descriptor heap, view, sampler, root signature, binding or draw
+    /// outside the supported subset. Nothing is drawn.
     Unsupported(&'static str),
 }
 
@@ -151,8 +152,8 @@ impl std::fmt::Display for GraphicsError {
             Self::InvalidIndexFormat(format) => {
                 write!(f, "unsupported index buffer format {format}")
             }
-            Self::IndexOutOfRange => write!(f, "indexed draw outside its index or vertex buffer"),
-            Self::Unsupported(what) => write!(f, "unsupported texture binding: {what}"),
+            Self::IndexOutOfRange => write!(f, "draw outside its index or vertex buffer"),
+            Self::Unsupported(what) => write!(f, "unsupported graphics operation: {what}"),
         }
     }
 }
@@ -180,6 +181,8 @@ pub struct ResourceDesc {
 #[derive(Clone, Debug)]
 pub struct GraphicsResource {
     pub handle: GraphicsHandle,
+    /// The device that created this resource.
+    pub device: GraphicsHandle,
     pub desc: ResourceDesc,
     pub state: ResourceStates,
     pub guest_backing_addr: Option<u64>,
@@ -462,12 +465,14 @@ pub struct RootSignatureDesc {
 /// one holding `s0`, at these root parameter indices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RootSignature {
+    /// The device that created this root signature.
+    device: GraphicsHandle,
     srv_parameter: u32,
     sampler_parameter: u32,
 }
 
 impl RootSignature {
-    fn from_desc(desc: &RootSignatureDesc) -> Result<Self, GraphicsError> {
+    fn from_desc(device: GraphicsHandle, desc: &RootSignatureDesc) -> Result<Self, GraphicsError> {
         if desc.static_sampler_count != 0 {
             return Err(GraphicsError::Unsupported("static samplers"));
         }
@@ -518,6 +523,7 @@ impl RootSignature {
         }
         match (srv, sampler) {
             (Some(srv_parameter), Some(sampler_parameter)) => Ok(Self {
+                device,
                 srv_parameter,
                 sampler_parameter,
             }),
@@ -550,6 +556,8 @@ struct TableBindings {
 /// A shader-visible descriptor heap.
 struct DescriptorHeap {
     handle: GraphicsHandle,
+    /// The device that created this heap.
+    device: GraphicsHandle,
     heap_type: DescriptorHeapType,
     slots: Vec<Option<Descriptor>>,
 }
@@ -643,6 +651,10 @@ pub enum GraphicsCommand {
 /// Command List in recording or closed state.
 pub struct GraphicsCommandList {
     pub handle: GraphicsHandle,
+    /// The device that created this command list.
+    pub device: GraphicsHandle,
+    /// The command allocator this list was created from.
+    pub allocator: GraphicsHandle,
     pub list_type: CommandListType,
     pub is_recording: bool,
     pub commands: Vec<GraphicsCommand>,
@@ -651,6 +663,8 @@ pub struct GraphicsCommandList {
 /// Command Allocator tracking command recording buffers.
 pub struct GraphicsCommandAllocator {
     pub handle: GraphicsHandle,
+    /// The device that created this allocator.
+    pub device: GraphicsHandle,
     pub list_type: CommandListType,
     pub is_reset: bool,
 }
@@ -658,6 +672,8 @@ pub struct GraphicsCommandAllocator {
 /// Command Queue for command list submission and execution.
 pub struct GraphicsCommandQueue {
     pub handle: GraphicsHandle,
+    /// The device that created this queue.
+    pub device: GraphicsHandle,
     pub list_type: CommandListType,
     pub submitted_lists: Vec<GraphicsHandle>,
 }
@@ -678,6 +694,8 @@ pub struct FramePresentation {
     pub height: usize,
     pub pixels: Vec<u8>,
     pub frame_index: u64,
+    /// The number of draws the last executed command list performed.
+    pub draw_count: usize,
     pub backend: Option<GraphicsBackendId>,
 }
 
@@ -725,6 +743,19 @@ impl GraphicsContext {
     }
 
     /// Install a native Metal backend adapter.
+    /// Live object counts for the service tests: devices, queues, allocators,
+    /// command lists and resources. A creation that fails must not change them.
+    #[cfg(test)]
+    pub(crate) fn live_counts(&self) -> [usize; 5] {
+        [
+            self.devices.len(),
+            self.queues.len(),
+            self.allocators.len(),
+            self.command_lists.len(),
+            self.resources.len(),
+        ]
+    }
+
     pub fn set_metal_backend<F>(&mut self, renderer: F)
     where
         F: Fn(&[[f32; 4]; 3], (usize, usize), [u8; 4]) -> Result<Vec<u8>, GraphicsError>
@@ -785,6 +816,7 @@ impl GraphicsContext {
             handle,
             GraphicsCommandQueue {
                 handle,
+                device,
                 list_type,
                 submitted_lists: Vec::new(),
             },
@@ -806,6 +838,7 @@ impl GraphicsContext {
             handle,
             GraphicsCommandAllocator {
                 handle,
+                device,
                 list_type,
                 is_reset: true,
             },
@@ -836,6 +869,8 @@ impl GraphicsContext {
             handle,
             GraphicsCommandList {
                 handle,
+                device,
+                allocator,
                 list_type,
                 is_recording: true,
                 commands: Vec::new(),
@@ -867,6 +902,7 @@ impl GraphicsContext {
             handle,
             GraphicsResource {
                 handle,
+                device,
                 desc,
                 state: initial_state,
                 guest_backing_addr: guest_addr,
@@ -1110,6 +1146,7 @@ impl GraphicsContext {
             handle,
             GraphicsResource {
                 handle,
+                device,
                 desc: ResourceDesc {
                     dimension: ResourceDimension::Texture2D,
                     width: u64::from(width),
@@ -1160,6 +1197,7 @@ impl GraphicsContext {
             handle.id,
             DescriptorHeap {
                 handle,
+                device,
                 heap_type,
                 slots: vec![None; num_descriptors as usize],
             },
@@ -1314,7 +1352,7 @@ impl GraphicsContext {
         if !self.devices.contains_key(&device) {
             return Err(GraphicsError::InvalidDeviceHandle);
         }
-        let root_signature = RootSignature::from_desc(desc)?;
+        let root_signature = RootSignature::from_desc(device, desc)?;
         let handle = self.allocate_handle();
         self.root_signatures.insert(handle, root_signature);
         Ok(handle)
@@ -1418,6 +1456,144 @@ impl GraphicsContext {
         cmd_list.commands.clear();
         cmd_list.is_recording = true;
         Ok(())
+    }
+
+    /// Destroy a guest device (`ID3D12Device` release). The device must have
+    /// no live child object: command queues, command allocators, command
+    /// lists, resources, descriptor heaps or root signatures.
+    pub fn destroy_device(&mut self, device: GraphicsHandle) -> Result<(), GraphicsError> {
+        if !self.devices.contains_key(&device) {
+            return Err(GraphicsError::InvalidDeviceHandle);
+        }
+        let has_children = self.queues.values().any(|queue| queue.device == device)
+            || self
+                .allocators
+                .values()
+                .any(|allocator| allocator.device == device)
+            || self
+                .command_lists
+                .values()
+                .any(|list| list.device == device)
+            || self.resources.values().any(|res| res.device == device)
+            || self
+                .descriptor_heaps
+                .values()
+                .any(|heap| heap.device == device)
+            || self
+                .root_signatures
+                .values()
+                .any(|signature| signature.device == device);
+        if has_children {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.devices.remove(&device);
+        Ok(())
+    }
+
+    /// Destroy a command queue (`ID3D12CommandQueue` release). Every command
+    /// list the queue submitted must already be destroyed.
+    pub fn destroy_command_queue(&mut self, queue: GraphicsHandle) -> Result<(), GraphicsError> {
+        let cmd_queue = self
+            .queues
+            .get(&queue)
+            .ok_or(GraphicsError::InvalidQueueHandle)?;
+        if cmd_queue
+            .submitted_lists
+            .iter()
+            .any(|list| self.command_lists.contains_key(list))
+        {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.queues.remove(&queue);
+        Ok(())
+    }
+
+    /// Destroy a command allocator (`ID3D12CommandAllocator` release). Every
+    /// command list created from it must already be destroyed.
+    pub fn destroy_command_allocator(
+        &mut self,
+        allocator: GraphicsHandle,
+    ) -> Result<(), GraphicsError> {
+        if !self.allocators.contains_key(&allocator) {
+            return Err(GraphicsError::InvalidAllocatorHandle);
+        }
+        if self
+            .command_lists
+            .values()
+            .any(|list| list.allocator == allocator)
+        {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.allocators.remove(&allocator);
+        Ok(())
+    }
+
+    /// Destroy a command list (`ID3D12GraphicsCommandList` release). The list
+    /// must not still be recording.
+    pub fn destroy_command_list(&mut self, list: GraphicsHandle) -> Result<(), GraphicsError> {
+        let cmd_list = self
+            .command_lists
+            .get(&list)
+            .ok_or(GraphicsError::InvalidCommandListHandle)?;
+        if cmd_list.is_recording {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.command_lists.remove(&list);
+        // The queue that submitted the list no longer holds it.
+        for cmd_queue in self.queues.values_mut() {
+            cmd_queue
+                .submitted_lists
+                .retain(|submitted| *submitted != list);
+        }
+        Ok(())
+    }
+
+    /// Destroy a committed resource (`ID3D12Resource` release). No command
+    /// list that is still recording may reference it.
+    pub fn destroy_resource(&mut self, resource: GraphicsHandle) -> Result<(), GraphicsError> {
+        if !self.resources.contains_key(&resource) {
+            return Err(GraphicsError::InvalidResourceHandle);
+        }
+        let referenced = self.command_lists.values().any(|list| {
+            list.is_recording
+                && list
+                    .commands
+                    .iter()
+                    .any(|command| Self::command_references_resource(command, resource))
+        });
+        if referenced {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.resources.remove(&resource);
+        Ok(())
+    }
+
+    /// The bytes a resource stores, for a guest that reads back its contents.
+    pub fn resource_bytes(&self, resource: GraphicsHandle) -> Result<&[u8], GraphicsError> {
+        let res = self
+            .resources
+            .get(&resource)
+            .ok_or(GraphicsError::InvalidResourceHandle)?;
+        Ok(&res.data)
+    }
+
+    /// Whether a recorded command names a resource.
+    fn command_references_resource(command: &GraphicsCommand, resource: GraphicsHandle) -> bool {
+        match command {
+            GraphicsCommand::ResourceBarrier {
+                resource: named, ..
+            } => *named == resource,
+            GraphicsCommand::SetRenderTargets { color_target, .. } => {
+                color_target == &Some(resource)
+            }
+            GraphicsCommand::SetVertexBuffer {
+                resource: named, ..
+            } => *named == resource,
+            GraphicsCommand::SetIndexBuffer {
+                resource: named, ..
+            } => *named == resource,
+            _ => false,
+        }
     }
 
     /// Execute command list on command queue using the configured backend.
@@ -1673,8 +1849,21 @@ impl GraphicsContext {
                         rendered_output = Some(pixels);
                         continue;
                     }
-                    if *vertex_count_per_instance < 3 {
+                    // Zero instances, or fewer vertices than one triangle,
+                    // draw nothing. The flat path draws only the first
+                    // triangle of the view, once; anything else is rejected
+                    // rather than drawn as a different triangle.
+                    if *vertex_count_per_instance < 3 || *instance_count == 0 {
                         continue;
+                    }
+                    if *vertex_count_per_instance != 3
+                        || *instance_count != 1
+                        || *start_vertex_location != 0
+                        || *start_instance_location != 0
+                    {
+                        return Err(GraphicsError::Unsupported(
+                            "flat draw other than one instance of the view's first three vertices",
+                        ));
                     }
                     draw_count += 1;
                     let v_res_handle =
@@ -1684,15 +1873,10 @@ impl GraphicsContext {
                         .get(&v_res_handle)
                         .ok_or(GraphicsError::InvalidResourceHandle)?;
 
-                    // Read vertices from guest memory backing or resource data
-                    let mut raw_vtx = [0u8; 48]; // 3 * 4 * float32
-                    if let Some(guest_addr) = v_res.guest_backing_addr {
-                        memory.read_bytes(guest_addr + vertex_offset as u64, &mut raw_vtx)?;
-                    } else if v_res.data.len() >= vertex_offset + 48 {
-                        raw_vtx.copy_from_slice(&v_res.data[vertex_offset..vertex_offset + 48]);
-                    } else {
-                        return Err(GraphicsError::InvalidDescriptor);
-                    }
+                    // Three float4 positions, inside the resource whether it
+                    // is backed by guest memory or by its own bytes.
+                    let mut raw_vtx = [0u8; 48];
+                    Self::read_resource(v_res, memory, vertex_offset, &mut raw_vtx)?;
 
                     let mut vertices = [[0.0f32; 4]; 3];
                     for (i, row) in vertices.iter_mut().enumerate() {
@@ -1734,6 +1918,7 @@ impl GraphicsContext {
             pres.height = viewport.1;
             pres.pixels = out.clone();
             pres.frame_index += 1;
+            pres.draw_count = draw_count;
             pres.backend = Some(backend_id);
         }
 

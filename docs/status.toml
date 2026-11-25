@@ -29,6 +29,19 @@ limitations = "Synthetic memory contract, statically resolved forward control fl
 test = "scripts/demo.sh"
 
 [[feature]]
+id = "guest-graphics-path"
+implementation = "implemented"
+correctness = "guest-frame-readback-passed"
+hardware_verification = "verified"
+hardware_target = "Apple M4"
+claims = ["CLAIM-GUEST-GRAPHICS-METAL", "CLAIM-GUEST-TEXTURED-METAL"]
+architecture = "arm64 macOS"
+semantics = "Guest programs author graphics commands that render through the translated gfx1030 vertex and pixel stages, and bind their own texture for a sampled draw"
+metal_mapping = "Native Metal offscreen rendering behind the guest graphics service boundary"
+limitations = "One triangle per draw, one instance, a float4 position plus an optional float4 texture coordinate per vertex, R8G8B8A8 render targets and textures of at most 64 by 64 pixels, a point sampler with clamp addressing, synchronous execution and no guest-visible fence. Constant buffers, upload and readback heaps, render target views and depth views are not yet exposed to the guest."
+test = "cargo test --locked -p xenora-loader --features gpu-tests --test guest_graphics_path --test guest_textured_path"
+
+[[feature]]
 id = "xbox-execution"
 implementation = "unsupported"
 correctness = "untested"
@@ -83,6 +96,330 @@ lowering = "MSL unsigned add"
 reference = "implemented"
 cpu = "fixture verified"
 gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_mul_i32_i24_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_mul_i32_i24_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_mul_hi_i32_i24_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_mul_hi_i32_i24_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_mul_u32_u24_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_mul_u32_u24_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_mul_hi_u32_u24_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_mul_hi_u32_u24_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_min_i32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_min_i32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_max_i32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_max_i32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_min_u32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_min_u32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_max_u32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_max_u32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_xnor_b32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_xnor_b32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_sub_nc_u32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_sub_nc_u32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_subrev_nc_u32_e64"
+encoding = "VOP3A, Wave32; VGPR destination and two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; inactive lanes keep VDST; the operation of `v_subrev_nc_u32_e32`"
+representation = "8 B"
+lowering = "per-thread typed integer template of the VOP2 form"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_lt_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_lt_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_eq_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_eq_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_le_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_le_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_gt_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_gt_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_ne_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_ne_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_ge_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_ge_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_f_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_f_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_t_i32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_t_i32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_lt_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_lt_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_eq_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_eq_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_le_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_le_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_gt_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_gt_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_ne_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_ne_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_ge_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_ge_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_f_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_f_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_cmp_t_u32_e64"
+encoding = "VOP3A, Wave32; SGPR destination s0-s105 or vcc_lo, D[n] = EXEC_LO[n] & test, fully written; two VGPR inputs, modifier fields clear, SRC2 encoded as inline zero; the relation of `v_cmp_t_u32_e32`; reading a lane-derived mask from an SGPR other than vcc_lo is a translation error"
+representation = "8 B"
+lowering = "per-thread Wave32 mask, as the VOPC form; runtime s_cbranch_vccz through vcc_lo"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "local Apple M5 readback passed; acceptance pending"
 recognized = true
 decoded = true
 llvm = "three-way passed"

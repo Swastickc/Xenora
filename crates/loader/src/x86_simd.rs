@@ -8,7 +8,9 @@
 use crate::cpu::{CpuState, ExitReason, Mxcsr};
 use crate::memory::GuestMemory;
 use crate::x86_decode::{Encoding, Insn, RegOperand, RmOperand};
-use crate::x86_exec::{address, read_mem, read_reg, rm_operand, write_mem, write_reg};
+use crate::x86_exec::{
+    address, canonical_access, read_mem, read_reg, rm_operand, write_mem, write_reg,
+};
 use crate::x86_float;
 use crate::x86_table::{FORMS, Op};
 
@@ -216,6 +218,9 @@ fn read_vector(memory: &GuestMemory, address: u64, size: u8) -> Result<u128, Exi
     if size < 16 {
         return read_mem(memory, address, size).map(u128::from);
     }
+    if !canonical_access(address, size) {
+        return Err(ExitReason::GeneralProtection);
+    }
     let mut bytes = [0; 16];
     memory
         .read_bytes(address, &mut bytes)
@@ -231,6 +236,9 @@ fn write_vector(
 ) -> Result<(), ExitReason> {
     if size < 16 {
         return write_mem(memory, address, size, value as u64);
+    }
+    if !canonical_access(address, size) {
+        return Err(ExitReason::GeneralProtection);
     }
     memory
         .write_bytes(address, &value.to_le_bytes())

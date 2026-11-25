@@ -35,6 +35,7 @@ pub struct Control {
     pub rounding: Rounding,
     pub denormals_are_zero: bool,
     pub flush_to_zero: bool,
+    pub overflow_masked: bool,
     pub underflow_masked: bool,
 }
 
@@ -49,6 +50,7 @@ impl Control {
             },
             denormals_are_zero: mxcsr & 1 << 6 != 0,
             flush_to_zero: mxcsr & 1 << 15 != 0,
+            overflow_masked: mxcsr & 1 << 10 != 0,
             underflow_masked: mxcsr & 1 << 11 != 0,
         }
     }
@@ -263,6 +265,14 @@ fn round(
         flags |= PRECISION;
     }
     if leading > format.bias() {
+        if !control.overflow_masked {
+            // No result is delivered. Precision is reported only if rounding
+            // with an unbounded exponent was inexact.
+            return Outcome {
+                bits: 0,
+                flags: OVERFLOW | if inexact { PRECISION } else { 0 },
+            };
+        }
         let to_infinity = match control.rounding {
             Rounding::Nearest => true,
             Rounding::Down => sign,

@@ -10,3 +10,10 @@ rust-version = "1.100"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+# Whole-program optimization for release and bench builds (#116). On an Apple M5 the
+# interpreter ran about 6 % and cold DBT about 9 % faster in `dbt_bench`, at the cost of
+# slower release builds. Debug and test builds are unaffected.
+[profile.release]
+lto = "fat"
+codegen-units = 1

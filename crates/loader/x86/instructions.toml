@@ -16,6 +16,9 @@
 # lock = true accepts the LOCK prefix (F0) when the ModRM operand is memory.
 # Every other use of LOCK is rejected, as the architecture's #UD.
 #
+# rm = N requires the ModRM r/m field to be N. It needs register_only, so the
+# form matches exactly one ModRM byte. At most one form per opcode and digit.
+#
 # prefix is a mandatory prefix: "66", "f3" or "f2". SSE forms use size x (XMM)
 # and give the ModRM operand width in src: x = 16 bytes, q = 8, d = 4, w = 2.
 # A 16-byte memory operand must be aligned unless unaligned = true.
@@ -23,7 +26,11 @@
 # size: b = 8-bit, v = 16/32/64-bit by 0x66 and REX.W, q = 64-bit always,
 #       y = 32/64-bit only, n = no operand. imm: ib = signed 8-bit,
 #       iz = 16/32-bit sign-extended, iv = full operand size, iw = 16-bit,
-#       rel8/rel32 = signed branch offset.
+#       rel8/rel32 = signed branch offset, moffs = 64-bit absolute address.
+#
+# enc = "acc_moffs" and "moffs_acc" take no ModRM: the operands are the
+# accumulator and the memory at the moffs address, which FS or GS may override.
+# They decode as reg_rm and rm_reg would.
 
 schema = 1
 architecture = "x86-64"
@@ -61,9 +68,13 @@ cwde = { ref = "sdm CBW/CWDE/CDQE" }
 cdq = { ref = "sdm CWD/CDQ/CQO" }
 rol = { writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
 ror = { writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
+rcl = { reads = "cf", writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
+rcr = { reads = "cf", writes = "cf of", conditional = true, ref = "sdm RCL/RCR/ROL/ROR" }
 shl = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
 shr = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
 sar = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SAL/SAR/SHL/SHR" }
+shld = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SHLD" }
+shrd = { writes = "cf zf sf of pf", undefined = "af", conditional = true, ref = "sdm SHRD" }
 mul = { writes = "cf of", undefined = "zf sf pf af", ref = "sdm MUL" }
 imul = { writes = "cf of", undefined = "zf sf pf af", ref = "sdm IMUL" }
 imul2 = { writes = "cf of", undefined = "zf sf pf af", ref = "sdm IMUL" }
@@ -86,6 +97,11 @@ leave = { ref = "sdm LEAVE" }
 call = { terminator = true, ref = "sdm CALL" }
 jmp = { terminator = true, ref = "sdm JMP" }
 jcc = { reads = "cf zf sf of pf", terminator = true, ref = "sdm Jcc" }
+# The count is RCX: the address-size prefix that would select ECX is rejected.
+loopne = { reads = "zf", terminator = true, ref = "sdm LOOP/LOOPcc" }
+loope = { reads = "zf", terminator = true, ref = "sdm LOOP/LOOPcc" }
+loop = { terminator = true, ref = "sdm LOOP/LOOPcc" }
+jrcxz = { terminator = true, ref = "sdm Jcc" }
 ret = { terminator = true, ref = "sdm RET" }
 nop = { ref = "sdm NOP" }
 hlt = { terminator = true, ref = "sdm HLT" }
@@ -93,9 +109,14 @@ syscall = { terminator = true, ref = "sdm SYSCALL" }
 clc = { writes = "cf", ref = "sdm CLC" }
 stc = { writes = "cf", ref = "sdm STC" }
 cmc = { reads = "cf", writes = "cf", ref = "sdm CMC" }
+# AH holds SF, ZF, AF, PF and CF; valid in 64-bit mode when CPUID
+# 8000_0001h ECX bit 0 is set.
+lahf = { reads = "cf zf sf pf af", ref = "sdm LAHF" }
+sahf = { writes = "cf zf sf pf af", ref = "sdm SAHF" }
 cpuid = { ref = "sdm CPUID" }
 cld = { ref = "sdm CLD" }
 std = { ref = "sdm STD" }
+fninit = { ref = "sdm FINIT/FNINIT" }
 # A REP form repeats by leaving RIP on itself, so these end a translated block.
 movs = { terminator = true, ref = "sdm MOVS/MOVSB/MOVSW/MOVSD/MOVSQ" }
 stos = { terminator = true, ref = "sdm STOS/STOSB/STOSW/STOSD/STOSQ" }
@@ -106,6 +127,7 @@ movups = { ref = "sdm MOVUPS" }
 movdqa = { ref = "sdm MOVDQA" }
 movdqu = { ref = "sdm MOVDQU" }
 movntdq = { ref = "sdm MOVNTDQ" }
+movnti = { ref = "sdm MOVNTI" }
 movntps = { ref = "sdm MOVNTPS/MOVNTPD" }
 movss = { ref = "sdm MOVSS" }
 movsd = { ref = "sdm MOVSD (scalar double)" }
@@ -183,6 +205,9 @@ shufpd = { ref = "sdm SHUFPD" }
 pinsrw = { ref = "sdm PINSRW" }
 pextrw = { ref = "sdm PEXTRW" }
 ldmxcsr = { ref = "sdm LDMXCSR" }
+lfence = { ref = "sdm LFENCE" }
+mfence = { ref = "sdm MFENCE" }
+sfence = { ref = "sdm SFENCE" }
 stmxcsr = { ref = "sdm STMXCSR" }
 
 # Floating point. Every form can raise a SIMD floating-point exception.
@@ -401,6 +426,51 @@ opcode = 0x87
 enc = "rm_reg"
 size = "v"
 
+# The accumulator with the register in the opcode. Opcode 0x90 is NOP; with
+# REX.B the decoder reads it as 0x91 with register 0, which is then r8. A row
+# of eight would have to start at 0x90, so each opcode is its own form.
+[[form]]
+op = "xchg"
+opcode = 0x91
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x92
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x93
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x94
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x95
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x96
+enc = "op_reg"
+size = "v"
+
+[[form]]
+op = "xchg"
+opcode = 0x97
+enc = "op_reg"
+size = "v"
+
 [[form]]
 op = "mov"
 opcode = 0x88
@@ -424,6 +494,34 @@ op = "mov"
 opcode = 0x8B
 enc = "reg_rm"
 size = "v"
+
+[[form]]
+op = "mov"
+opcode = 0xA0
+enc = "acc_moffs"
+size = "b"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA1
+enc = "acc_moffs"
+size = "v"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA2
+enc = "moffs_acc"
+size = "b"
+imm = "moffs"
+
+[[form]]
+op = "mov"
+opcode = 0xA3
+enc = "moffs_acc"
+size = "v"
+imm = "moffs"
 
 [[form]]
 op = "lea"
@@ -458,6 +556,18 @@ op = "cdq"
 opcode = 0x99
 enc = "none"
 size = "v"
+
+[[form]]
+op = "sahf"
+opcode = 0x9E
+enc = "none"
+size = "n"
+
+[[form]]
+op = "lahf"
+opcode = 0x9F
+enc = "none"
+size = "n"
 
 [[form]]
 op = "mov"
@@ -509,6 +619,34 @@ op = "leave"
 opcode = 0xC9
 enc = "none"
 size = "q"
+
+[[form]]
+op = "loopne"
+opcode = 0xE0
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "loope"
+opcode = 0xE1
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "loop"
+opcode = 0xE2
+enc = "rel"
+size = "n"
+imm = "rel8"
+
+[[form]]
+op = "jrcxz"
+opcode = 0xE3
+enc = "rel"
+size = "n"
+imm = "rel8"
 
 [[form]]
 op = "call"
@@ -618,6 +756,18 @@ op = "std"
 opcode = 0xFD
 enc = "none"
 size = "n"
+
+# FNINIT is DB E3 and nothing else: the other register bytes of digit 4 are
+# different instructions (DB E2 is FNCLEX) and the memory forms are not x87
+# initialisation at all. No other x87 form is declared.
+[[form]]
+op = "fninit"
+opcode = 0xDB
+digit = 4
+enc = "rm_unread"
+size = "n"
+register_only = true
+rm = 3
 
 [[form]]
 op = "movzx"
@@ -779,7 +929,39 @@ digits = { 0 = "inc", 1 = "dec" }
 
 [[group]]
 opcodes = [[0xC0, "b", "ib", "rm_imm"], [0xC1, "v", "ib", "rm_imm"], [0xD0, "b", "", "rm_one"], [0xD1, "v", "", "rm_one"], [0xD2, "b", "", "rm_cl"], [0xD3, "v", "", "rm_cl"]]
-digits = { 0 = "rol", 1 = "ror", 4 = "shl", 5 = "shr", 7 = "sar" }
+digits = { 0 = "rol", 1 = "ror", 2 = "rcl", 3 = "rcr", 4 = "shl", 5 = "shr", 7 = "sar" }
+
+# Double-precision shifts: the ModRM operand is shifted and filled from the
+# reg operand, by an 8-bit immediate or by CL.
+[[form]]
+op = "shld"
+map = "0f"
+opcode = 0xA4
+enc = "rm_reg_imm"
+size = "v"
+imm = "ub"
+
+[[form]]
+op = "shld"
+map = "0f"
+opcode = 0xA5
+enc = "rm_reg_cl"
+size = "v"
+
+[[form]]
+op = "shrd"
+map = "0f"
+opcode = 0xAC
+enc = "rm_reg_imm"
+size = "v"
+imm = "ub"
+
+[[form]]
+op = "shrd"
+map = "0f"
+opcode = 0xAD
+enc = "rm_reg_cl"
+size = "v"
 
 # SSE and SSE2 moves and packed integer forms.
 
@@ -901,6 +1083,14 @@ opcode = 0xE7
 enc = "rm_xmm"
 size = "x"
 src = "x"
+memory_only = true
+
+[[form]]
+op = "movnti"
+map = "0f"
+opcode = 0xC3
+enc = "rm_reg"
+size = "y"
 memory_only = true
 
 [[form]]
@@ -1919,6 +2109,36 @@ enc = "rm"
 size = "n"
 src = "d"
 memory_only = true
+
+# The fences are the register forms of digits 5 to 7; the r/m field is ignored.
+# The memory forms of those digits (the XSAVE family and CLFLUSH) are not
+# declared.
+[[form]]
+op = "lfence"
+map = "0f"
+opcode = 0xAE
+digit = 5
+enc = "rm_unread"
+size = "n"
+register_only = true
+
+[[form]]
+op = "mfence"
+map = "0f"
+opcode = 0xAE
+digit = 6
+enc = "rm_unread"
+size = "n"
+register_only = true
+
+[[form]]
+op = "sfence"
+map = "0f"
+opcode = 0xAE
+digit = 7
+enc = "rm_unread"
+size = "n"
+register_only = true
 
 # SSE and SSE2 floating-point forms. RCP and RSQRT approximations are not
 # architecturally exact and are left out.

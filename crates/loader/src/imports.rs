@@ -196,7 +196,24 @@ fn trampoline_address(index: usize) -> u64 {
 }
 
 const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+/// Return address placed under a process entry point. Reaching it ends the
+/// process with EAX as its exit status.
+pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
+/// The 4 KiB page that holds [`ENTRY_RETURN`] and the callback return
+/// address. The engine intercepts those two addresses before it executes
+/// anything there, so startup reserves the page: guest code mapped over it
+/// would never run.
+pub const RETURN_SENTINEL_PAGE: u64 = ENTRY_RETURN & !0xFFF;
+const _: () = assert!(CALLBACK_RETURN & !0xFFF == RETURN_SENTINEL_PAGE);
+/// Nested guest callbacks allowed in one guest thread.
 const MAX_CALLBACK_DEPTH: usize = 32;
+
+fn callback_depth(memory: &GuestMemory, teb: u64) -> usize {
+    memory
+        .callback_frames
+        .range((teb, 0)..=(teb, u64::MAX))
+        .count()
+}
 
 pub(crate) struct GuestCallback {
     pub(crate) entry: u64,
@@ -264,6 +281,8 @@ pub(crate) struct CallbackFrame {
 
 /// Registry for resolving and binding import symbols to guest trampoline VAs.
 pub struct ImportRegistry {
+    /// Set by the standard services so a call can end the caller's turn.
+    pub(crate) hooks: Option<Arc<crate::services::threads::SchedulerHooks>>,
     // (lower-case module, name) -> service index. Symbol names keep their case.
     services: HashMap<(String, ImportName), usize>,
     handlers: Vec<ServiceDescriptor>,
@@ -282,6 +301,7 @@ impl Default for ImportRegistry {
 impl ImportRegistry {
     pub fn new() -> Self {
         Self {
+            hooks: None,
             services: HashMap::new(),
             handlers: Vec::new(),
             callback_dispatchers: HashMap::new(),
@@ -609,7 +629,7 @@ impl ImportRegistry {
         args: [u64; 4],
     ) -> Result<(), ExitReason> {
         let key = (cpu.gs_base, slot + 8);
-        if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+        if callback_depth(memory, cpu.gs_base) >= MAX_CALLBACK_DEPTH
             || memory.callback_frames.contains_key(&key)
         {
             return Err(ExitReason::ServiceAbiViolation);
@@ -635,6 +655,7 @@ impl ImportRegistry {
     /// Check if target RIP matches a synthetic service trampoline.
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
         rip == CALLBACK_RETURN
+            || rip == ENTRY_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -646,6 +667,22 @@ impl ImportRegistry {
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
     ) -> Result<(), ExitReason> {
+        if rip == ENTRY_RETURN {
+            // The entry point returned. Its result is the exit status, and it
+            // goes through ExitProcess when that is registered so both ways of
+            // ending do the same cleanup.
+            let status = cpu.get(Register::Rax) as u32;
+            let exit = ExitReason::ProcessExit(status);
+            let Some(index) = self.index("kernel32.dll", &ImportName::Name("ExitProcess".into()))
+            else {
+                return Err(exit);
+            };
+            let mut args = Win64Args::new(cpu);
+            args.rcx = u64::from(status);
+            return Err((self.handlers[index].handler)(&args, cpu, memory)
+                .err()
+                .unwrap_or(exit));
+        }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));
             let frame = memory
@@ -725,7 +762,7 @@ impl ImportRegistry {
         }
         if let Some(dispatcher) = self.callback_dispatchers.get(&service_idx) {
             let key = (cpu.gs_base, after);
-            if memory.callback_frames.len() >= MAX_CALLBACK_DEPTH
+            if callback_depth(memory, cpu.gs_base) >= MAX_CALLBACK_DEPTH
                 || memory.callback_frames.contains_key(&key)
             {
                 return Err(ExitReason::ServiceAbiViolation);
@@ -766,6 +803,9 @@ impl ImportRegistry {
         cpu.set(Register::Rax, value);
         cpu.set(Register::Rsp, after);
         cpu.rip = ret_addr;
+        if self.hooks.as_ref().is_some_and(|h| h.switch_requested()) {
+            return Err(ExitReason::GuestYield);
+        }
         Ok(())
     }
 }

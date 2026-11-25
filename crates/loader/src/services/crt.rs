@@ -45,11 +45,38 @@ fn string_length(
     limit: u64,
     unit: StringUnit,
 ) -> Result<u64, ExitReason> {
+    const BLOCK: u64 = 256;
     let budget = SCAN_BUDGET / unit.width();
-    for offset in 0..limit.min(budget) {
-        if unit.read(memory, address, offset)? == 0 {
-            return Ok(offset);
+    let scan = limit.min(budget);
+    let mut buffer = [0u8; 2 * BLOCK as usize];
+    let mut offset = 0;
+    while offset < scan {
+        let count = BLOCK.min(scan - offset);
+        let bytes = &mut buffer[..(count * unit.width()) as usize];
+        // A block that crosses into unmapped or unreadable memory is scanned
+        // one unit at a time, so a terminator before the boundary still ends
+        // the scan and the fault reports the first inaccessible unit.
+        let block = address
+            .checked_add(offset * unit.width())
+            .filter(|_| address != 0)
+            .is_some_and(|start| memory.read_bytes(start, bytes).is_ok());
+        for index in 0..count {
+            let value = if block {
+                match unit {
+                    StringUnit::Byte => u16::from(bytes[index as usize]),
+                    StringUnit::Wide => {
+                        let at = 2 * index as usize;
+                        u16::from_le_bytes([bytes[at], bytes[at + 1]])
+                    }
+                }
+            } else {
+                unit.read(memory, address, offset + index)?
+            };
+            if value == 0 {
+                return Ok(offset + index);
+            }
         }
+        offset += count;
     }
     if limit <= budget {
         return Ok(limit);
@@ -163,12 +190,14 @@ pub(super) fn register(registry: &mut ImportRegistry) {
         registry.alias(CRT_STRING_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }
+    // The mingw-w64 C runtime imports `memcpy` through this API set.
+    registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "memcpy");
 }
 
 const ENOMEM: u32 = 12;
-const EINVAL: u32 = 22;
+pub(super) const EINVAL: u32 = 22;
 
-fn set_errno(memory: &mut GuestMemory, teb: u64, error: u32) -> Result<(), ExitReason> {
+pub(super) fn set_errno(memory: &mut GuestMemory, teb: u64, error: u32) -> Result<(), ExitReason> {
     let address = memory
         .crt_errno_address(teb)
         .map_err(ExitReason::MemoryFault)?;

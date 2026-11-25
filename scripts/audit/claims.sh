@@ -10,7 +10,7 @@ import sys
 import tomllib
 
 registry = Path("docs/claims.toml")
-claims = tomllib.loads(registry.read_text())["claim"]
+claims = tomllib.loads(registry.read_text(encoding="utf-8"))["claim"]
 classes = {}
 errors = []
 claim_id = re.compile(r"\bCLAIM-[A-Z0-9]+(?:-[A-Z0-9]+)*\b")
@@ -37,10 +37,10 @@ files = [Path("README.md"), Path("AGENTS.md"), *Path("docs").rglob("*"),
 for source in files:
     if source == registry or source.suffix not in {".md", ".toml", ".rs"}:
         continue
-    for reference in set(claim_id.findall(source.read_text())) - classes.keys():
+    for reference in set(claim_id.findall(source.read_text(encoding="utf-8"))) - classes.keys():
         errors.append(f"{source}: unregistered {reference}")
 
-status = tomllib.loads(Path("docs/status.toml").read_text())
+status = tomllib.loads(Path("docs/status.toml").read_text(encoding="utf-8"))
 for feature in status["feature"]:
     verification = feature.get("hardware_verification", "")
     if verification.casefold() != "verified":

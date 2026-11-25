@@ -18,7 +18,7 @@ def table(headers, rows):
 
 
 def replace_block(path, name, body, check):
-    original = path.read_text()
+    original = path.read_text(encoding="utf-8")
     start = f"<!-- status:{name}:start -->\n"
     stop = f"\n<!-- status:{name}:end -->"
     head, _, tail = original.partition(start)
@@ -30,7 +30,7 @@ def replace_block(path, name, body, check):
     if check:
         print(f"{path}: status table differs from docs/status.toml", file=sys.stderr)
         return False
-    path.write_text(updated)
+    path.write_text(updated, encoding="utf-8", newline="\n")
     return True
 
 
@@ -90,12 +90,12 @@ def render_progress(status):
 
 
 def check_asset(path, svg, check):
-    if path.exists() and path.read_text() == svg:
+    if path.exists() and path.read_text(encoding="utf-8") == svg:
         return True
     if check:
         print(f"{path}: progress graphic differs from docs/status.toml", file=sys.stderr)
         return False
-    path.write_text(svg)
+    path.write_text(svg, encoding="utf-8", newline="\n")
     return True
 
 
@@ -105,8 +105,8 @@ def main():
     check = parser.parse_args().check
     root = Path(__file__).resolve().parents[2]
     docs = root / "docs"
-    status = tomllib.loads((docs / "status.toml").read_text())
-    claims = tomllib.loads((docs / "claims.toml").read_text())
+    status = tomllib.loads((docs / "status.toml").read_text(encoding="utf-8"))
+    claims = tomllib.loads((docs / "claims.toml").read_text(encoding="utf-8"))
     classes = {claim["id"]: claim["class"] for claim in claims["claim"]}
 
     features = table(

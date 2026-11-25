@@ -35,12 +35,25 @@ jobs:
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
           rustc -vV
+      - name: Install the Gate A2 C toolchain
+        # crates/loader/tests/gate_a2.rs builds a hosted C program from source
+        # with mingw-w64 and fails, never skips, when the compiler is missing.
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+        run: |
+          brew install mingw-w64
+          compiler="$(brew --prefix mingw-w64)/bin/x86_64-w64-mingw32-gcc"
+          "$compiler" --version | head -1
+          file -bL "$compiler" | grep arm64
       - name: Check generated status and PE fixtures
         run: |
           python3 crates/isa/generate_rdna2_meta.py --check
           python3 crates/isa/generate_semantics.py --check
           python3 scripts/audit/semantic_coverage.py --check
           python3 scripts/audit/status.py --check
+          # The generated status check must not depend on the host locale encoding.
+          LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 python3 scripts/audit/status.py --check
           for fixture in x2 x3 x4; do
             python3 "experiments/x1/fixtures/$fixture.py" --check || exit 1
           done
@@ -50,6 +63,8 @@ jobs:
           sh -n scripts/agent-queue.sh scripts/agent-sync.sh
       - name: Test pull request template check
         run: PYTHONPATH=scripts python3 -m unittest discover -s tests/pr_template
+      - name: Test native audit JSON decoding
+        run: python3 -m unittest discover -s tests/audit
       - name: Test semantic registry generator and coverage report
         run: |
           python3 -m unittest discover -s tests/semantics_generator
@@ -65,7 +80,7 @@ jobs:
           cargo test --locked --workspace
           cargo test --locked --manifest-path experiments/x1/Cargo.toml
           scripts/audit/dependencies.sh
-          scripts/audit/claims.sh
+          LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 scripts/audit/claims.sh
       - name: Inspect native CLI
         run: |
           cargo build --locked -p xenora
@@ -73,3 +88,33 @@ jobs:
           file "$binary"
           test "$(lipo -archs "$binary")" = arm64
           otool -L "$binary"
+
+  native-app:
+    name: Native app build and smoke
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 3
+      RUSTUP_TOOLCHAIN: 1.100.0-aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify runner architecture
+        run: |
+          uname -m
+          test "$(uname -m)" = arm64
+          test "$(sysctl -n sysctl.proc_translated)" = 0
+      - name: Install native Rust
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          rustc -vV
+      - name: Show Swift and Xcode
+        run: |
+          xcodebuild -version
+          swift --version
+      # Builds the locked C ABI library and the Swift app together, checks the
+      # executable is arm64-only and links only system libraries, and runs
+      # `--smoke`. This is an app build and smoke result, not GPU verification.
+      - name: Build Xenora.app and run its smoke check
+        run: scripts/build-app.sh

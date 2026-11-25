@@ -96,10 +96,11 @@ fn crt_handlers_validate_memory_boundaries() {
             0x1008
         )))
     );
+    // The destination 0x1005..0x1009 is mapped up to 0x1008.
     assert_eq!(
         call("memmove", 0x1005, 0x1000, 4, &mut memory),
         Err(ExitReason::MemoryFault(MemoryError::UnmappedAddress(
-            0x1005
+            0x1008
         )))
     );
     let mut bytes = [0; 8];

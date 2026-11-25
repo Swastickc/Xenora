@@ -10,6 +10,7 @@
 mod bc;
 mod bc6h;
 mod bc7;
+mod footprint;
 pub mod sampler;
 mod upload;
 pub use bc::{
@@ -19,6 +20,9 @@ pub use bc6h::{
     BC6H_SUPPORTED_MODES, Bc6hError, bc6h_mode, decode_bc6h_sfloat, decode_bc6h_ufloat,
 };
 pub use bc7::{BC7_SUPPORTED_MODES, bc7_mode, decode_bc7};
+pub use footprint::{
+    BcCopyAlignment, BcFootprint, BcFormat, BcTextureDesc, BcTextureLayout, PackedBcUpload,
+};
 pub use sampler::{AddressMode, FilterMode, SamplerDesc, SamplerError, TextureMetadata};
 pub use upload::{
     Bc1Subresource, Bc1Upload, Bc1UploadDesc, BcAlphaFormat, BcAlphaUpload, BcAlphaUploadDesc,
@@ -27,6 +31,8 @@ pub use upload::{
 
 const BLOCK_BYTES: usize = 8;
 const TILE_BLOCKS: usize = 2;
+const TILE_ROW_BYTES: usize = TILE_BLOCKS * BLOCK_BYTES;
+const TILE_BYTES: usize = TILE_BLOCKS * TILE_ROW_BYTES;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TextureError {
@@ -91,19 +97,30 @@ impl<'a> TiledBc1<'a> {
     /// Copies one subresource as tightly packed row-major BC1 block rows.
     /// Padded tile slots are excluded, including at partial texel blocks.
     pub fn linearize(&self, layer: usize, mip: u32) -> Result<Vec<u8>, TextureError> {
-        if layer >= self.layers {
+        if layer >= self.layers || mip >= self.mips {
             return Err(TextureError::OutOfBounds);
         }
-        self.mip_extent(mip)?;
         let (width, height) = mip_blocks(self.width, self.height, mip);
+        let base = self.mip_base(layer, mip)?;
+        let tile_row_stride = width.div_ceil(TILE_BLOCKS) * TILE_BYTES;
+        let full_tiles = width / TILE_BLOCKS;
+        let edge_bytes = (width % TILE_BLOCKS) * BLOCK_BYTES;
         let mut blocks = Vec::new();
         // Construction checked the larger, padded byte count.
         blocks
             .try_reserve_exact(width * height * BLOCK_BYTES)
             .map_err(|_| TextureError::AllocationFailed)?;
+        // Construction requires the exact padded length, so each selected tile row is in bounds.
         for y in 0..height {
-            for x in 0..width {
-                blocks.extend_from_slice(&self.block(layer, mip, x, y)?);
+            let row_start =
+                base + (y / TILE_BLOCKS) * tile_row_stride + (y % TILE_BLOCKS) * TILE_ROW_BYTES;
+            for tile in 0..full_tiles {
+                let start = row_start + tile * TILE_BYTES;
+                blocks.extend_from_slice(&self.bytes[start..start + TILE_ROW_BYTES]);
+            }
+            if edge_bytes != 0 {
+                let start = row_start + full_tiles * TILE_BYTES;
+                blocks.extend_from_slice(&self.bytes[start..start + edge_bytes]);
             }
         }
         Ok(blocks)
@@ -124,18 +141,23 @@ impl<'a> TiledBc1<'a> {
         if x >= width || y >= height {
             return Err(TextureError::OutOfBounds);
         }
-        let mut base = layer * self.layer_bytes;
-        for prior in 0..mip {
-            base += mip_bytes(self.width, self.height, prior)?;
-        }
+        let base = self.mip_base(layer, mip)?;
         // Construction checked the full padded size for every level and layer.
         let tile = (y / TILE_BLOCKS) * width.div_ceil(TILE_BLOCKS) + x / TILE_BLOCKS;
         let within_tile = (y % TILE_BLOCKS) * TILE_BLOCKS + x % TILE_BLOCKS;
-        let offset = base + (tile * TILE_BLOCKS.pow(2) + within_tile) * BLOCK_BYTES;
+        let offset = base + tile * TILE_BYTES + within_tile * BLOCK_BYTES;
         self.bytes
             .get(offset..offset + BLOCK_BYTES)
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or(TextureError::InvalidByteLength)
+    }
+
+    fn mip_base(&self, layer: usize, mip: u32) -> Result<usize, TextureError> {
+        let mut base = layer * self.layer_bytes;
+        for prior in 0..mip {
+            base += mip_bytes(self.width, self.height, prior)?;
+        }
+        Ok(base)
     }
 }
 
@@ -151,7 +173,7 @@ fn mip_bytes(width: usize, height: usize, mip: u32) -> Result<usize, TextureErro
     width
         .div_ceil(TILE_BLOCKS)
         .checked_mul(height.div_ceil(TILE_BLOCKS))
-        .and_then(|tiles| tiles.checked_mul(TILE_BLOCKS.pow(2) * BLOCK_BYTES))
+        .and_then(|tiles| tiles.checked_mul(TILE_BYTES))
         .ok_or(TextureError::SizeOverflow)
 }
 
@@ -216,6 +238,7 @@ mod tests {
         assert_eq!(tex.linearize(1, 0).unwrap(), logical_blocks.as_flattened());
         assert_eq!(tex.linearize(1, 1).unwrap(), [20; 8]);
         assert_eq!(tex.linearize(2, 0), Err(TextureError::OutOfBounds));
+        assert_eq!(tex.linearize(0, 2), Err(TextureError::OutOfBounds));
     }
 
     #[test]
@@ -240,6 +263,24 @@ mod tests {
         let texture = TiledBc1::new(&bytes, 9, 9, 1, 1).unwrap();
         assert_eq!(texture.block(0, 0, 0, 2), Ok([8; 8]));
         assert_eq!(texture.block(0, 0, 2, 2), Ok([12; 8]));
+    }
+
+    #[test]
+    fn linearizes_odd_tile_edges_in_each_layer() {
+        // A 21×21 texture uses 9, 4 and 1 tiles across the three mips.
+        // Mip 1 is 10×10 texels, so only nine of its sixteen slots are logical.
+        let block = |slot: u8| [slot, 1, 2, 3, 4, 5, 6, !slot];
+        let bytes: Vec<_> = (0..112).flat_map(block).collect();
+        let texture = TiledBc1::new(&bytes, 21, 21, 3, 2).unwrap();
+        for (layer, first_slot) in [(0, 36), (1, 92)] {
+            let expected: Vec<_> = [0, 1, 4, 2, 3, 6, 8, 9, 12]
+                .into_iter()
+                .flat_map(|slot| block(first_slot + slot))
+                .collect();
+            assert_eq!(texture.linearize(layer, 1).unwrap(), expected);
+            let last_mip: Vec<_> = (16..20).flat_map(|slot| block(first_slot + slot)).collect();
+            assert_eq!(texture.linearize(layer, 2).unwrap(), last_mip);
+        }
     }
 
     #[test]

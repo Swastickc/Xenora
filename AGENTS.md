@@ -91,7 +91,7 @@ A coding agent claims in the name of the person it works for and follows the sam
 - Run source mutation on decoder/shader/ref: `scripts/mutation.sh` (R2 owns triage)
 - Check generated status tables: `python3 scripts/audit/status.py --check`.
 - Check claims and dependency direction: `scripts/audit/claims.sh` and `scripts/audit/dependencies.sh`
-- Fuzz one CPU-only parser at a time: `scripts/fuzz.sh <instruction_stream|fixture|reference>` (600 seconds by default).
+- Fuzz one target at a time: `scripts/fuzz.sh <instruction_stream|fixture|reference|runtime_services>` (600 seconds by default). `runtime_services` drives the standard guest service registry.
 
 Keep generated and gate logs under ignored `artifacts/`. Use at most four Cargo build jobs across two simultaneous CPU-heavy jobs, with one GPU job and one fuzz or mutation campaign at a time.
 

@@ -54,5 +54,17 @@ codesign --force --sign - "$bundle"
 
 binary="$bundle/Contents/MacOS/Xenora"
 [ "$(lipo -archs "$binary")" = arm64 ] || fail "executable is not arm64-only: $(lipo -archs "$binary")"
+file "$binary"
+otool -L "$binary"
+# Only system libraries may be linked: anything else would be a host dependency
+# shipped or expected outside macOS, which this bundle does not carry.
+for dependency in $(otool -L "$binary" | tail -n +2 | awk '{print $1}'); do
+    case "$dependency" in
+        /System/Library/*|/usr/lib/*) ;;
+        *) fail "executable links a non-system library: $dependency" ;;
+    esac
+done
 "$binary" --smoke
+"$binary" --smoke-inspection-order
+"$binary" --smoke-import-result
 echo "build-app: built $bundle"

@@ -54,11 +54,18 @@ def cases():
         for bits in (8, 16, 32, 64):
             out += [f"{op} {reg(1, bits)}", f"{op} {reg(9, bits)}", f"{op} {mem(bits)}"]
         out.append(f"{op} ch")
-    for op in "rol ror shl shr sar".split():
+    for op in "rol ror rcl rcr shl shr sar".split():
         for bits in (8, 16, 32, 64):
             for count in ("1", "3", "7", "cl"):
                 out += [f"{op} {reg(3, bits)}, {count}", f"{op} {mem(bits)}, {count}"]
             out += [f"{op} {reg(13, bits)}, {bits - 1}", f"{op} {reg(13, bits)}, 0"]
+    for op in ("shld", "shrd"):
+        for bits in (16, 32, 64):
+            for count in ("1", "3", "7", "cl"):
+                out += [f"{op} {reg(3, bits)}, {reg(9, bits)}, {count}",
+                        f"{op} {mem(bits)}, {reg(2, bits)}, {count}"]
+            out += [f"{op} {reg(13, bits)}, {reg(0, bits)}, {bits - 1}", f"{op} {reg(13, bits)}, {reg(1, bits)}, 0",
+                    f"{op} {reg(3, bits)}, {reg(3, bits)}, 5", f"{op} {reg(12, bits)}, {reg(10, bits)}, {bits}"]
     for bits in (16, 32, 64):
         out += [f"imul {reg(3, bits)}, {reg(9, bits)}", f"imul {reg(3, bits)}, {mem(bits)}",
                 f"imul {reg(8, bits)}, {reg(1, bits)}, -7", f"imul {reg(8, bits)}, {reg(1, bits)}, 0x1234",
@@ -84,6 +91,9 @@ def cases():
                 f"mov {mem(bits)}, {reg(2, bits)}", f"mov {reg(14, bits)}, 0x5a",
                 f"mov {mem(bits)}, 0x5a", f"xchg {reg(3, bits)}, {reg(9, bits)}",
                 f"xchg {mem(bits)}, {reg(2, bits)}"]
+        # A0-A3: the accumulator and an absolute address, the memory operand's.
+        out += [f"movabs {reg(0, bits)}, {PTR[bits]} ptr [0x2020]",
+                f"movabs {PTR[bits]} ptr [0x2020], {reg(0, bits)}"]
     for op in ("xadd", "cmpxchg"):
         for bits in (8, 16, 32, 64):
             # Destination RAX always matches the accumulator; a register with
@@ -95,9 +105,16 @@ def cases():
         out += [f"{op} ah, bl", f"{op} cl, dh", f"{op} {mem(8)}, ch"]
     out += ["mov ah, bl", "mov dl, ch", "mov bh, 0x21", "xchg ah, bl", "mov sil, dil",
             "movabs r15, 0x8877665544332211", "mov rcx, -2", "bswap ebx", "bswap r9",
-            "cbw", "cwde", "cdqe", "cwd", "cdq", "cqo", "clc", "stc", "cmc", "nop", "cpuid",
-            "nop dword ptr [rax + 8]", "pause", "push r9", "push rbx", "push -5", "push 0x12345678",
+            "cbw", "cwde", "cdqe", "cwd", "cdq", "cqo", "clc", "stc", "cmc", "lahf", "sahf",
+            "nop", "cpuid", "nop dword ptr [rax + 8]", "pause", "lfence", "mfence", "sfence", "fninit",
+            f"movnti {mem(32)}, ebx", f"movnti {mem(64)}, rbx",
+            f"movnti {mem(32)}, r9d", f"movnti {mem(64)}, r14", "push r9", "push rbx", "push -5", "push 0x12345678",
             f"push {mem(64)}", "pop rbx", "pop r12", f"pop {mem(64)}", "leave"]
+    # The accumulator short form of XCHG: 91..97, and 90 with REX.B.
+    for index in range(1, 16):
+        bits = (16, 32, 64)[index % 3]
+        out.append(f"xchg {reg(0, bits)}, {reg(index, bits)}")
+    out += ["xchg r8w, ax", "xchg r8, rax", "xchg r8d, eax", "xchg ecx, eax", "xchg r15w, ax"]
     return list(dict.fromkeys(out))
 
 

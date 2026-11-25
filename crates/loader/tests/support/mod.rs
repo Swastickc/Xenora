@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+pub mod robustness;
+
 use std::sync::Arc;
 use xenora_loader::cpu::{CpuState, ExitReason, Register};
 use xenora_loader::dbt::DbtEngine;
@@ -25,18 +27,25 @@ pub const STACK: u64 = 0x8_0000;
 pub const STACK_TOP: u64 = STACK + 0x800;
 pub const THREAD_A: u64 = 0x7_0000;
 pub const THREAD_B: u64 = 0x7_2000;
-/// Guest routines start at this RVA in the text section, 32 bytes apart.
+/// Guest routines start at this RVA in the text section, 64 bytes apart.
 pub const ROUTINES_RVA: u32 = 0x1800;
+pub const ROUTINE_SIZE: usize = 64;
 pub const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
 
 /// Guest address of routine `index`.
 pub fn routine(index: usize) -> u64 {
-    BASE + u64::from(ROUTINES_RVA) + 32 * index as u64
+    BASE + u64::from(ROUTINES_RVA) + (ROUTINE_SIZE * index) as u64
+}
+
+/// Guest address of the import address table slot for `imports[index]`, as
+/// laid out by the image builder.
+pub fn import_slot(imports: &[(&str, &str)], index: usize) -> u64 {
+    BASE + u64::from(build_image(imports, &[]).1[index])
 }
 
 /// The code for import `n`, at RVA 0x1000 + 16n, is `call [its slot]; hlt`.
 /// Each import has its own descriptor.
-fn build(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> Vec<u8> {
+fn build_image(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> (Vec<u8>, Vec<u32>) {
     let mut pe = vec![0u8; IDATA_RAW + IDATA_LEN];
     fn put(pe: &mut [u8], at: usize, bytes: &[u8]) {
         pe[at..at + bytes.len()].copy_from_slice(bytes);
@@ -82,6 +91,7 @@ fn build(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> Vec<u8> {
         next = (next + len as u32 + 7) & !7;
         rva
     };
+    let mut slots = Vec::with_capacity(imports.len());
     for (index, (module, symbol)) in imports.iter().enumerate() {
         let module_rva = take(module.len() + 1);
         put(&mut pe, file(module_rva), module.as_bytes());
@@ -94,6 +104,7 @@ fn build(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> Vec<u8> {
         put(&mut pe, descriptor, &lookup.to_le_bytes());
         put(&mut pe, descriptor + 12, &module_rva.to_le_bytes());
         put(&mut pe, descriptor + 16, &slot.to_le_bytes());
+        slots.push(slot);
 
         let code_rva = CODE_RVA + 16 * index as u32;
         let displacement = slot.wrapping_sub(code_rva + 6);
@@ -103,11 +114,11 @@ fn build(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> Vec<u8> {
         put(&mut pe, at + 6, &[0xF4]); // hlt
     }
     for (index, code) in routines.iter().enumerate() {
-        assert!(code.len() <= 32);
-        let at = 0x200 + (ROUTINES_RVA - CODE_RVA) as usize + 32 * index;
+        assert!(code.len() <= ROUTINE_SIZE);
+        let at = 0x200 + (ROUTINES_RVA - CODE_RVA) as usize + ROUTINE_SIZE * index;
         put(&mut pe, at, code);
     }
-    pe
+    (pe, slots)
 }
 
 pub struct Guest {
@@ -129,7 +140,7 @@ impl Guest {
         routines: &[Vec<u8>],
         state: ServicesState,
     ) -> Self {
-        let bytes = build(imports, routines);
+        let (bytes, _) = build_image(imports, routines);
         let pe = ParsedPe::parse(&bytes).unwrap();
         let mut memory = pe.load_into_memory(&bytes).unwrap().memory;
         memory
@@ -195,6 +206,43 @@ impl Guest {
             }
         }
         (cpu.get(Register::Rax), result.exit_reason)
+    }
+
+    /// Call an import as the main thread of a scheduled run: the engine runs
+    /// in slices of `quantum` instructions under the guest thread scheduler.
+    pub fn scheduled(
+        &mut self,
+        symbol: &str,
+        args: &[u64],
+        quantum: usize,
+        budget: usize,
+    ) -> xenora_loader::scheduler::ScheduleReport {
+        let index = self
+            .imports
+            .iter()
+            .position(|(_, name)| *name == symbol)
+            .unwrap_or_else(|| panic!("{symbol} is not imported"));
+        let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index as u64, STACK_TOP);
+        cpu.gs_base = self.teb;
+        for (register, value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(register, *value);
+        }
+        xenora_loader::scheduler::Scheduler::new(Arc::clone(&self.state), quantum)
+            .run(&mut self.engine, &mut self.memory, &cpu, budget)
+            .expect("the scheduler attaches")
+    }
+
+    /// Run guest code from `entry` on the calling thread's TEB until it stops.
+    pub fn execute(&mut self, entry: u64, max_instructions: usize) -> (CpuState, ExitReason) {
+        let mut cpu = CpuState::new(entry, STACK_TOP);
+        cpu.gs_base = self.teb;
+        let result = self
+            .engine
+            .run(&mut cpu, &mut self.memory, max_instructions);
+        (cpu, result.exit_reason)
     }
 
     pub fn call(&mut self, symbol: &str, args: &[u64]) -> u64 {

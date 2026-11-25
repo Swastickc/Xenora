@@ -46,3 +46,9 @@ name = "reference"
 path = "fuzz_targets/reference.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "runtime_services"
+path = "fuzz_targets/runtime_services.rs"
+test = false
+doc = false

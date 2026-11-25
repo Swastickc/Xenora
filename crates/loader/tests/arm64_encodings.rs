@@ -164,3 +164,45 @@ fn vector_operations_match_llvm() {
         assert_eq!(assembler.instructions(), [*word], "{text}");
     }
 }
+
+#[test]
+fn carry_arithmetic_matches_llvm() {
+    // `llvm-mc -triple=aarch64-apple-macos -show-encoding`.
+    let cases: &[(&str, Emit, u32)] = &[
+        (
+            "adcs x11, x9, x10",
+            |a| a.adcs_reg_64(11, 9, 10),
+            0xba0a012b,
+        ),
+        (
+            "adcs w11, w9, w10",
+            |a| a.adcs_reg_32(11, 9, 10),
+            0x3a0a012b,
+        ),
+        (
+            "adcs x0, x30, x17",
+            |a| a.adcs_reg_64(0, 30, 17),
+            0xba1103c0,
+        ),
+        (
+            "sbcs x11, x9, x10",
+            |a| a.sbcs_reg_64(11, 9, 10),
+            0xfa0a012b,
+        ),
+        (
+            "sbcs w11, w9, w10",
+            |a| a.sbcs_reg_32(11, 9, 10),
+            0x7a0a012b,
+        ),
+        (
+            "sbcs w0, w30, w17",
+            |a| a.sbcs_reg_32(0, 30, 17),
+            0x7a1103c0,
+        ),
+    ];
+    for (text, emit, word) in cases {
+        let mut assembler = Arm64Assembler::new();
+        emit(&mut assembler);
+        assert_eq!(assembler.instructions(), [*word], "{text}");
+    }
+}

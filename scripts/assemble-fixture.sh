@@ -12,7 +12,7 @@ case "${1:-}" in
 esac
 
 for name in add bitwise-branch float-exact or shifts ashr \
-    x9-constant-vs x9-constant-ps x9-varying-vs x9-varying-ps x9-transform-vs scalar-alu vector-compare scalar-logic scalar-compare scalar-unary scalar-arith scalar-immediate vector-integer vector-compare-ft vector-vcc vector-unary vector-compare-64 vector-compare-16; do
+    x9-constant-vs x9-constant-ps x9-varying-vs x9-varying-ps x9-transform-vs scalar-alu vector-compare scalar-logic scalar-compare scalar-unary scalar-arith scalar-immediate vector-integer vector-compare-ft vector-vcc vop3-integer vop3-compare vector-unary vector-compare-64 vector-compare-16; do
     "$llvm_bin/llvm-mc" -triple=amdgcn-amd-amdhsa -mcpu=gfx1030 -mattr=+wavefrontsize32 \
         -filetype=obj "fixtures/rdna2/$name.s" -o "$scratch/$name.o"
     "$llvm_bin/llvm-objcopy" -O binary --only-section=.text "$scratch/$name.o" "$scratch/$name.bin"

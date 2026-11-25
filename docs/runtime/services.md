@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 20 |
-| Generated adapters | 20 |
-| Unique handler implementations | 20 |
+| Services with a declared ABI | 47 |
+| Generated adapters | 47 |
+| Unique handler implementations | 47 |
 | Implemented | 7 |
-| Partial | 13 |
-| Stub | 0 |
-| Conformance-tested through guest dispatch | 20 |
-| API-set aliases (not services) | 20 |
+| Partial | 37 |
+| Stub | 3 |
+| Conformance-tested through guest dispatch | 47 |
+| API-set aliases (not services) | 47 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -30,11 +30,38 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!SetThreadPriority` | `(thread: handle, priority: i32) -> bool32` | partial | 0 with ERROR_INVALID_HANDLE, ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER |
 | `kernel32.dll!CloseHandle` | `(object: handle) -> bool32` | partial | 0 with ERROR_INVALID_HANDLE |
 | `kernel32.dll!GetSystemTimeAsFileTime` | `(time: out<8>) -> void` | implemented | guest fault on an invalid pointer |
+| `ucrtbase.dll!__acrt_iob_func` | `(index: u32) -> ptr` | partial | stops the guest for an index above 2 or when the streams cannot be allocated |
+| `ucrtbase.dll!__stdio_common_vfprintf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled |
+| `ucrtbase.dll!fwrite` | `(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64` | partial | 0 with errno EINVAL for a null buffer or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
+| `ucrtbase.dll!fputs` | `(text: ptr, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
+| `ucrtbase.dll!fflush` | `(stream: ptr) -> i32` | partial | stops the guest for a pointer that is no stream |
+| `ucrtbase.dll!setvbuf` | `(stream: ptr, buffer: ptr, mode: i32, size: u64) -> i32` | partial | -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream |
+| `ucrtbase.dll!fopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM |
+| `ucrtbase.dll!fclose` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream |
+| `ucrtbase.dll!fgets` | `(buffer: ptr, count: i32, stream: ptr) -> ptr` | partial | null at end of file; null with errno EINVAL or EBADF; stops the guest for stdin or a pointer that is no stream |
+| `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |
 | `kernel32.dll!GetLastError` | `() -> u32` | partial | never |
 | `kernel32.dll!SetLastError` | `(code: u32) -> void` | partial | never |
+| `ucrtbase.dll!__p___argc` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |
+| `ucrtbase.dll!__p___argv` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |
+| `ucrtbase.dll!__p__environ` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |
+| `ucrtbase.dll!_configure_narrow_argv` | `(mode: i32) -> i32` | partial | EINVAL for a mode other than 0, 1 or 2; stops the guest when the table cannot be allocated |
+| `ucrtbase.dll!_initialize_narrow_environment` | `() -> i32` | partial | stops the guest when the table cannot be allocated |
 | `kernel32.dll!VirtualAlloc` | `(address: ptr, size: u64, kind: u32, protect: u32) -> ptr` | partial | 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_INVALID_ADDRESS or ERROR_NOT_ENOUGH_MEMORY |
 | `kernel32.dll!VirtualFree` | `(address: ptr, size: u64, kind: u32) -> bool32` | partial | 0 with ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS |
+| `kernel32.dll!VirtualProtect` | `(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32` | stub | always: stops the guest with the runtime-limit fault; no protection changes |
+| `kernel32.dll!VirtualQuery` | `(address: ptr, information: out<48>, length: u64) -> u64` | stub | always: stops the guest with the runtime-limit fault; nothing is written |
+| `ucrtbase.dll!__C_specific_handler` | `(record: ptr, frame: ptr, context: ptr, dispatcher: ptr) -> i32` | stub | always: stops the guest with the runtime-limit fault; no exception is dispatched |
 | `ucrtbase.dll!sqrt` | `(x: f64) -> f64` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!sqrtf` | `(x: f32) -> f32` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!fabs` | `(x: f64) -> f64` | implemented | never |
 | `ucrtbase.dll!fabsf` | `(x: f32) -> f32` | implemented | never |
+| `ucrtbase.dll!_set_app_type` | `(kind: i32) -> void` | partial | never |
+| `ucrtbase.dll!_set_new_mode` | `(mode: i32) -> i32` | partial | -1 with errno EINVAL for a mode other than 0 or 1 |
+| `ucrtbase.dll!_configthreadlocale` | `(request: i32) -> i32` | partial | -1 with errno EINVAL for a request other than 0, 1 or 2 |
+| `ucrtbase.dll!__setusermatherr` | `(handler: ptr) -> void` | partial | never |
+| `ucrtbase.dll!_set_invalid_parameter_handler` | `(handler: ptr) -> ptr` | partial | never |
+| `ucrtbase.dll!__p__fmode` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |
+| `ucrtbase.dll!__p__commode` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |
+| `ucrtbase.dll!signal` | `(signal: i32, handler: ptr) -> ptr` | partial | SIG_ERR with errno EINVAL for a signal the documentation does not list |
+| `kernel32.dll!SetUnhandledExceptionFilter` | `(filter: ptr) -> ptr` | partial | never |

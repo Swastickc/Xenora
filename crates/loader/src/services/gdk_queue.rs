@@ -41,6 +41,18 @@ struct ScheduledCallback {
 }
 
 impl QueueHandles {
+    /// Task-queue handles the guest has open.
+    pub(super) fn open_count(&self) -> usize {
+        self.queues.len()
+    }
+
+    /// Process exit: every handle is closed and nothing stays scheduled.
+    pub(super) fn close_all(&mut self) {
+        self.queues.clear();
+        self.terminated.clear();
+        self.pending.clear();
+    }
+
     fn open(
         &mut self,
         duplicate: Option<Queue>,

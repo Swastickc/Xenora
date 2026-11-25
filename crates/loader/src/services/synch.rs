@@ -3,9 +3,10 @@
 //! Critical sections, slim reader/writer locks, condition variables, one-time
 //! initialization, interlocked singly linked lists and thread-local storage.
 //!
-//! Ownership is keyed by the calling guest TEB. No guest scheduler exists yet,
-//! so an operation that would have to block another guest thread stops the
-//! guest with the runtime-limit fault instead of pretending to synchronize.
+//! Ownership is keyed by the calling guest TEB. These objects do not block
+//! through the guest scheduler yet, so an operation that would have to wait for
+//! another guest thread stops the guest with the runtime-limit fault instead of
+//! pretending to synchronize.
 
 use super::{
     ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, KERNEL32, ServicesState,
@@ -37,6 +38,9 @@ const CRITICAL_SECTION_NO_DEBUG_INFO: u32 = 0x0100_0000;
 const MAX_CRITICAL_SECTIONS: usize = 4096;
 
 const MAX_SRW_LOCKS: usize = 4096;
+const MAX_PENDING_INIT_ONCE: usize = 4096;
+/// Owner of a lock whose thread ended while holding it. Never a TEB address.
+const ENDED_THREAD: u64 = u64::MAX;
 const CONDITION_VARIABLE_LOCKMODE_SHARED: u32 = 1;
 
 const INIT_ONCE_CHECK_ONLY: u32 = 1;
@@ -161,6 +165,33 @@ pub(super) struct Synch {
 }
 
 impl Synch {
+    /// Drop the thread-local values of a guest thread that has ended, without
+    /// running FLS callbacks. Locks it held stay held: its TEB address may be
+    /// reused, and the next thread there must not own them.
+    pub(super) fn retire_thread(&mut self, teb: u64) {
+        self.tls_values.retain(|&(owner, _), _| owner != teb);
+        self.fls_values.retain(|&(owner, _), _| owner != teb);
+        for section in self.sections.values_mut() {
+            if section.owner == Some(teb) {
+                section.owner = Some(ENDED_THREAD);
+            }
+        }
+        for lock in self.srw.values_mut() {
+            if lock.exclusive == Some(teb) {
+                lock.exclusive = Some(ENDED_THREAD);
+            }
+            if let Some(count) = lock.shared.remove(&teb) {
+                let held = lock.shared.entry(ENDED_THREAD).or_default();
+                *held = held.saturating_add(count);
+            }
+        }
+        for owner in self.init_once_pending.values_mut() {
+            if *owner == teb {
+                *owner = ENDED_THREAD;
+            }
+        }
+    }
+
     fn section(&mut self, address: u64) -> Result<&mut CriticalSection, ExitReason> {
         // Using an uninitialized critical section is undefined; report it.
         self.sections.get_mut(&address).map_or_else(unsupported, Ok)
@@ -228,6 +259,7 @@ fn enter_section(
     address: u64,
     teb: u64,
 ) -> Result<bool, ExitReason> {
+    let thread_id = state.thread_id_of(teb);
     let mut synch = state.synch.lock().expect("guest synchronization state");
     let section = synch.section(address)?;
     match section.owner {
@@ -237,7 +269,7 @@ fn enter_section(
     }
     section.owner = Some(teb);
     section.recursion += 1;
-    mirror_section(memory, address, section, state.thread_id)?;
+    mirror_section(memory, address, section, thread_id)?;
     Ok(true)
 }
 
@@ -247,6 +279,7 @@ fn leave_section(
     address: u64,
     teb: u64,
 ) -> Result<(), ExitReason> {
+    let thread_id = state.thread_id_of(teb);
     let mut synch = state.synch.lock().expect("guest synchronization state");
     let section = synch.section(address)?;
     if section.owner != Some(teb) {
@@ -256,7 +289,7 @@ fn leave_section(
     if section.recursion == 0 {
         section.owner = None;
     }
-    mirror_section(memory, address, section, state.thread_id)
+    mirror_section(memory, address, section, thread_id)
 }
 
 /// Check that a pointer-sized synchronization object is readable and writable.
@@ -611,8 +644,9 @@ fn register_srw_and_conditions(registry: &mut ImportRegistry, state: &Arc<Servic
     }
 }
 
-/// A zero timeout releases and reacquires the lock, which no other guest
-/// thread can observe, then reports the timeout. Longer sleeps would block.
+/// A zero timeout releases and reacquires the lock within one service call, so
+/// no other guest thread can observe it, then reports the timeout. Longer sleeps
+/// would block.
 fn sleep_result(state: &ServicesState, teb: u64, timeout: u32) -> Result<u64, ExitReason> {
     if timeout == 0 {
         state.fail(teb, ERROR_TIMEOUT, 0)
@@ -666,6 +700,9 @@ fn register_init_once(registry: &mut ImportRegistry, state: &Arc<ServicesState>)
                     s.fail(teb, ERROR_GEN_FAILURE, 0)
                 }
                 0 if value == 0 => {
+                    if synch.init_once_pending.len() >= MAX_PENDING_INIT_ONCE {
+                        return unsupported();
+                    }
                     mem.write_u32(pending, 1).map_err(fault)?;
                     mem.write_u64(once, INIT_ONCE_PENDING).map_err(fault)?;
                     synch.init_once_pending.insert(once, teb);
@@ -727,6 +764,9 @@ fn register_init_once(registry: &mut ImportRegistry, state: &Arc<ServicesState>)
                 return unsupported();
             }
             let mut synch = s.synch.lock().expect("guest synchronization state");
+            if synch.init_once_pending.len() >= MAX_PENDING_INIT_ONCE {
+                return unsupported();
+            }
             mem.write_u64(scratch, 0).map_err(fault)?;
             mem.write_u64(once, INIT_ONCE_PENDING).map_err(fault)?;
             synch.init_once_pending.insert(once, teb);

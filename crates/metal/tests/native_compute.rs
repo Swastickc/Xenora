@@ -356,6 +356,246 @@ fn multiple_submissions() {
     assert_eq!(second, [5, 5, 1, 5]);
 }
 
+fn pipeline_was_reused(profile: &xenora_metal::RunProfile) -> bool {
+    profile.library_seconds == 0.0 && profile.pipeline_seconds == 0.0
+}
+
+#[test]
+fn compute_pipeline_cache_distinguishes_source_entry_and_context() {
+    let context = context();
+    let source = fixture("output[id] = input[id] + 1u;");
+    let second_entry =
+        fixture("output[id] = input[id] * 2u;").replace("void fixture(", "void other(");
+    let source = format!("{source}\n{second_entry}");
+    let changed = source.replace("input[id] + 1u", "input[id] - 1u");
+    let input = [0, 11, u32::MAX];
+
+    for (msl, entry, expected) in [
+        (source.as_str(), "fixture", [1, 12, 0]),
+        (source.as_str(), "other", [0, 22, u32::MAX - 1]),
+        (changed.as_str(), "fixture", [u32::MAX, 10, u32::MAX - 1]),
+    ] {
+        let cold = native(context.run_words_profiled(msl, entry, &input));
+        let warm = native(context.run_words_profiled(msl, entry, &input));
+        assert!(!pipeline_was_reused(&cold), "{entry}");
+        assert!(pipeline_was_reused(&warm), "{entry}");
+        assert_eq!(cold.output, expected, "{entry}");
+        assert_eq!(warm.output, expected, "{entry}");
+    }
+    let separate = native(NativeCompute::new());
+    let fresh = native(separate.run_words_profiled(&source, "fixture", &input));
+    assert!(!pipeline_was_reused(&fresh));
+    assert_eq!(fresh.output, [1, 12, 0]);
+
+    for _ in 0..2 {
+        for (msl, entry, operation) in [
+            (source.as_str(), "missing", "newFunctionWithName"),
+            ("not valid MSL", "fixture", "newLibraryWithSource"),
+        ] {
+            let error = context
+                .run_words_profiled(msl, entry, &input)
+                .expect_err("invalid pipeline must still fail after warming the cache");
+            assert_eq!(error.operation, operation);
+        }
+    }
+    let error = context
+        .run_words_with_group_width(&source, "fixture", &input, 0)
+        .expect_err("cached pipeline must still check dispatch width");
+    assert_eq!(error.operation, "threadgroup width");
+}
+
+#[test]
+fn compute_pipeline_cache_bounds_key_bytes_without_rejecting_maximum_source() {
+    const SOURCE_LIMIT: usize = 64 * 1024;
+    let context = context();
+    let mut source = fixture("output[id] = input[id] ^ 1u;");
+    source.push_str("\n// ");
+    source.push_str(&" ".repeat(SOURCE_LIMIT - source.len()));
+
+    for _ in 0..2 {
+        let profile = native(context.run_words_profiled(&source, "fixture", &[8]));
+        assert_eq!(profile.output, [9]);
+        assert!(!pipeline_was_reused(&profile));
+    }
+    source.push(' ');
+    let error = context
+        .run_words_profiled(&source, "fixture", &[8])
+        .expect_err("source above 64 KiB must fail before pipeline lookup");
+    assert_eq!(error.operation, "source bounds");
+}
+
+#[test]
+fn compute_buffer_pool_reuses_and_reinitializes_storage() {
+    let context = context();
+    let source = fixture("output[id] = input[id] + 1u;");
+    let first = native(context.run_words_profiled(&source, "fixture", &[10, 20]));
+    assert_eq!(first.output, [11, 21]);
+    assert_eq!(context.buffer_allocations(), 2);
+    assert_eq!(context.idle_buffer_count(), 2);
+    assert_eq!(context.idle_buffer_bytes(), 16);
+
+    let second = native(context.run_words_profiled(&source, "fixture", &[30, 40]));
+    assert_eq!(second.output, [31, 41]);
+    assert_eq!(context.buffer_allocations(), 2);
+    assert_eq!(context.idle_buffer_count(), 2);
+
+    // The third dispatch intentionally leaves output[1] untouched. Reusing the
+    // output buffer must restore the original poison rather than expose [31].
+    let partial = fixture("if (id == 0u) { output[id] = input[id] + 1u; }");
+    let third = native(context.run_words_profiled(&partial, "fixture", &[50, 60]));
+    assert_eq!(third.output, [51, 0xA5A5_A5A5]);
+    assert_eq!(context.buffer_allocations(), 2);
+    assert_eq!(context.idle_buffer_count(), 2);
+}
+
+#[test]
+fn compute_buffer_pool_never_reuses_gated_in_flight_storage() {
+    let context = context();
+    let source = fixture("output[id] = input[id] ^ 5u;");
+    let (first, gate) = native(context.submit_words_gated(&source, "fixture", &[7]));
+    assert_eq!(context.buffer_allocations(), 2);
+    assert_eq!(context.idle_buffer_count(), 0);
+
+    let second = native(context.submit_words(&source, "fixture", &[11]));
+    assert_eq!(context.buffer_allocations(), 4);
+    assert_eq!(context.idle_buffer_count(), 0);
+    gate.open();
+
+    assert_eq!(native(context.wait(first)).output, [2]);
+    assert_eq!(native(context.wait(second)).output, [14]);
+    assert_eq!(context.buffer_allocations(), 4);
+    assert_eq!(context.idle_buffer_count(), 4);
+    assert_eq!(context.idle_buffer_bytes(), 16);
+
+    let third = native(context.run_words(&source, "fixture", &[29]));
+    assert_eq!(third, [24]);
+    assert_eq!(context.buffer_allocations(), 4);
+    assert_eq!(context.idle_buffer_count(), 4);
+}
+
+#[test]
+fn compute_buffer_pool_is_bounded_by_count_and_bytes() {
+    let context = context();
+    let source = fixture("output[id] = input[id] ^ 1u;");
+    for words in 1..=20 {
+        let input = vec![0x1020_3040; words];
+        let output = native(context.run_words(&source, "fixture", &input));
+        assert_eq!(output, vec![0x1020_3041; words]);
+    }
+    assert_eq!(context.buffer_allocations(), 40);
+    assert_eq!(context.idle_buffer_count(), 32);
+    assert!(context.idle_buffer_bytes() <= 1024 * 1024);
+}
+
+#[test]
+fn failed_compute_submissions_do_not_consume_pooled_buffers() {
+    let context = context();
+    let source = fixture("output[id] = input[id] + 1u;");
+    assert_eq!(
+        native(context.run_words(&source, "fixture", &[4, 5])),
+        [5, 6]
+    );
+    let allocations = context.buffer_allocations();
+    let idle = context.idle_buffer_count();
+
+    let error = context
+        .run_words("not valid MSL", "fixture", &[4])
+        .expect_err("invalid source must fail");
+    assert_eq!(error.operation, "newLibraryWithSource");
+    let error = context
+        .run_words(&source, "fixture", &[])
+        .expect_err("empty input must fail");
+    assert_eq!(error.operation, "dispatch bounds");
+    let error = context
+        .run_words_with_group_width(&source, "fixture", &[4], 0)
+        .expect_err("zero width must fail");
+    assert_eq!(error.operation, "threadgroup width");
+
+    assert_eq!(context.buffer_allocations(), allocations);
+    assert_eq!(context.idle_buffer_count(), idle);
+}
+
+#[test]
+fn concurrent_compute_submissions_share_the_bounded_buffer_pool() {
+    let context = context();
+    let source = fixture("output[id] = input[id] ^ 5u;");
+    let start = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (1_u32..=4)
+            .map(|input| {
+                let (context, source, start) = (&context, &source, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    native(context.run_words(source, "fixture", &[input]))
+                })
+            })
+            .collect();
+        for (input, worker) in (1_u32..=4).zip(workers) {
+            assert_eq!(worker.join().unwrap(), [input ^ 5]);
+        }
+    });
+    assert!(context.buffer_allocations() <= 8);
+    assert!(context.idle_buffer_count() <= 8);
+    assert!(context.idle_buffer_bytes() <= 1024 * 1024);
+}
+
+#[test]
+fn compute_pipeline_cache_evicts_oldest_unused_key_and_keeps_pending_work_alive() {
+    let context = context();
+    // Seventeen entries in one source fit in Metal's input limit and exceed
+    // Xenora's 16-pipeline cache. Each kernel writes a distinct result.
+    let source: String = (0..=16)
+        .map(|id| {
+            fixture(&format!("output[id] = input[id] + {id}u;"))
+                .replace("void fixture(", &format!("void entry{id}("))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    native(context.max_group_width(&source, "entry0"));
+    let (pending, gate) = native(context.submit_words_gated(&source, "entry1", &[7]));
+    for id in 2..16 {
+        native(context.max_group_width(&source, &format!("entry{id}")));
+    }
+    native(context.max_group_width(&source, "entry0"));
+    native(context.max_group_width(&source, "entry16"));
+    gate.open();
+    let finished = native(context.wait(pending));
+    assert_eq!(finished.output, [8]);
+
+    let recent = native(context.run_words_profiled(&source, "entry0", &[29]));
+    assert!(pipeline_was_reused(&recent));
+    assert_eq!(recent.output, [29]);
+    let rebuilt = native(context.run_words_profiled(&source, "entry1", &[17]));
+    assert!(!pipeline_was_reused(&rebuilt));
+    assert_eq!(rebuilt.output, [18]);
+}
+
+#[test]
+fn simultaneous_compute_submissions_share_one_pipeline_build() {
+    let context = context();
+    let source = fixture("output[id] = input[id] ^ 5u;");
+    let start = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|input| {
+                let (context, source, start) = (&context, &source, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    let token = native(context.submit_words(source, "fixture", &[input]));
+                    let result = native(context.wait(token));
+                    assert_eq!(result.output, [input ^ 5]);
+                    usize::from(!pipeline_was_reused(&result))
+                })
+            })
+            .collect();
+        let builds: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+        assert_eq!(builds, 1);
+    });
+}
+
 #[test]
 fn errors_propagate() {
     let context = context();
@@ -411,5 +651,54 @@ kernel void fixture(device const uint *input [[buffer(0)]],
             let expected = u32::try_from((width << 21) | (size << 10) | (id % width)).unwrap();
             assert_eq!(*word, expected, "grid={grid} width={width} id={id}");
         }
+    }
+}
+
+#[test]
+#[ignore = "manual GPU timing run"]
+fn compute_pipeline_reuse_benchmark() {
+    const WARMUPS: usize = 10;
+    const SAMPLES: usize = 101;
+    let warm_context = context();
+    let device = warm_context.device_name();
+    let source = fixture("output[id] = input[id] * 7u + 3u;");
+    let input = mixing_input(131);
+    let expected: Vec<_> = input
+        .iter()
+        .map(|word| word.wrapping_mul(7).wrapping_add(3))
+        .collect();
+    let mut timings = [[[0.0; SAMPLES]; 4]; 2];
+
+    for round in 0..WARMUPS + SAMPLES {
+        let cold_context = context();
+        // Alternate order so neither measurement always follows the other.
+        let contexts = [&cold_context, &warm_context];
+        for index in [round % 2, (round + 1) % 2] {
+            let profile = native(contexts[index].run_words_profiled(&source, "fixture", &input));
+            assert_eq!(profile.output, expected, "context={index} round={round}");
+            if round >= WARMUPS {
+                for (samples, seconds) in timings[index].iter_mut().zip([
+                    profile.library_seconds,
+                    profile.pipeline_seconds,
+                    profile.host_seconds,
+                    profile.gpu_seconds,
+                ]) {
+                    samples[round - WARMUPS] = seconds;
+                }
+            }
+        }
+    }
+    for (label, [mut library, mut pipeline, mut host, mut gpu]) in
+        ["fresh context", "repeated context"]
+            .into_iter()
+            .zip(timings)
+    {
+        println!(
+            "device={device} {label} samples={SAMPLES} library_us[{}] pipeline_us[{}] host_us[{}] gpu_us[{}]",
+            timing_summary(&mut library),
+            timing_summary(&mut pipeline),
+            timing_summary(&mut host),
+            timing_summary(&mut gpu),
+        );
     }
 }

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Unnamed event, semaphore and mutex objects and waits that can resolve without a guest scheduler.
+//! Unnamed event, semaphore and mutex objects and waits. A wait that cannot
+//! resolve at once blocks the guest thread if a scheduler is attached, and is
+//! unsupported otherwise.
 
+use super::threads::PendingWait;
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
     ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32, ServicesState,
@@ -13,11 +16,14 @@ use std::sync::{Arc, Mutex};
 
 const SYNCH_API: &str = "api-ms-win-core-synch-l1-1-0.dll";
 const EVENT_MODIFY_STATE: u32 = 0x0002;
-const SYNCHRONIZE: u32 = 0x0010_0000;
+pub(super) const SYNCHRONIZE: u32 = 0x0010_0000;
 const EVENT_ALL_ACCESS: u32 = 0x001f_0003;
 const WAIT_OBJECT_0: u64 = 0;
+const INFINITE: u32 = u32::MAX;
+const TICKS_PER_MILLI: u64 = 10_000;
 const WAIT_TIMEOUT: u64 = 258;
 const WAIT_FAILED: u64 = u32::MAX as u64;
+const WAIT_ABANDONED_0: u64 = 0x80;
 
 const SEMAPHORE_ALL_ACCESS: u32 = 0x001f_0003;
 const SEMAPHORE_MODIFY_STATE: u32 = 2;
@@ -40,6 +46,13 @@ pub(super) enum Waitable {
     Mutex {
         owner: Option<u64>,
         recursion: u32,
+        /// The owner ended without releasing it.
+        abandoned: bool,
+    },
+    /// Signaled for good once the guest thread has ended.
+    Thread {
+        id: u32,
+        exit_code: Option<u32>,
     },
 }
 
@@ -49,21 +62,30 @@ impl Waitable {
             Self::Event { signaled, .. } => *signaled,
             Self::Semaphore { count, .. } => *count > 0,
             Self::Mutex { owner, .. } => owner.is_none_or(|owner| owner == teb),
+            Self::Thread { exit_code, .. } => exit_code.is_some(),
         }
     }
 
-    fn consume(&mut self, teb: u64) {
+    /// Take the signal; true if it was an abandoned mutex.
+    fn consume(&mut self, teb: u64) -> bool {
         match self {
             Self::Event {
                 manual_reset,
                 signaled,
             } => *signaled = *manual_reset,
             Self::Semaphore { count, .. } => *count -= 1,
-            Self::Mutex { owner, recursion } => {
+            Self::Mutex {
+                owner,
+                recursion,
+                abandoned,
+            } => {
                 *owner = Some(teb);
                 *recursion += 1;
+                return std::mem::take(abandoned);
             }
+            Self::Thread { .. } => {}
         }
+        false
     }
 
     fn at_recursion_limit(&self) -> bool {
@@ -100,6 +122,7 @@ fn insert_mutex(
     let object = Waitable::Mutex {
         owner: initial_owner.then_some(teb),
         recursion: u32::from(initial_owner),
+        abandoned: false,
     };
     insert_waitable(state, teb, object, access)
 }
@@ -150,6 +173,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return state.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
             }
             *current = signaled;
+            if signaled {
+                state.hooks.signal();
+            }
             Ok(1)
         });
     }
@@ -202,6 +228,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             return release.fail(cpu.gs_base, ERROR_NOACCESS, 0);
         }
         *count += amount;
+        release.hooks.signal();
         Ok(1)
     });
 
@@ -244,7 +271,10 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             return release.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         let mut state = state.lock().expect("guest waitable state");
-        let Waitable::Mutex { owner, recursion } = &mut *state else {
+        let Waitable::Mutex {
+            owner, recursion, ..
+        } = &mut *state
+        else {
             return release.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         };
         if *owner != Some(cpu.gs_base) {
@@ -253,6 +283,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         *recursion -= 1;
         if *recursion == 0 {
             *owner = None;
+            release.hooks.signal();
         }
         Ok(1)
     });
@@ -263,6 +294,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     ] {
         let single = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, mem| {
+            if let Some(result) = resume_wait(&single, cpu.gs_base) {
+                return result;
+            }
             let handle = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
             let timeout = args.get(1, mem).map_err(ExitReason::MemoryFault)? as u32;
             if extended && args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32 != 0 {
@@ -277,6 +311,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     ] {
         let multiple = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, mem| {
+            if let Some(result) = resume_wait(&multiple, cpu.gs_base) {
+                return result;
+            }
             let count = args.get(0, mem).map_err(ExitReason::MemoryFault)? as u32;
             let address = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
             let all = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32 != 0;
@@ -363,21 +400,75 @@ fn wait_for_objects(
             None => return state.fail(teb, ERROR_INVALID_HANDLE, WAIT_FAILED),
         }
     }
-    let mut ready = Vec::with_capacity(handles.len());
-    for (index, event) in waitables.into_iter().enumerate() {
-        if event.lock().expect("guest waitable state").is_ready(teb) {
-            ready.push((index, event));
+    if let Some(result) = try_satisfy(&waitables, all, teb) {
+        return result;
+    }
+    if timeout == 0 {
+        return Ok(WAIT_TIMEOUT);
+    }
+    if !state.hooks.is_attached() {
+        return state.fail(teb, ERROR_NOT_SUPPORTED, WAIT_FAILED);
+    }
+    // Keep the objects themselves: closing a handle or changing the guest's
+    // handle array does not change a wait already in progress.
+    let deadline = (timeout != INFINITE).then(|| {
+        state
+            .clock
+            .performance_count()
+            .saturating_add(u64::from(timeout) * TICKS_PER_MILLI)
+    });
+    let pending = PendingWait {
+        objects: waitables.into_iter().map(Arc::clone).collect(),
+        all,
+        deadline,
+    };
+    state
+        .threads
+        .lock()
+        .expect("guest thread table")
+        .waits
+        .insert(teb, pending);
+    Err(ExitReason::GuestBlocked)
+}
+
+/// Continue the wait this thread is blocked in, if any. Waiters are retried
+/// directly after a signal, so an object found signaled once the deadline has
+/// passed was signaled too late and is left alone.
+fn resume_wait(state: &ServicesState, teb: u64) -> Option<Result<u64, ExitReason>> {
+    let mut table = state.threads.lock().expect("guest thread table");
+    let pending = table.waits.get(&teb)?;
+    let expired = pending
+        .deadline
+        .is_some_and(|deadline| state.clock.performance_count() >= deadline);
+    let result = if expired {
+        Some(Ok(WAIT_TIMEOUT))
+    } else {
+        let objects: Vec<&Arc<Mutex<Waitable>>> = pending.objects.iter().collect();
+        try_satisfy(&objects, pending.all, teb)
+    };
+    if result.is_some() {
+        table.waits.remove(&teb);
+    }
+    Some(result.unwrap_or(Err(ExitReason::GuestBlocked)))
+}
+
+/// Consume the objects if the wait is satisfied now.
+fn try_satisfy(
+    waitables: &[&Arc<Mutex<Waitable>>],
+    all: bool,
+    teb: u64,
+) -> Option<Result<u64, ExitReason>> {
+    let mut ready = Vec::with_capacity(waitables.len());
+    for (index, object) in waitables.iter().enumerate() {
+        if object.lock().expect("guest waitable state").is_ready(teb) {
+            ready.push((index, object));
             if !all {
                 break;
             }
         }
     }
-    if ready.is_empty() || (all && ready.len() != handles.len()) {
-        return if timeout == 0 {
-            Ok(WAIT_TIMEOUT)
-        } else {
-            state.fail(teb, ERROR_NOT_SUPPORTED, WAIT_FAILED)
-        };
+    if ready.is_empty() || (all && ready.len() != waitables.len()) {
+        return None;
     }
     if ready.iter().any(|(_, object)| {
         object
@@ -386,11 +477,42 @@ fn wait_for_objects(
             .at_recursion_limit()
     }) {
         // Windows raises STATUS_MUTANT_LIMIT_EXCEEDED; exceptions are unsupported.
-        return Err(ExitReason::IllegalInstruction(0xFE));
+        return Some(Err(ExitReason::IllegalInstruction(0xFE)));
     }
-    let first = ready[0].0;
-    for (_, event) in ready {
-        event.lock().expect("guest waitable state").consume(teb);
+    let first = ready[0].0 as u64;
+    let mut abandoned = None;
+    for (index, object) in ready {
+        if object.lock().expect("guest waitable state").consume(teb) {
+            abandoned.get_or_insert(index as u64);
+        }
     }
-    Ok(WAIT_OBJECT_0 + first as u64)
+    Some(Ok(match abandoned {
+        Some(index) => WAIT_ABANDONED_0 + index,
+        None => WAIT_OBJECT_0 + first,
+    }))
+}
+
+impl ServicesState {
+    /// Release every mutex owned by a guest thread that has ended.
+    pub(super) fn abandon_mutexes(&self, teb: u64) {
+        let objects = self.objects.lock().expect("guest object state");
+        let table = self.threads.lock().expect("guest thread table");
+        let handles = objects.handles.values().filter_map(|object| match object {
+            GuestObject::Waitable { state, .. } => Some(state),
+            _ => None,
+        });
+        // A waiter keeps an object alive after its last handle is closed.
+        let waiting = table.waits.values().flat_map(|wait| &wait.objects);
+        for object in handles.chain(waiting) {
+            if let Waitable::Mutex {
+                owner,
+                recursion,
+                abandoned,
+            } = &mut *object.lock().expect("guest waitable state")
+                && *owner == Some(teb)
+            {
+                (*owner, *recursion, *abandoned) = (None, 0, true);
+            }
+        }
+    }
 }

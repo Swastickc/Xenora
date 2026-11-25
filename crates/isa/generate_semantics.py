@@ -44,7 +44,7 @@ TOP_KEYS = {
 # An encoding variant is another encoding of a form already in the registry (for
 # example the VOP3 `_e64` encoding of a VOP2 form): pure data that names the base
 # form, the encoding family, its opcode there and the operand rule of that
-# encoding. It inherits the base form's operation, signedness and effects.
+# encoding. The rule may redirect the base form's mask to an explicit destination.
 VARIANT_KEYS = {"of", "family", "opcode", "operands", "spec", "verify"}
 # The assembler suffix LLVM prints for a variant's encoding family.
 ASSEMBLY_SUFFIX = {"VOP3": "_e64"}
@@ -151,8 +151,9 @@ SCC = {
     "selected_src0": "SelectedSrc0",
 }
 # lane_mask: the Wave32 compare or carry result written to VCC_LO.
+# sdst_lane_mask: the Wave32 compare result written to explicit VOP3A SDST.
 # EXEC writes such as v_cmpx have no contract, so exec must stay unchanged.
-MASK = {"unchanged": "Unchanged", "lane_mask": "LaneMask"}
+MASK = {"unchanged": "Unchanged", "lane_mask": "LaneMask", "sdst_lane_mask": "SdstLaneMask"}
 WAVE = {"any": "Any", "wave32": "Wave32"}
 # The synthetic compute fixture ABI fixes the wave size for these operand-rule
 # kinds and for the VCC-reading VOP2 rule. Other forms declare "any".
@@ -275,7 +276,12 @@ UNSUPPORTED_COMBOS = {
 # which SOP2 groups under src_vcc and src_special).
 # VOP3 rules also name source classes and encoding fields they refuse.
 VOP3_COMBOS = {"src_sgpr", "src_inline", "src_literal", "modifiers", "src2"}
-ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null"} | VOP3_COMBOS
+ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi"} | VOP3_COMBOS
+VOP3_VGPR2_UNSUPPORTED = {
+    "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+    "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
+}
+
 VECTOR_UNARY_PRIMITIVES = {
     ("not", "bitwise"): "Not",
     ("brev", "bitwise"): "ReverseBits",
@@ -495,15 +501,33 @@ OPERAND_RULES = {
         },
         # Two VGPR sources only, with ABS, OP_SEL, CLAMP, OMOD and NEG clear and
         # SRC2 the assembler's unused inline zero; the decoder rejects the rest.
-        "unsupported": {
-            "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
-            "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
-        },
+        "unsupported": VOP3_VGPR2_UNSUPPORTED,
         "kind": "vector_vop3",
         # Only encoding variants of forms whose rule has this kind may use it.
         "variant_of": "vector",
         # The generated enum of this rule's variants; base() maps to "enum".
         "variant_enum": "VectorAluVop3Op",
+    },
+    "vop3_cmp_vgpr2": {
+        "rust": "Vop3CmpVgpr2",
+        "enum": "VectorCompareOp",
+        "shape": {
+            "family": "VOP3",
+            "dst": {"field": "VDST", "class": "sgpr", "min": 0, "max": 106},
+            "src": [
+                {"field": "SRC0", "class": "vgpr"},
+                {"field": "SRC1", "class": "vgpr"},
+            ],
+            "max_literals": 0,
+            "variant_only": True,
+        },
+        "unsupported": VOP3_VGPR2_UNSUPPORTED | {
+            "dst_vcc_hi", "dst_exec", "dst_ttmp", "dst_m0", "dst_null",
+        },
+        "kind": "vector_compare_vop3",
+        "variant_of": "vector_compare",
+        "variant_enum": "VectorCompareVop3Op",
+        "vcc_transition": ("lane_mask", "sdst_lane_mask"),
     },
     "vop2_vgpr": {
         "rust": "Vop2Vgpr",
@@ -744,18 +768,18 @@ def _check_xml(form, rule, snapshot, errors):
         ):
             mask_inputs += 1
         elif field:
-            operands[field] = (data_format, size, is_input, is_output)
+            operands[field] = (data_format, kind, size, is_input, is_output)
         elif kind == "OPR_VCC":
-            vcc_operands.append((is_input, is_output))
+            vcc_operands.append((data_format, size, is_input, is_output))
         else:
             implicit.add(kind)
     if form["carry_in"] == "vcc":
-        if vcc_operands.count((True, False)) != 1:
+        if vcc_operands.count(("FMT_NUM_M64", 64, True, False)) != 1:
             errors.append(f"{label}: carry_in vcc requires one implicit XML VCC input")
-        if (True, False) in vcc_operands:
-            vcc_operands.remove((True, False))
+        if ("FMT_NUM_M64", 64, True, False) in vcc_operands:
+            vcc_operands.remove(("FMT_NUM_M64", 64, True, False))
     if form["vcc"] == "lane_mask":
-        if vcc_operands != [(False, True)]:
+        if vcc_operands != [("FMT_NUM_M64", 64, False, True)]:
             errors.append(f"{label}: vcc lane_mask but the XML has no implicit VCC output")
     elif vcc_operands:
         implicit.add("OPR_VCC")
@@ -780,7 +804,7 @@ def _check_xml(form, rule, snapshot, errors):
         if field not in operands:
             errors.append(f"{label}: XML has no operand {field}")
             continue
-        data_format, size, is_input, is_output = operands[field]
+        data_format, kind, size, is_input, is_output = operands[field]
         if field == "SIMM16" and _rule_kind(form) == "control":
             expected_kind, expected_format = (
                 ("OPR_LABEL", "FMT_NUM_I16") if form["operands"] == "sopp_branch"
@@ -800,6 +824,11 @@ def _check_xml(form, rule, snapshot, errors):
             continue
         bits = form.get(SOURCE_BITS_KEY) if is_source else None
         expected = bits if type(bits) is int else form["width"]
+        if not is_source and form["vcc"] == "sdst_lane_mask":
+            # The XML describes the Wave64 pair. The Wave32 ABI writes one SGPR.
+            expected = 64
+            if (kind, data_format) != ("OPR_SREG", "FMT_NUM_M64"):
+                errors.append(f"{label}: {field} is not a scalar mask destination in the XML")
         if size != expected:
             errors.append(f"{label}: {field} is {size} bits in the XML, declared {expected}")
         # The XML marks both swap operands as outputs. Guide 12.8 also
@@ -896,10 +925,11 @@ def validate(registry, snapshot):
         if form["wave"] in WAVE and form["wave"] != wave:
             errors.append(f"{label}: wave {form['wave']} is not enforced for this rule (requires {wave})")
         lane_mask = _rule_kind(form) == "vector_compare" or (reads_vcc and form["operation"] != "cselect")
-        if form["vcc"] in MASK and (form["vcc"] == "lane_mask") != lane_mask:
+        vcc = "lane_mask" if lane_mask else "unchanged"
+        if form["vcc"] in MASK and form["vcc"] != vcc:
             errors.append(
                 f"{label}: vcc {form['vcc']} contradicts rule {form['operands']} "
-                f"(requires {'lane_mask' if lane_mask else 'unchanged'})"
+                f"(requires {vcc})"
             )
         if form["exec"] != "unchanged":
             errors.append(f"{label}: exec {form['exec']} has no contract (requires unchanged)")
@@ -1070,9 +1100,10 @@ def variant_row(registry, variant, base=None):
     """The base form re-encoded: its declaration with the variant's identity."""
     if base is None:
         base = next(form for form in registry["form"] if form.get("name") == variant["of"])
+    _, vcc = OPERAND_RULES[variant["operands"]].get("vcc_transition", ("unchanged", "unchanged"))
     return dict(
         base, family=variant["family"], opcode=variant["opcode"], operands=variant["operands"],
-        spec=variant["spec"], verify=variant["verify"],
+        vcc=vcc, spec=variant["spec"], verify=variant["verify"],
     )
 
 
@@ -1142,24 +1173,32 @@ def _check_variants(registry, rules, documents, snapshot, seen, errors):
         if FORM_KEYS - set(base):
             errors.append(f"{label}: not checked, its form {variant['of']} is incomplete")
             continue
+        base_vcc, _ = implemented.get("vcc_transition", ("unchanged", "unchanged"))
+        if base["vcc"] != base_vcc:
+            errors.append(
+                f"{label}: operand rule {variant['operands']} requires a base "
+                f"destination contract of {base_vcc}, got {base['vcc']}"
+            )
         # The same base row as the completeness check above (with duplicate
         # declarations, the dict keeps the last one).
         _check_xml(variant_row(registry, variant, base), rule, snapshot, errors)
-        # Every explicit operand, destination included, has the base encoding's
-        # data format, in the same order (VSRC1 of VOP2 is SRC1 of VOP3).
+        # Explicit destinations and sources keep the base encoding's data format
+        # in the same role. The implicit-to-explicit mask transition is checked
+        # above and in _check_xml for each encoding.
         base_xml = snapshot["variants"].get((base["name"], _family_encoding(base["family"])))
         own_xml = snapshot["variants"].get((variant["of"], _family_encoding(variant["family"])))
         base_rule = rules.get(base.get("operands"))
         if base_xml and own_xml and _well_formed(base_rule) and _well_formed(rule):
             # Operands correspond by role, in rule order: the destination, then
             # each source (VSRC1 of VOP2 is SRC1 of VOP3).
-            def roles(rule, record):
+            def roles(rule, record, explicit_dst):
                 by_field = {row[0]: row[1] for row in record["operands"] if row[0]}
-                fields = ([rule["dst"]["field"]] if "dst" in rule else [])
+                fields = [rule["dst"]["field"]] if explicit_dst else []
                 fields += [src["field"] for src in rule.get("src", [])]
                 return [(field, by_field.get(field)) for field in fields]
 
-            pairs = list(zip(roles(base_rule, base_xml), roles(rule, own_xml)))
+            explicit_dst = "dst" in base_rule and "dst" in rule
+            pairs = zip(roles(base_rule, base_xml, explicit_dst), roles(rule, own_xml, explicit_dst))
             for (base_field, base_format), (field, data_format) in pairs:
                 if base_format != data_format:
                     errors.append(

@@ -19,6 +19,7 @@ pub mod reloc;
 pub mod runtime;
 #[rustfmt::skip]
 pub mod runtime_table;
+pub mod scheduler;
 pub mod services;
 pub mod softfloat;
 pub mod startup;

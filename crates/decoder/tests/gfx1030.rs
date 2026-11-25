@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 use xenora_decoder::{
     Architecture, CompareRelation, DecodeError, DecodeErrorKind, DecodedInstruction, Instruction,
     ScalarAluOp, ScalarImmediateOp, ScalarSource, ScalarUnaryOp, VectorAluOp, VectorAluVop3Op,
-    VectorSource, VectorUnaryOp, decode, decode_at,
+    VectorCompareOp, VectorCompareVop3Op, VectorSource, VectorUnaryOp, decode, decode_at,
 };
 use xenora_isa::semantics::Signedness;
 use xenora_ref::{
@@ -69,6 +69,127 @@ fn decodes_each_fixture_instruction_with_offset_and_length() {
         instruction,
     });
     assert_eq!(instructions, wanted);
+}
+
+#[test]
+fn decodes_wave32_vop3_compares_from_llvm_words() {
+    use VectorCompareVop3Op::*;
+
+    // llvm-mc -triple=amdgcn -mcpu=gfx1030 -mattr=+wavefrontsize32 -show-encoding
+    let cases: [(u32, VectorCompareVop3Op, u8); 19] = [
+        // v_cmp_lt_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x81,0xd4,0x01,0x05,0x02,0x02]
+        (0xd481_0004, CmpLtI32, 4),
+        // v_cmp_eq_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x82,0xd4,0x01,0x05,0x02,0x02]
+        (0xd482_0004, CmpEqI32, 4),
+        // v_cmp_le_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x83,0xd4,0x01,0x05,0x02,0x02]
+        (0xd483_0004, CmpLeI32, 4),
+        // v_cmp_gt_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x84,0xd4,0x01,0x05,0x02,0x02]
+        (0xd484_0004, CmpGtI32, 4),
+        // v_cmp_ne_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x85,0xd4,0x01,0x05,0x02,0x02]
+        (0xd485_0004, CmpNeI32, 4),
+        // v_cmp_ge_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x86,0xd4,0x01,0x05,0x02,0x02]
+        (0xd486_0004, CmpGeI32, 4),
+        // v_cmp_lt_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc1,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c1_0004, CmpLtU32, 4),
+        // v_cmp_eq_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc2,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c2_0004, CmpEqU32, 4),
+        // v_cmp_le_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc3,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c3_0004, CmpLeU32, 4),
+        // v_cmp_gt_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc4,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c4_0004, CmpGtU32, 4),
+        // v_cmp_ne_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc5,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c5_0004, CmpNeU32, 4),
+        // v_cmp_ge_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc6,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c6_0004, CmpGeU32, 4),
+        // v_cmp_f_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x80,0xd4,0x01,0x05,0x02,0x02]
+        (0xd480_0004, CmpFI32, 4),
+        // v_cmp_t_i32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0x87,0xd4,0x01,0x05,0x02,0x02]
+        (0xd487_0004, CmpTI32, 4),
+        // v_cmp_f_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc0,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c0_0004, CmpFU32, 4),
+        // v_cmp_t_u32_e64 s4, v1, v2 ; encoding: [0x04,0x00,0xc7,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c7_0004, CmpTU32, 4),
+        // v_cmp_eq_u32_e64 s0, v1, v2 ; encoding: [0x00,0x00,0xc2,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c2_0000, CmpEqU32, 0),
+        // v_cmp_eq_u32_e64 s105, v1, v2 ; encoding: [0x69,0x00,0xc2,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c2_0069, CmpEqU32, 105),
+        // v_cmp_eq_u32_e64 vcc_lo, v1, v2 ; encoding: [0x6a,0x00,0xc2,0xd4,0x01,0x05,0x02,0x02]
+        (0xd4c2_006a, CmpEqU32, 106),
+    ];
+    for (first, op, sdst) in cases {
+        let code: Vec<_> = [first, 0x0202_0501]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let decoded = decode(Architecture::Gfx1030, &code).unwrap();
+        let dst = if sdst == 106 {
+            "vcc_lo".to_owned()
+        } else {
+            format!("s{sdst}")
+        };
+        assert_eq!(
+            decoded,
+            [DecodedInstruction {
+                offset: 0,
+                byte_len: 8,
+                instruction: Instruction::VectorCompareVop3 {
+                    op,
+                    sdst,
+                    src0: 1,
+                    src1: 2
+                },
+            }],
+        );
+        assert_eq!(
+            decoded[0].instruction.to_string(),
+            format!("{} {dst}, v1, v2", op.assembly_name())
+        );
+    }
+}
+
+#[test]
+fn rejects_noncanonical_wave32_vop3_compare_operands() {
+    // v_cmp_eq_u32_e64 s4, v1, v2
+    let first = 0xd4c2_0004;
+    let second = 0x0202_0501;
+    let rejects = |first, second| {
+        let code: Vec<_> = [first, second]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let error = decode(Architecture::Gfx1030, &code).unwrap_err();
+        assert_eq!(error.offset, 0);
+        assert!(
+            matches!(
+                error.kind,
+                DecodeErrorKind::UnsupportedForm {
+                    mnemonic: "v_cmp_eq_u32_e64",
+                    ..
+                }
+            ),
+            "{first:#010x} {second:#010x}: {error}"
+        );
+    };
+
+    // Includes vcc_hi (107), TTMPs (108-123), null (124), m0 (125) and EXEC (126-127).
+    for sdst in 107..=255 {
+        rejects((first & !0xff) | sdst, second);
+    }
+    for bit in 8..=15 {
+        // ABS, OP_SEL and CLAMP.
+        rejects(first | (1 << bit), second);
+    }
+    for bit in 27..=31 {
+        // OMOD and NEG.
+        rejects(first, second | (1 << bit));
+    }
+    rejects(first, second ^ (1 << 18)); // SRC2 = 129 instead of 128.
+    for shift in [0, 9] {
+        for selector in [4, 106, 128, 240, 255] {
+            // SGPR, VCC_LO, inline integer/float, literal.
+            rejects(first, (second & !(0x1ff << shift)) | (selector << shift));
+        }
+    }
 }
 
 #[test]
@@ -303,6 +424,44 @@ fn reference_scalar(scalar: ScalarSource) -> Source {
     }
 }
 
+fn reference_comparison(op: VectorCompareOp) -> Comparison {
+    Comparison {
+        offset: match op.relation() {
+            CompareRelation::Less => 1,
+            CompareRelation::Equal => 2,
+            CompareRelation::LessOrEqual => 3,
+            CompareRelation::Greater => 4,
+            CompareRelation::NotEqual => 5,
+            CompareRelation::GreaterOrEqual => 6,
+            CompareRelation::False => 0,
+            CompareRelation::True => 7,
+        },
+        signed: op.signed(),
+    }
+}
+
+fn reference_vector_integer(op: VectorAluOp) -> VectorInteger {
+    match op {
+        VectorAluOp::CndmaskB32 => VectorInteger::Select,
+        VectorAluOp::AddCoCiU32 => VectorInteger::AddCarry,
+        VectorAluOp::SubCoCiU32 => VectorInteger::SubtractBorrow { reversed: false },
+        VectorAluOp::SubrevCoCiU32 => VectorInteger::SubtractBorrow { reversed: true },
+        VectorAluOp::MulI32I24 => VectorInteger::Multiply24 { signed: true },
+        VectorAluOp::MulHiI32I24 => VectorInteger::MultiplyHigh24 { signed: true },
+        VectorAluOp::MulU32U24 => VectorInteger::Multiply24 { signed: false },
+        VectorAluOp::MulHiU32U24 => VectorInteger::MultiplyHigh24 { signed: false },
+        VectorAluOp::MinI32 => VectorInteger::Minimum { signed: true },
+        VectorAluOp::MaxI32 => VectorInteger::Maximum { signed: true },
+        VectorAluOp::MinU32 => VectorInteger::Minimum { signed: false },
+        VectorAluOp::MaxU32 => VectorInteger::Maximum { signed: false },
+        VectorAluOp::XnorB32 => VectorInteger::Xnor,
+        VectorAluOp::AddNcU32 => VectorInteger::Add,
+        VectorAluOp::SubNcU32 => VectorInteger::Subtract,
+        VectorAluOp::SubrevNcU32 => VectorInteger::SubtractReverse,
+        _ => panic!("{op:?} decodes only with a VGPR SRC0 (operand rule vop2_vgpr2)"),
+    }
+}
+
 fn reference_op(instruction: Instruction) -> Op {
     match instruction {
         Instruction::BufferLoadDword {
@@ -391,13 +550,23 @@ fn reference_op(instruction: Instruction) -> Op {
             reference_scalar(src0),
             reference_scalar(src1),
         ),
-        // The reference's VOP3 add; it is the only VOP3 variant so far.
         Instruction::VectorAluVop3 {
             op: VectorAluVop3Op::AddNcU32,
             dst,
             src0,
             src1,
         } => Op::Add(dst, src0, src1),
+        Instruction::VectorAluVop3 {
+            op,
+            dst,
+            src0,
+            src1,
+        } => Op::VectorInteger(
+            reference_vector_integer(op.base()),
+            dst,
+            CompareSource::Vector(src0),
+            src1,
+        ),
         Instruction::ScalarUnary { op, dst, src } => {
             let src = reference_scalar(src);
             let unary = match op {
@@ -506,19 +675,7 @@ fn reference_op(instruction: Instruction) -> Op {
         }
 
         Instruction::VectorCompare { op, src0, src1 } => {
-            let comparison = Comparison {
-                offset: match op.relation() {
-                    CompareRelation::Less => 1,
-                    CompareRelation::Equal => 2,
-                    CompareRelation::LessOrEqual => 3,
-                    CompareRelation::Greater => 4,
-                    CompareRelation::NotEqual => 5,
-                    CompareRelation::GreaterOrEqual => 6,
-                    CompareRelation::False => 0,
-                    CompareRelation::True => 7,
-                },
-                signed: op.signed(),
-            };
+            let comparison = reference_comparison(op);
             let src0 = match src0 {
                 VectorSource::Register(reg) => CompareSource::Vector(reg),
                 VectorSource::Scalar(reg) => CompareSource::Scalar(reg),
@@ -531,31 +688,24 @@ fn reference_op(instruction: Instruction) -> Op {
                 width => panic!("unexpected VOPC operand width {width}"),
             }
         }
+        Instruction::VectorCompareVop3 {
+            op,
+            sdst,
+            src0,
+            src1,
+        } => Op::CompareVop3(
+            sdst,
+            reference_comparison(op.base()),
+            CompareSource::Vector(src0),
+            src1,
+        ),
         Instruction::VectorAlu {
             op,
             dst,
             src0,
             src1,
         } => Op::VectorInteger(
-            match op {
-                VectorAluOp::CndmaskB32 => VectorInteger::Select,
-                VectorAluOp::AddCoCiU32 => VectorInteger::AddCarry,
-                VectorAluOp::SubCoCiU32 => VectorInteger::SubtractBorrow { reversed: false },
-                VectorAluOp::SubrevCoCiU32 => VectorInteger::SubtractBorrow { reversed: true },
-                VectorAluOp::MulI32I24 => VectorInteger::Multiply24 { signed: true },
-                VectorAluOp::MulHiI32I24 => VectorInteger::MultiplyHigh24 { signed: true },
-                VectorAluOp::MulU32U24 => VectorInteger::Multiply24 { signed: false },
-                VectorAluOp::MulHiU32U24 => VectorInteger::MultiplyHigh24 { signed: false },
-                VectorAluOp::MinI32 => VectorInteger::Minimum { signed: true },
-                VectorAluOp::MaxI32 => VectorInteger::Maximum { signed: true },
-                VectorAluOp::MinU32 => VectorInteger::Minimum { signed: false },
-                VectorAluOp::MaxU32 => VectorInteger::Maximum { signed: false },
-                VectorAluOp::XnorB32 => VectorInteger::Xnor,
-                VectorAluOp::AddNcU32 => VectorInteger::Add,
-                VectorAluOp::SubNcU32 => VectorInteger::Subtract,
-                VectorAluOp::SubrevNcU32 => VectorInteger::SubtractReverse,
-                _ => panic!("{op:?} decodes only with a VGPR SRC0 (operand rule vop2_vgpr2)"),
-            },
+            reference_vector_integer(op),
             dst,
             match src0 {
                 VectorSource::Register(reg) => CompareSource::Vector(reg),
@@ -596,12 +746,14 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/vector-compare-ft.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-unary.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare-16.bin"),
+        include_bytes!("../../../fixtures/rdna2/vop3-integer.bin"),
+        include_bytes!("../../../fixtures/rdna2/vop3-compare.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 142, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 169, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -829,7 +981,7 @@ fn distinguishes_llvm_invalid_encodings_from_xenora_subset_rejections() {
     let outside_subset: &[&[u32]] = &[
         &[0x7e04_026b],                                        // VOP1 VCC_HI source
         &[0x7da2_0501],                                        // v_cmpx_eq_u32_e32
-        &[0xd482_006a, 0x0002_0501],                           // v_cmp_lt_i32_e64
+        &[0xd482_006a, 0x0002_0501],                           // v_cmp_eq_i32_e64 with SRC2 = 0
         &[0x8788_0908],                                        // s_and_b64
         &[0x8008_ffff, 0x1234_5678],                           // SOP2 with two literal sources
         &[0x806c_0908],                                        // SOP2 TTMP destination
@@ -1117,6 +1269,122 @@ fn decode_at_resolves_branch_targets_from_the_stream_offset() {
             },
         })
     );
+}
+
+// llvm-mc -triple=amdgcn -mcpu=gfx1030 -show-encoding
+const VOP3_INTEGER_ENCODINGS: [(VectorAluVop3Op, u32); 11] = [
+    // v_mul_i32_i24_e64 v255, v0, v127        ; encoding: [0xff,0x00,0x09,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MulI32I24, 0xd50900ff),
+    // v_mul_hi_i32_i24_e64 v255, v0, v127     ; encoding: [0xff,0x00,0x0a,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MulHiI32I24, 0xd50a00ff),
+    // v_mul_u32_u24_e64 v255, v0, v127        ; encoding: [0xff,0x00,0x0b,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MulU32U24, 0xd50b00ff),
+    // v_mul_hi_u32_u24_e64 v255, v0, v127     ; encoding: [0xff,0x00,0x0c,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MulHiU32U24, 0xd50c00ff),
+    // v_min_i32_e64 v255, v0, v127            ; encoding: [0xff,0x00,0x11,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MinI32, 0xd51100ff),
+    // v_max_i32_e64 v255, v0, v127            ; encoding: [0xff,0x00,0x12,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MaxI32, 0xd51200ff),
+    // v_min_u32_e64 v255, v0, v127            ; encoding: [0xff,0x00,0x13,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MinU32, 0xd51300ff),
+    // v_max_u32_e64 v255, v0, v127            ; encoding: [0xff,0x00,0x14,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::MaxU32, 0xd51400ff),
+    // v_xnor_b32_e64 v255, v0, v127           ; encoding: [0xff,0x00,0x1e,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::XnorB32, 0xd51e00ff),
+    // v_sub_nc_u32_e64 v255, v0, v127         ; encoding: [0xff,0x00,0x26,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::SubNcU32, 0xd52600ff),
+    // v_subrev_nc_u32_e64 v255, v0, v127      ; encoding: [0xff,0x00,0x27,0xd5,0x00,0xff,0x02,0x02]
+    (VectorAluVop3Op::SubrevNcU32, 0xd52700ff),
+];
+const VOP3_INTEGER_SOURCE_WORD: u32 = 0x0202_ff00;
+
+#[test]
+fn decodes_registry_vop3_integer_encodings() {
+    for (op, first) in VOP3_INTEGER_ENCODINGS {
+        let bytes = [first.to_le_bytes(), VOP3_INTEGER_SOURCE_WORD.to_le_bytes()].concat();
+        let decoded = decode(Architecture::Gfx1030, &bytes).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].byte_len, 8);
+        assert_eq!(
+            decoded[0].instruction,
+            Instruction::VectorAluVop3 {
+                op,
+                dst: 255,
+                src0: 0,
+                src1: 127,
+            }
+        );
+    }
+}
+
+#[test]
+fn decodes_vop3_integer_fixture() {
+    use VectorAluVop3Op::*;
+
+    let code = include_bytes!("../../../fixtures/rdna2/vop3-integer.bin");
+    let decoded = decode(Architecture::Gfx1030, code).unwrap();
+    let expected = [
+        (MulI32I24, 2, 1, 1),
+        (MulHiI32I24, 3, 2, 1),
+        (MulU32U24, 4, 2, 1),
+        (MulHiU32U24, 255, 4, 1),
+        (MinI32, 6, 1, 2),
+        (MaxI32, 7, 1, 4),
+        (MinU32, 8, 3, 1),
+        (MaxU32, 9, 255, 2),
+        (XnorB32, 10, 1, 255),
+        (SubNcU32, 11, 6, 10),
+        (SubrevNcU32, 1, 1, 9),
+    ];
+    let actual: Vec<_> = decoded
+        .iter()
+        .filter_map(|decoded| match decoded.instruction {
+            Instruction::VectorAluVop3 {
+                op,
+                dst,
+                src0,
+                src1,
+            } => Some((decoded.offset, decoded.byte_len, op, dst, src0, src1)),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<_> = expected
+        .into_iter()
+        .enumerate()
+        .map(|(index, (op, dst, src0, src1))| (12 + 8 * index, 8, op, dst, src0, src1))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn rejects_registry_vop3_integer_modifiers_and_other_sources() {
+    for (op, first) in VOP3_INTEGER_ENCODINGS {
+        let second = VOP3_INTEGER_SOURCE_WORD;
+        let reject = |first: u32, second: u32| {
+            let bytes = [first.to_le_bytes(), second.to_le_bytes()].concat();
+            let error = decode(Architecture::Gfx1030, &bytes)
+                .expect_err(&format!("{op:?} accepted {first:#010x} {second:#010x}"));
+            assert_eq!(error.offset, 0);
+            assert!(matches!(
+                error.kind,
+                DecodeErrorKind::UnsupportedForm { mnemonic, .. }
+                    if mnemonic == op.assembly_name()
+            ));
+        };
+
+        // First word: ABS[10:8], OP_SEL[14:11], CLAMP[15].
+        for bit in 8..=15 {
+            reject(first | (1 << bit), second);
+        }
+        // Second word: OMOD[28:27], NEG[31:29].
+        for bit in 27..=31 {
+            reject(first, second | (1 << bit));
+        }
+
+        reject(first, second & !0x1ff); // SRC0 = s0
+        reject(first, (second & !(0x1ff << 9)) | (128 << 9)); // SRC1 = inline zero
+        reject(first, second | (1 << 18)); // SRC2 = inline one
+    }
 }
 
 #[test]

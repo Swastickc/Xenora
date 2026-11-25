@@ -65,6 +65,9 @@ static void fls_second(void *value) {
 }
 
 static u32 fls_worker(void *unused) {
+    u32 stack_word = 0;
+    if (S->mode == TERMINATE_IN_CALLBACK) S->out[20] = (u64)&stack_word;
+    if (S->mode == RETURN) S->out[21] = (u64)&stack_word;
     if (!FlsSetValue(S->indices[0], THREAD(0x12345)) ||
         !FlsSetValue(S->indices[1], THREAD(0x67890))) return 1;
     if (S->mode == EXPLICIT) {
@@ -109,6 +112,15 @@ static void fls_exit(enum exit_mode mode) {
     S->out[2] = code;
     S->out[7] = S->calls;
     CloseHandle(worker);
+    if (mode == TERMINATE_IN_CALLBACK) {
+        S->mode = RETURN;
+        HANDLE next = CreateThread(0, 0, fls_worker, 0, 0, 0);
+        S->out[17] = GetThreadId(next);
+        S->out[18] = WaitForSingleObject(next, INFINITE);
+        GetExitCodeThread(next, &code);
+        S->out[19] = code;
+        CloseHandle(next);
+    }
     CloseHandle(S->ready);
     for (int i = 0; i < 3; i++) S->out[10 + i] = FlsFree(S->indices[i]);
     S->out[13] = S->calls;

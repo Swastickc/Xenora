@@ -922,16 +922,20 @@ fn an_exit_from_fls_cleanup_ends_the_worker_without_restarting_cleanup() {
 }
 
 #[test]
-fn termination_and_teardown_cancel_suspended_fls_cleanup() {
+fn termination_and_teardown_cancel_in_progress_fls_cleanup() {
     let worker = u64::from(MAIN_ID + 4);
     for quantum in [1, DEFAULT_QUANTUM] {
         let run = run_with("main_fls_cancel", quantum, BUDGET).halted();
+        let next = worker + 4;
         assert_eq!(
-            run.outs(17),
+            run.outs(20),
             [
-                worker, 0, 0xDEAD, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0x12345, 259, 258
+                worker, 0, 0xDEAD, 0x12345, next, 0x67890, next, 0, 0, 1, 1, 1, 1, 2, 0x12345, 259,
+                258, next, 0, 0xCAFE
             ]
         );
+        assert_ne!(run.out(20), 0);
+        assert_eq!(run.out(20), run.out(21), "worker stack must be reused");
         assert!(run.memory.read_u64(FIRST_SLOT + 0x1000).is_err());
 
         let run = run_with("main_fls_teardown", quantum, BUDGET).halted();

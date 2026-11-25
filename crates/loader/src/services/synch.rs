@@ -179,24 +179,23 @@ impl Synch {
     pub(super) fn has_thread_fls_callbacks(&self, teb: u64) -> bool {
         self.fls_values
             .range((teb, 0)..=(teb, u32::MAX))
-            .any(|(&(_, index), _)| self.fls_callback(index).is_some())
+            .any(|(&(_, index), _)| {
+                self.fls_slots
+                    .get(&index)
+                    .is_some_and(|slot| slot.callback != 0)
+            })
     }
 
     /// Take one snapshot of the exiting thread's values in slot order.
     pub(super) fn take_thread_fls_callbacks(&mut self, teb: u64) -> Vec<(u64, u64)> {
-        let values: Vec<_> = self
-            .fls_values
+        let slots = &self.fls_slots;
+        self.fls_values
             .extract_if((teb, 0)..=(teb, u32::MAX), |_, _| true)
-            .collect();
-        values
-            .into_iter()
-            .filter_map(|((_, index), value)| self.fls_callback(index).map(|entry| (entry, value)))
+            .filter_map(|((_, index), value)| {
+                let entry = slots.get(&index)?.callback;
+                (entry != 0).then_some((entry, value))
+            })
             .collect()
-    }
-
-    fn fls_callback(&self, index: u32) -> Option<u64> {
-        let callback = self.fls_slots.get(&index)?.callback;
-        (callback != 0).then_some(callback)
     }
 
     /// Drop the thread-local values of a guest thread that has ended, without

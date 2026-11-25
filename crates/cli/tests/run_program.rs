@@ -939,7 +939,10 @@ fn a_program_using_byte_range_locks_and_the_file_mode_services_runs() {
     for name in ["crt-winlocks-O0", "crt-winlocks-O2"] {
         let run = run_program(&crt_winlocks(name), &[], &[]);
         assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
-        assert_eq!(run.stdout, "crt-winlocks: 22/22 checks passed\r\n", "{name}");
+        assert_eq!(
+            run.stdout, "crt-winlocks: 22/22 checks passed\r\n",
+            "{name}"
+        );
         assert_eq!(run.stderr, "", "{name}");
     }
     // The control must fail its last check: the exit code is its number.

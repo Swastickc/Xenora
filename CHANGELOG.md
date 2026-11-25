@@ -51,6 +51,7 @@ remains unsupported.
 
 ### Fixed
 - The PE loader ignores thread-local storage directory bytes outside the optional header's declared directory count, so padding is not treated as TLS metadata (#573).
+- The macOS app build locates the Rust library and bundled worker in Cargo's configured target directory (#513).
 - Structured startup reports now preserve the guest exit status when a thread-local storage callback ends the process before the entry point. The report keeps TLS as the last completed stage (#483).
 - `xenora run --startup-report` preserves piped guest input and applies the usual input size and deadline limits (#547).
 - The macOS fixture loop now displays failed session commands with their status codes even when a frame is on screen. Both fixture modes share session replacement and cleanup, and a cancelled poll cannot touch a replacement session (#406).

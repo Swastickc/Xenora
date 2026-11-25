@@ -63,19 +63,26 @@ if [ "${1:-}" = --check ]; then
     exit 0
 fi
 
+cargo_metadata=$(cargo metadata --locked --format-version 1 --no-deps) ||
+    fail "could not read Cargo workspace metadata"
+cargo_target_dir=$(printf '%s\n' "$cargo_metadata" |
+    /usr/bin/plutil -extract target_directory raw -expect string -o - -) ||
+    fail "could not resolve Cargo target directory"
+rust_release="$cargo_target_dir/$target/release"
+
 # Match the app's LSMinimumSystemVersion so the static library links cleanly.
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p xenora-ffi --target "$target"
 # The `xenora run` worker the app's Run action launches, so a run from the app
 # gets the same worker process, wall deadline and step limit as the command line.
 MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --locked --release -p xenora --target "$target"
 swift build --package-path app -c release --arch arm64 \
-    -Xlinker -L -Xlinker "$root/target/$target/release"
+    -Xlinker -L -Xlinker "$rust_release"
 
 bundle="$root/build/Xenora.app"
 rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS"
 cp "$(swift build --package-path app -c release --arch arm64 --show-bin-path)/Xenora" "$bundle/Contents/MacOS/Xenora"
-cp "$root/target/$target/release/xenora" "$bundle/Contents/MacOS/xenora-cli"
+cp "$rust_release/xenora" "$bundle/Contents/MacOS/xenora-cli"
 cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

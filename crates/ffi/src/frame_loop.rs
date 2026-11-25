@@ -502,6 +502,78 @@ fn embedded_guest_releases_resources_on_stop_before_first_draw() {
 
 #[cfg(test)]
 #[test]
+fn paused_interactive_frame_keeps_its_sampled_command() {
+    use std::time::{Duration, Instant};
+
+    let session = Arc::new(FrameLoop::default());
+    {
+        let mut state = session.lock();
+        state.status = PAUSED;
+        state.paused = true;
+        state.limit = 1;
+        state.interactive = true;
+    }
+    session.queue_input(InputState {
+        buttons: crate::XENORA_INPUT_LEFT,
+        ..InputState::default()
+    });
+    let guest = Arc::clone(&session);
+    let gate = std::thread::spawn(move || guest.begin_frame(0));
+    let until = Instant::now() + Duration::from_secs(2);
+    let sampled = loop {
+        if session.lock().input_queue.is_empty() {
+            break true;
+        }
+        if Instant::now() >= until {
+            break false;
+        }
+        std::thread::yield_now();
+    };
+    session.send_input(InputState {
+        buttons: crate::XENORA_INPUT_RIGHT,
+        ..InputState::default()
+    });
+    assert!(session.set_paused(false));
+    assert!(matches!(gate.join().unwrap(), Ok(2)));
+    assert!(sampled);
+    assert_eq!(session.lock().frame_input, Some(2));
+}
+
+#[cfg(test)]
+#[test]
+fn publication_requires_fresh_presentation_and_actual_native_draw() {
+    let session = FrameLoop::default();
+    session.lock().limit = 2;
+    let readback: [u8; FRAME_BYTES] = expected(0).try_into().unwrap();
+    let backend = GraphicsBackendId::MetalNative;
+    let mut frame = FramePresentation {
+        width: WIDTH,
+        height: HEIGHT,
+        pixels: readback.to_vec(),
+        frame_index: 1,
+        draw_count: 1,
+        backend: Some(backend),
+    };
+    let publish = |frame: &FramePresentation, pixels: &[u8; FRAME_BYTES], draws| {
+        session.publish_frame(0, 0, pixels, frame, backend, draws)
+    };
+    assert!(publish(&frame, &readback, 1).is_err());
+    assert!(matches!(session.begin_frame(0), Ok(1)));
+    frame.frame_index = 0;
+    assert!(publish(&frame, &readback, 1).is_err());
+    frame.frame_index = 1;
+    assert!(publish(&frame, &readback, 0).is_err());
+    assert!(publish(&frame, &[0; FRAME_BYTES], 1).is_err());
+    assert_eq!(session.snapshot().completed, 0);
+    assert!(session.snapshot().latest.is_none());
+
+    assert!(matches!(publish(&frame, &readback, 1), Ok(1)));
+    assert!(publish(&frame, &readback, 1).is_err());
+    assert_eq!(session.snapshot().completed, 1);
+}
+
+#[cfg(test)]
+#[test]
 fn extended_controller_snapshot_retains_trigger_bytes_and_legacy_input_resets_them() {
     let running = FrameLoop::default();
     running.send_controller_input(ControllerInput {

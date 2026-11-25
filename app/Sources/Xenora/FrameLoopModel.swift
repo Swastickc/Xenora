@@ -78,9 +78,7 @@ final class FrameLoopModel: ObservableObject {
     private let api: any FrameLoopAPI
     private let readController: @MainActor () -> DetectedController?
     private let sleepBeforePoll: (@MainActor (Duration) async throws -> Void)?
-    private static let directions = UInt32(
-        XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT | XENORA_INPUT_UP | XENORA_INPUT_DOWN
-    )
+    private static let horizontalButtons = UInt32(XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT)
     private var screenDirection: UInt32 = 0
     private var lastSentInput = xenora_controller_input()
     private var session: xenora_session = 0
@@ -191,7 +189,7 @@ final class FrameLoopModel: ObservableObject {
 
     func sendInput(buttons: UInt32) {
         guard session != 0, isInteractive else { return }
-        screenDirection = buttons & Self.directions
+        screenDirection = buttons & Self.horizontalButtons
         updateGameController()
     }
 
@@ -200,9 +198,9 @@ final class FrameLoopModel: ObservableObject {
         if next != controller { controller = next }
         let snapshot = next?.snapshot
         let physicalButtons = snapshot?.buttons ?? 0
-        // The screen replaces only directional buttons until Release.
+        // The screen replaces only Left and Right until Release.
         let buttons = screenDirection == 0
-            ? physicalButtons : (physicalButtons & ~Self.directions) | screenDirection
+            ? physicalButtons : (physicalButtons & ~Self.horizontalButtons) | screenDirection
         let state = xenora_input_state(
             buttons: buttons,
             stick_x: snapshot?.x ?? 0,

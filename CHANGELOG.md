@@ -80,6 +80,7 @@ remains unsupported.
 - Sampler validation rejects texture metadata with more mip levels than its dimensions allow, including metadata constructed directly from public fields (#503).
 - Import generation preserves names containing quotes when reading probe CSV and writing its manifest CSV (#538).
 - The macOS interactive fixture combines on-screen directions with a connected gamepad's other buttons, axes, and triggers. Release restores the physical direction, starting a new fixture clears the on-screen direction, and a failed input update can be retried (#601).
+- The macOS interactive fixture combines on-screen Left and Right with a connected gamepad's other buttons, axes, and triggers. Release restores the physical direction, starting a new fixture clears the on-screen direction, and a failed input update can be retried (#601).
 - Structured startup reports now preserve the guest exit status when a thread-local storage callback ends the process before the entry point. The report keeps TLS as the last completed stage (#483).
 - `xenora run --startup-report` preserves piped guest input and applies the usual input size and deadline limits (#547).
 - The macOS fixture loop now displays failed session commands with their status codes even when a frame is on screen. Both fixture modes share session replacement and cleanup, and a cancelled poll cannot touch a replacement session (#406).

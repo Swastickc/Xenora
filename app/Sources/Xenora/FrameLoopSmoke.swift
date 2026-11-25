@@ -331,7 +331,7 @@ private func checkControllerHandoffs() -> [String] {
     model.sendInput(buttons: right)
     expectInput(1, right, connected: 1, "screen takes directional priority")
 
-    probe.controller = controller(up, x: 0, trigger: 0)
+    probe.controller = controller(right, x: 0, trigger: 0)
     api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
     model.pause()
     expectInput(1, right, connected: 1, "physical direction masked by the screen stays deduplicated")
@@ -339,8 +339,8 @@ private func checkControllerHandoffs() -> [String] {
     probe.controller = controller(up | action, x: -1, trigger: 0.5)
     api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
     model.resume()
-    expectInput(2, right | action, connected: 1, x: -32767, trigger: 32768,
-                "changes to physical buttons and analog input pass through the overlay")
+    expectInput(2, right | up | action, connected: 1, x: -32767, trigger: 32768,
+                "physical Up, action and analog input pass through the horizontal overlay")
 
     model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
     expectInput(3, up | action, connected: 1, x: -32767, trigger: 32768,

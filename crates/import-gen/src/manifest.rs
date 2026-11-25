@@ -125,8 +125,8 @@ impl Manifest {
             };
             out.push_str(&format!(
                 "\"{}\",\"{}\",0x{:08x},{},{},{kind}\n",
-                e.module,
-                e.symbol,
+                e.module.replace('"', "\"\""),
+                e.symbol.replace('"', "\"\""),
                 e.iat_rva,
                 e.tier(),
                 e.emission()

@@ -183,6 +183,7 @@ func checkFrameLoopFailures() async -> [String] {
     try? await Task.sleep(for: .milliseconds(35))
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
     return failures + (await checkFramePolling()) + checkControllerComposition()
+        + checkControllerHandoffs()
 }
 
 @MainActor
@@ -292,6 +293,88 @@ private func checkControllerComposition() -> [String] {
     }) {
         failures.append("screen direction or release replaced the connected controller's analog input")
     }
+    return failures
+}
+
+@MainActor
+private func checkControllerHandoffs() -> [String] {
+    var failures: [String] = []
+    let left = UInt32(XENORA_INPUT_LEFT)
+    let right = UInt32(XENORA_INPUT_RIGHT)
+    let up = UInt32(XENORA_INPUT_UP)
+    let action = UInt32(XENORA_INPUT_ACTION_B)
+    let api = ScriptedFrameLoop()
+    func controller(_ buttons: UInt32, x: Float, trigger: Float) -> DetectedController {
+        DetectedController(
+            identity: ObjectIdentifier(api), name: "Changing controller", supportsHaptics: false,
+            snapshot: ControllerSnapshot(buttons: buttons, x: x, y: 0, leftTrigger: trigger, rightTrigger: 0)
+        )
+    }
+    let probe = FramePollingProbe()
+    probe.controller = controller(left, x: 0, trigger: 0)
+    let model = FrameLoopModel(api: api, readController: { probe.controller })
+
+    func expectInput(_ count: Int, _ buttons: UInt32, connected: UInt8, x: Int16 = 0,
+                     trigger: UInt16 = 0, _ context: String) {
+        let inputs = api.inputs
+        guard inputs.count == count, let input = inputs.last else {
+            failures.append("\(context): sent \(inputs.count) inputs, expected \(count)")
+            return
+        }
+        if input.state.buttons != buttons || input.state.connected != connected
+            || input.state.stick_x != x || input.left_trigger != trigger {
+            failures.append("\(context): wrong effective controller input")
+        }
+    }
+
+    model.startInteractive()
+    model.sendInput(buttons: right)
+    expectInput(1, right, connected: 1, "screen takes directional priority")
+
+    probe.controller = controller(up, x: 0, trigger: 0)
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    expectInput(1, right, connected: 1, "physical direction masked by the screen stays deduplicated")
+
+    probe.controller = controller(up | action, x: -1, trigger: 0.5)
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
+    model.resume()
+    expectInput(2, right | action, connected: 1, x: -32767, trigger: 32768,
+                "changes to physical buttons and analog input pass through the overlay")
+
+    model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
+    expectInput(3, up | action, connected: 1, x: -32767, trigger: 32768,
+                "Release restores the changed physical direction")
+    model.sendInput(buttons: right)
+
+    probe.controller = nil
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    expectInput(5, right, connected: 1, "disconnect retains only the screen direction")
+
+    api.fail(.sendInput, Int32(XENORA_INVALID_STATE))
+    model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
+    expectInput(6, 0, connected: 0, "Release attempts disconnected neutral state")
+    if model.errorMessage != "Failed to send controller input (status 9)." {
+        failures.append("failed input update did not report its status")
+    }
+
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
+    model.resume()
+    expectInput(7, 0, connected: 0, "an unchanged snapshot is retried after a failed send")
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    expectInput(7, 0, connected: 0, "a successful retry is deduplicated")
+
+    probe.controller = controller(left, x: 0, trigger: 0)
+    model.sendInput(buttons: right)
+    expectInput(8, right, connected: 1, "screen direction before session replacement")
+    model.start()
+    model.pause()
+    expectInput(8, right, connected: 1, "standard session does not submit controller input")
+    model.startInteractive()
+    model.pause()
+    expectInput(9, left, connected: 1, "a replacement interactive session starts with only physical input")
     return failures
 }
 

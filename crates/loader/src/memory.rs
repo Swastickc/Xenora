@@ -471,13 +471,28 @@ impl GuestMemory {
     /// So the region found is the first of those based at `b` that ends
     /// after `address`, if there is one, or else the next region in the
     /// table, which starts above `address`.
-    fn first_ending_after(&self, address: u64) -> Option<usize> {
+    #[inline]
+    fn first_ending_after(&self, address: u64) -> Option<(usize, &MappedRegion)> {
+        let regions = &self.regions;
+        let front = regions.len().min(FRONT_SCAN);
+        let found = regions[..front]
+            .iter()
+            .enumerate()
+            .find(|(_, region)| region.base + region.data.len() as u64 > address);
+        if found.is_some() || regions.len() <= FRONT_SCAN {
+            // Found, or the scan has seen every region.
+            return found;
+        }
+        let index = self.search_ending_after(address)?;
+        Some((index, &regions[index]))
+    }
+
+    /// [`Self::first_ending_after`] past the front of the table, kept out of
+    /// line so that the front scan inlines into every access.
+    #[inline(never)]
+    fn search_ending_after(&self, address: u64) -> Option<usize> {
         let regions = &self.regions;
         let ends_after = |region: &MappedRegion| region.base + region.data.len() as u64 > address;
-        let front = regions.len().min(FRONT_SCAN);
-        if let Some(index) = regions[..front].iter().position(ends_after) {
-            return Some(index);
-        }
         let above = regions.partition_point(|region| region.base <= address);
         if let Some(last) = above.checked_sub(1) {
             // The regions based at `b` end at `above`; they are usually one.
@@ -531,7 +546,7 @@ impl GuestMemory {
         // loop below would skip it.
         let start = self
             .first_ending_after(address)
-            .unwrap_or(self.regions.len());
+            .map_or(self.regions.len(), |(index, _)| index);
         for (index, region) in self.regions.iter().enumerate().skip(start) {
             let region_end = region.base + region.data.len() as u64;
             if region_end <= cursor {
@@ -621,8 +636,7 @@ impl GuestMemory {
     // Only the first eligible mapping may supply the whole span. Otherwise
     // the checked resolver must preserve split-access and overlap priority.
     fn contiguous_region(&self, address: u64, len: usize) -> Option<(usize, Range<usize>)> {
-        let index = self.first_ending_after(address)?;
-        let region = &self.regions[index];
+        let (index, region) = self.first_ending_after(address)?;
         let offset = usize::try_from(address.checked_sub(region.base)?).ok()?;
         let end = offset.checked_add(len)?;
         (end <= region.data.len()).then_some((index, offset..end))
@@ -631,10 +645,9 @@ impl GuestMemory {
     /// Read an instruction byte from guest memory, verifying execute permission.
     pub fn fetch_instruction_byte(&self, address: u64) -> Result<u8, MemoryError> {
         address.checked_add(1).ok_or(MemoryError::Overflow)?;
-        let region = self
+        let (_, region) = self
             .first_ending_after(address)
-            .map(|index| &self.regions[index])
-            .filter(|region| region.base <= address)
+            .filter(|(_, region)| region.base <= address)
             .ok_or(MemoryError::UnmappedAddress(address))?;
         if !region.permissions.execute {
             return Err(MemoryError::PermissionViolation {
@@ -2168,7 +2181,7 @@ mod region_lookup_differential_tests {
                 }
                 for &probe in &probes {
                     assert_eq!(
-                        memory.first_ending_after(probe),
+                        memory.first_ending_after(probe).map(|(index, _)| index),
                         scanned(&memory, probe),
                         "seed {seed} probe {probe:#x}"
                     );

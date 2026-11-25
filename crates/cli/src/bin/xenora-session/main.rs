@@ -304,7 +304,7 @@ fn write_frames(dir: &Path, frames: &[Frame]) -> io::Result<()> {
                 .open(&path)?;
             created.push(path);
             write!(file, "P6\n{WIDTH} {HEIGHT}\n255\n")?;
-            for pixel in frame.rgba.chunks_exact(4) {
+            for pixel in frame.rgba.as_chunks::<4>().0 {
                 file.write_all(&pixel[..3])?;
             }
         }
@@ -426,4 +426,45 @@ fn main() -> ExitCode {
         return ExitCode::from(125);
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn example_frame(sequence: u32) -> Frame {
+        Frame {
+            sequence,
+            rgba: vec![0; RGBA_BYTES],
+        }
+    }
+
+    #[test]
+    fn incomplete_or_oversized_worker_replies_are_refused() {
+        let session = CompletedSession {
+            frames: vec![example_frame(1)],
+            journal: vec![b'L'],
+            exit_status: 0,
+            open_handles: 0,
+            native_draws: 0,
+        };
+        let mut reply = Vec::new();
+        encode(&session, &mut reply).unwrap();
+        assert!(decode(&reply, 1).is_ok());
+        assert!(decode(&reply[..reply.len() - 1], 1).is_err());
+        reply.push(0);
+        assert!(decode(&reply, 1).is_err());
+    }
+
+    #[test]
+    fn a_failed_export_removes_the_files_it_created() {
+        let dir =
+            std::env::temp_dir().join(format!("xenora-session-rollback-{}", std::process::id()));
+        let duplicate = [example_frame(1), example_frame(1)];
+        assert_eq!(
+            write_frames(&dir, &duplicate).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert!(!dir.exists());
+    }
 }

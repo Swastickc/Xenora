@@ -112,21 +112,24 @@ impl AudioSubsystem {
         self.total_submitted_bytes = self
             .total_submitted_bytes
             .saturating_add(bytes.len() as u64);
-        for &byte in bytes {
-            if self.queue.len() >= self.max_capacity_bytes {
-                self.queue.pop_front();
-            }
-            self.queue.push_back(byte);
-        }
+        // Only the newest bytes can survive in the bounded queue. Skip an
+        // oversized submission's discarded prefix before copying any samples.
+        let retained = &bytes[bytes.len().saturating_sub(self.max_capacity_bytes)..];
+        let available_for_old = self.max_capacity_bytes - retained.len();
+        let discard = self.queue.len().saturating_sub(available_for_old);
+        self.queue.drain(..discard);
+        self.queue.extend(retained.iter().copied());
     }
 
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         let usable = out.len().min(self.queue.len());
         let count = usable - usable % self.frame_bytes();
         let drained = &mut out[..count];
-        for byte in drained.iter_mut() {
-            *byte = self.queue.pop_front().unwrap_or(0);
-        }
+        let (first, second) = self.queue.as_slices();
+        let first_count = first.len().min(count);
+        drained[..first_count].copy_from_slice(&first[..first_count]);
+        drained[first_count..].copy_from_slice(&second[..count - first_count]);
+        self.queue.drain(..count);
         self.apply_playback_controls(drained);
         count
     }
@@ -2605,6 +2608,73 @@ mod tests {
         assert!(split(res_reused).1 > split(res).1);
 
         xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn pcm_queue_keeps_the_newest_complete_frames_after_wrap_and_overflow() {
+        let _guard = serial();
+        let session = create();
+        assert_eq!(
+            xenora_session_audio_init(session, 48_000, 2, XENORA_AUDIO_FORMAT_PCM_S16LE),
+            XENORA_OK
+        );
+        const CAPACITY: usize = 256 * 1024;
+        let source: Vec<u8> = (0..66_000_u32)
+            .flat_map(|frame| [frame as u16, !(frame as u16)])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let (initial, additional) = source.split_at(CAPACITY);
+
+        let submit = |bytes: &[u8]| {
+            assert_eq!(
+                unsafe { xenora_session_audio_submit(session, bytes.as_ptr(), bytes.len() as u64) },
+                XENORA_OK
+            );
+        };
+        let read = |output: &mut [u8]| {
+            let mut actual = 0;
+            assert_eq!(
+                unsafe {
+                    xenora_session_audio_read(
+                        session,
+                        output.as_mut_ptr(),
+                        output.len() as u64,
+                        &mut actual,
+                    )
+                },
+                XENORA_OK
+            );
+            assert_eq!(actual, output.len() as u64);
+        };
+
+        submit(initial);
+        let mut prefix = [0xaa; 8];
+        read(&mut prefix);
+        assert_eq!(prefix, source[..8]);
+        submit(&additional[..16]);
+        let mut output = vec![0; CAPACITY];
+        read(&mut output);
+        assert_eq!(output, source[16..CAPACITY + 16]);
+
+        // A single oversized submission replaces a preexisting frame, and only
+        // the source suffix survives. Total submitted counts the discarded bytes.
+        submit(&initial[..4]);
+        submit(&source);
+        read(&mut output);
+        assert_eq!(output, source[source.len() - CAPACITY..]);
+
+        let (mut queued, mut underruns, mut total) = (99, 99, 0);
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_status(session, &mut queued, &mut underruns, &mut total)
+            },
+            XENORA_OK
+        );
+        assert_eq!(
+            (queued, underruns, total),
+            (0, 0, (CAPACITY + 20 + source.len()) as u64)
+        );
+        assert_eq!(xenora_session_destroy(session), XENORA_OK);
     }
 
     #[test]

@@ -59,6 +59,7 @@ const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 /// Locking a range that overlaps an existing lock fails with this error.
 pub(crate) const ERROR_LOCK_VIOLATION: u32 = 33;
+pub(crate) const ERROR_NOT_LOCKED: u32 = 158;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INVALID_ADDRESS: u32 = 487;
 const THREAD_QUERY_RIGHTS: u32 = 0x0040 | 0x0800;

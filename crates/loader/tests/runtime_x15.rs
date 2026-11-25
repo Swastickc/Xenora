@@ -2671,7 +2671,7 @@ fn create_fixture_file(state: &Arc<ServicesState>, name: &str) -> u64 {
 #[test]
 fn guest_byte_range_locks_follow_windows_conflict_rules() {
     const ERROR_LOCK_VIOLATION: u64 = 33;
-    const ERROR_INVALID_PARAMETER: u64 = 87;
+    const ERROR_NOT_LOCKED: u64 = 158;
     const SHARED: u64 = 1; // LOCKFILE_FAIL_IMMEDIATELY
     const EXCLUSIVE: u64 = 3; // | LOCKFILE_EXCLUSIVE_LOCK
     let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
@@ -2692,7 +2692,7 @@ fn guest_byte_range_locks_follow_windows_conflict_rules() {
     assert_eq!(rax("LockFile", &[second, 10, 0, 5, 0]), 1);
     // Unlocking must name exactly a range the same handle locked.
     assert_eq!(rax("UnlockFile", &[first, 0, 0, 9, 0]), 0);
-    assert_eq!(last_error(), ERROR_INVALID_PARAMETER);
+    assert_eq!(last_error(), ERROR_NOT_LOCKED);
     assert_eq!(rax("UnlockFile", &[second, 0, 0, 10, 0]), 0);
     assert_eq!(rax("UnlockFile", &[first, 0, 0, 10, 0]), 1);
     assert_eq!(rax("LockFile", &[second, 0, 0, 10, 0]), 1);

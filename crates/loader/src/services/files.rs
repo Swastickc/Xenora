@@ -4,8 +4,8 @@
 
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
-    ERROR_NOACCESS, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32,
-    ServicesState,
+    ERROR_NOACCESS, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_LOCKED, ERROR_NOT_SUPPORTED, GuestObject,
+    KERNEL32, ServicesState,
 };
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -1131,7 +1131,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                         ranges.swap_remove(index);
                         Ok(1)
                     }
-                    None => lock_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
+                    None => lock_state.fail(cpu.gs_base, ERROR_NOT_LOCKED, 0),
                 }
             } else {
                 let end = offset.saturating_add(length);
@@ -1170,7 +1170,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                         ranges.swap_remove(index);
                         Ok(1)
                     }
-                    None => lock_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
+                    None => lock_state.fail(cpu.gs_base, ERROR_NOT_LOCKED, 0),
                 }
             } else {
                 let end = offset.saturating_add(length);

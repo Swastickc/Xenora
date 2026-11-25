@@ -199,7 +199,7 @@ struct AudioVfsFrame {
     }
 }
 
-private enum FixturePlaybackError: Error {
+private enum FixturePlaybackError: LocalizedError {
     case invalidPCM
     case noDefaultOutput(OSStatus)
     case deviceDiscovery(OSStatus)
@@ -210,6 +210,37 @@ private enum FixturePlaybackError: Error {
     case queueFailure(Int32)
     case queueShortfall(UInt64)
     case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPCM:
+            "The fixture audio sample is invalid."
+        case .noDefaultOutput(let status):
+            "No default audio output is available (status \(status))."
+        case .deviceDiscovery(let status):
+            "Could not list audio outputs (status \(status))."
+        case .unavailableOutput(let device):
+            "Audio output \(device) is unavailable."
+        case .outputUnitUnavailable:
+            "The audio engine has no output unit."
+        case .outputRouting(let status):
+            "Could not route audio to the output device (status \(status))."
+        case .unexpectedOutput(let device):
+            "The audio engine reported unexpected output \(device)."
+        case .queueFailure(let status):
+            "The fixture audio queue failed (status \(status))."
+        case .queueShortfall(let supplied):
+            "The fixture audio queue returned only \(supplied) bytes."
+        case .timedOut:
+            "Audio playback did not complete before the deadline."
+        }
+    }
+}
+
+private enum FixturePlaybackMode {
+    case sample
+    case preview
+    case stream
 }
 
 private struct FixturePlayback {
@@ -276,20 +307,22 @@ private func audioOutputDevices() throws -> [AudioDeviceID] {
 }
 
 private func playFixturePCM(
-    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, streamingFixture: Bool = false
+    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, mode: FixturePlaybackMode
 ) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
-    guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
+    guard pcm.count == AudioVfsFrame.expectedPCMBytes,
           let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
         throw FixturePlaybackError.invalidPCM
     }
     let sourceFrames = pcm.count / 2
-    let frames = sourceFrames * (streamingFixture ? 32 : 1)
-    let framesPerBuffer = streamingFixture ? 1024 : 128
+    // The single sample block is shorter than six milliseconds. Repeat it
+    // for a short preview at a fixed, low player gain.
+    let frames = sourceFrames * (mode == .sample ? 1 : 32)
+    let framesPerBuffer = mode == .sample ? 128 : 1024
     let bufferWindow = 3
     var streamSession: xenora_session = 0
     let producer = DispatchQueue(label: "xenora.fixture.pcm")
-    if streamingFixture {
+    if mode == .stream {
         let createStatus = xenora_session_create(XENORA_ABI_VERSION, &streamSession)
         guard createStatus == XENORA_OK else { throw FixturePlaybackError.queueFailure(createStatus) }
     }
@@ -319,6 +352,9 @@ private func playFixturePCM(
         guard status == noErr else { throw FixturePlaybackError.outputRouting(status) }
     }
     let player = AVAudioPlayerNode()
+    if mode == .preview {
+        player.volume = 0.15
+    }
     let played = DispatchSemaphore(value: 0)
     engine.attach(player)
     engine.connect(player, to: engine.mainMixerNode, format: format)
@@ -346,7 +382,7 @@ private func playFixturePCM(
         let firstByte = first * 2
         let byteCount = count * 2
         if session == 0 {
-            return Array(pcm[firstByte..<(firstByte + byteCount)])
+            return (0..<byteCount).map { pcm[(firstByte + $0) % pcm.count] }
         }
         let submitted = DispatchSemaphore(value: 0)
         producer.async {
@@ -827,7 +863,8 @@ if CommandLine.arguments.contains("--list-audio-outputs") {
 }
 
 let nativeAudioStreamSmoke = CommandLine.arguments.contains("--smoke-native-audio-stream")
-if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke {
+let nativeAudioPreviewSmoke = CommandLine.arguments.contains("--smoke-native-audio-preview")
+if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke || nativeAudioPreviewSmoke {
     var requestedOutput: AudioDeviceID?
     if let index = CommandLine.arguments.firstIndex(of: "--audio-output") {
         let values = CommandLine.arguments
@@ -844,11 +881,18 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
         exit(1)
     }
     do {
-        let played = try playFixturePCM(
-            pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
-        )
+        let mode: FixturePlaybackMode = if nativeAudioPreviewSmoke {
+            .preview
+        } else if nativeAudioStreamSmoke {
+            .stream
+        } else {
+            .sample
+        }
+        // Exercise the native preview schedule without emitting the fixture tone.
+        let source = nativeAudioPreviewSmoke ? [UInt8](repeating: 0, count: pcm.count) : pcm
+        let played = try playFixturePCM(source, requestedOutput: requestedOutput, mode: mode)
         print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) queueUnderruns=\(played.underruns) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
-        let expected = nativeAudioStreamSmoke ? (8192, 8, 5) : (256, 2, 0)
+        let expected = mode == .sample ? (256, 2, 0) : (8192, 8, 5)
         exit((played.frames, played.buffers, played.refills) == expected
              && played.underruns == 0 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {

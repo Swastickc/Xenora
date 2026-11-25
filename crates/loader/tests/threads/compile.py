@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Compile the guest thread programs with clang and list their code.
 
-  generate   write program.txt next to this file
-  --check    recompile in memory and fail if the committed listing differs
+  generate [program|fls]  write the selected listing (default: program)
+  --check [program|fls]   recompile and fail if the selected listing differs
 
-program.txt holds one line per item: `code <hex>`, `entry <name> <offset>` and
+Each listing holds one line per item: `code <hex>`, `entry <name> <offset>` and
 `import <name> <offset>` for each 32-bit RIP-relative reference to an import
 slot. Nothing is executed and no linker is needed: the test places the code and
 fills in the references. Only clang and the Python standard library are used.
@@ -17,17 +17,16 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE / "program.txt"
 FLAGS = ["-target", "x86_64-pc-windows-msvc", "-O1", "-ffreestanding", "-fno-builtin", "-nostdinc",
          "-fno-stack-protector", "-fno-asynchronous-unwind-tables", "-mno-implicit-float",
          "-fno-jump-tables", "-fno-optimize-sibling-calls", "-fno-ident", "-Wno-infinite-recursion"]
 REL32 = range(4, 10)  # IMAGE_REL_AMD64_REL32 to REL32_5
 
 
-def listing():
+def listing(source):
     with tempfile.TemporaryDirectory() as directory:
         obj = Path(directory, "program.obj")
-        subprocess.run(["clang", *FLAGS, "-c", HERE / "program.c", "-o", obj], check=True)
+        subprocess.run(["clang", *FLAGS, "-c", source, "-o", obj], check=True)
         data = obj.read_bytes()
     machine, sections, _, symbols_at, symbol_count, optional, _ = struct.unpack_from("<HHIIIHH", data)
     assert machine == 0x8664
@@ -77,13 +76,17 @@ def listing():
 
 
 def main(argv):
-    if len(argv) != 2 or argv[1] not in ("generate", "--check"):
-        sys.exit("usage: compile.py generate|--check")
-    text = listing()
+    if not 2 <= len(argv) <= 3 or argv[1] not in ("generate", "--check"):
+        sys.exit("usage: compile.py generate|--check [program|fls]")
+    fixture = argv[2] if len(argv) == 3 else "program"
+    if fixture not in ("program", "fls"):
+        sys.exit("usage: compile.py generate|--check [program|fls]")
+    output = HERE / f"{fixture}.txt"
+    text = listing(HERE / f"{fixture}.c")
     if argv[1] == "generate":
-        OUT.write_text(text)
-    elif OUT.read_text() != text:
-        sys.exit("program.txt differs from the compiler output")
+        output.write_text(text)
+    elif output.read_text() != text:
+        sys.exit(f"{output.name} differs from the compiler output")
     print(f"{text.count('entry ')} programs, {text.count('import ')} import references, {32 * text.count('code ')} bytes")
 
 

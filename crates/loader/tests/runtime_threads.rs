@@ -51,13 +51,18 @@ struct Program {
     imports: Vec<(&'static str, usize)>,
 }
 
-fn program() -> Program {
+fn program(main: &str) -> Program {
     let mut program = Program {
         code: Vec::new(),
         entries: BTreeMap::new(),
         imports: Vec::new(),
     };
-    for line in include_str!("threads/program.txt").lines() {
+    let listing = if main.starts_with("main_fls_") {
+        include_str!("threads/fls.txt")
+    } else {
+        include_str!("threads/program.txt")
+    };
+    for line in listing.lines() {
         let parts: Vec<&str> = line.split(' ').collect();
         match parts[0] {
             "entry" => {
@@ -76,7 +81,7 @@ fn program() -> Program {
 
 /// Build a PE image whose entry point is `call main; hlt`.
 fn image(main: &str) -> Vec<u8> {
-    let program = program();
+    let program = program(main);
     let mut pe = vec![0u8; IDATA_RAW + IDATA_LEN];
     fn put(pe: &mut [u8], at: usize, bytes: &[u8]) {
         pe[at..at + bytes.len()].copy_from_slice(bytes);
@@ -129,6 +134,10 @@ fn image(main: &str) -> Vec<u8> {
     let mut names: Vec<&str> = program.imports.iter().map(|import| import.0).collect();
     names.sort_unstable();
     names.dedup();
+    let implicit_fls_exit = main == "main_fls_return";
+    if implicit_fls_exit {
+        names.retain(|name| *name != "ExitThread");
+    }
     let mut next = IDATA_RVA + 20 * (names.len() as u32 + 1);
     let mut take = |len: usize| {
         let rva = next;
@@ -136,6 +145,11 @@ fn image(main: &str) -> Vec<u8> {
         rva
     };
     let mut slots = BTreeMap::new();
+    if implicit_fls_exit {
+        // Relocations in the unused explicit path still point to an IAT
+        // slot, but this image never imports or binds ExitThread.
+        slots.insert("ExitThread", take(8));
+    }
     for (index, name) in names.iter().enumerate() {
         let module: &[u8] = if *name == "_errno" {
             b"api-ms-win-crt-runtime-l1-1-0.dll"
@@ -852,6 +866,47 @@ fn threads_can_be_ended_in_every_state() {
             "quantum {quantum}"
         );
     }
+}
+
+#[test]
+fn normal_thread_exit_runs_fls_callbacks_before_join() {
+    let worker = u64::from(MAIN_ID + 4);
+    for quantum in QUANTA {
+        for (main, code) in [("main_fls_return", 0xCAFE), ("main_fls_explicit", 0xBEEF)] {
+            let run = run_with(main, quantum, BUDGET).halted();
+            assert_eq!(
+                run.outs(14),
+                [
+                    worker, 0, code, 0x12345, worker, 0x67890, worker, 2, 0, 0, 1, 1, 1, 2
+                ],
+                "{main}, quantum {quantum}"
+            );
+        }
+    }
+}
+
+#[test]
+fn terminating_a_thread_discards_fls_values_without_callbacks() {
+    let run = run("main_fls_terminate").halted();
+    assert_eq!(
+        run.outs(14),
+        [
+            u64::from(MAIN_ID + 4),
+            0,
+            0xDEAD,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            1,
+            0
+        ]
+    );
 }
 
 #[test]

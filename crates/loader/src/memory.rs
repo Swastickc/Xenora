@@ -452,8 +452,8 @@ impl GuestMemory {
     }
 
     /// The first region, in table order, that ends after `address`: where
-    /// every lookup starts (#102). It is the region a scan from the front
-    /// would find. The first [`FRONT_SCAN`] regions are checked in order, as
+    /// every data access and the resolver start (#102). It is the region a
+    /// scan from the front would find. The first [`FRONT_SCAN`] regions are checked in order, as
     /// that scan would; past them, the region is located by binary search.
     ///
     /// The table is sorted by base, and no region's base lies strictly
@@ -645,9 +645,15 @@ impl GuestMemory {
     /// Read an instruction byte from guest memory, verifying execute permission.
     pub fn fetch_instruction_byte(&self, address: u64) -> Result<u8, MemoryError> {
         address.checked_add(1).ok_or(MemoryError::Overflow)?;
-        let (_, region) = self
-            .first_ending_after(address)
-            .filter(|(_, region)| region.base <= address)
+        // Instruction fetch keeps the scan from the front (#102). Every form
+        // of the search tried here made the translator's decoding 7-10 %
+        // slower in `dbt_bench`, where the table has three regions; a
+        // program's code is usually in its image, near the front.
+        let region = self
+            .regions
+            .iter()
+            .find(|region| region.base + region.data.len() as u64 > address)
+            .filter(|region| region.base <= address)
             .ok_or(MemoryError::UnmappedAddress(address))?;
         if !region.permissions.execute {
             return Err(MemoryError::PermissionViolation {

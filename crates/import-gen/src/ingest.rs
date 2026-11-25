@@ -143,6 +143,7 @@ fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
     let type_str = type_str.trim_end();
     if type_str.is_empty()
         || !name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_')
+        || is_c_qualifier(name)
         || matches!(
             name,
             "void"
@@ -155,9 +156,6 @@ fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
                 | "float"
                 | "double"
                 | "_Bool"
-                | "const"
-                | "volatile"
-                | "restrict"
         )
     {
         return None;
@@ -165,33 +163,44 @@ fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
     Some((type_str, name))
 }
 
+fn is_c_qualifier(word: &str) -> bool {
+    matches!(
+        word,
+        "const" | "volatile" | "restrict" | "__restrict" | "__restrict__"
+    )
+}
+
 fn parse_c_type(s: &str) -> Option<AbiType> {
-    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let s = normalized.as_str();
-    if s == "void" {
-        Some(AbiType::Void)
-    } else if s == "int" || s == "int32_t" {
-        Some(AbiType::I32)
-    } else if s == "unsigned int" || s == "uint32_t" || s == "unsigned" {
-        Some(AbiType::U32)
-    } else if s == "long long" || s == "int64_t" {
-        Some(AbiType::I64)
-    } else if s == "size_t" || s == "unsigned long" || s == "unsigned long long" || s == "uint64_t"
-    {
-        Some(AbiType::U64)
-    } else if s == "float" {
-        Some(AbiType::F32)
-    } else if s == "double" {
-        Some(AbiType::F64)
-    } else if s.contains("const char") || s.contains("char *") {
-        Some(AbiType::StringAnsi)
-    } else if s.contains('*') {
-        Some(AbiType::Pointer {
-            is_const: s.contains("const"),
+    if let Some((pointee, _)) = s.rsplit_once('*') {
+        // The catalog models a single pointer to plain char as an ANSI string.
+        // Additional indirection has to keep the generic pointer category.
+        if pointee
+            .split_whitespace()
+            .filter(|word| !is_c_qualifier(word))
+            .eq(["char"])
+        {
+            return Some(AbiType::StringAnsi);
+        }
+
+        // In `int *const *`, the immediate pointee is the const-qualified
+        // inner pointer. In `const int **`, that inner pointer is mutable.
+        let immediate = pointee.rsplit('*').next().unwrap_or(pointee);
+        return Some(AbiType::Pointer {
+            is_const: immediate.split_whitespace().any(|word| word == "const"),
             pointee: "void".into(),
-        })
-    } else {
-        None
+        });
+    }
+
+    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match normalized.as_str() {
+        "void" => Some(AbiType::Void),
+        "int" | "int32_t" => Some(AbiType::I32),
+        "unsigned int" | "uint32_t" | "unsigned" => Some(AbiType::U32),
+        "long long" | "int64_t" => Some(AbiType::I64),
+        "size_t" | "unsigned long" | "unsigned long long" | "uint64_t" => Some(AbiType::U64),
+        "float" => Some(AbiType::F32),
+        "double" => Some(AbiType::F64),
+        _ => None,
     }
 }
 
@@ -254,6 +263,67 @@ mod tests {
             .map(|param| (param.name.as_str(), param.abi_type.clone()))
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn public_ingestion_preserves_character_and_indirect_pointer_types() {
+        let declarations = "
+            typedef int constant_t;
+            struct char_record;
+            char*text(const char*input, char const * suffix);
+            const char **strings(char **mutable_table, const char **table);
+            void pointers(const int *value, int *const top, int *const *slot, const int **table, int * const, int * __restrict);
+            void opaque(constant_t *value, struct char_record *record);
+        ";
+        let header = std::env::temp_dir().join(format!(
+            "xenora-import-gen-pointer-types-{}.h",
+            std::process::id()
+        ));
+        std::fs::write(&header, declarations).unwrap();
+        let mut catalog = MetadataCatalog::new();
+        let ingested = ingest_header_file(&mut catalog, "example.dll", &header);
+        std::fs::remove_file(header).unwrap();
+        assert_eq!(ingested.unwrap(), 4);
+
+        let generic_pointer = |is_const| AbiType::Pointer {
+            is_const,
+            pointee: "void".into(),
+        };
+        let return_types = [
+            ("text", AbiType::StringAnsi),
+            ("strings", generic_pointer(false)),
+            ("pointers", AbiType::Void),
+            ("opaque", AbiType::Void),
+        ];
+        let param_types = [
+            vec![AbiType::StringAnsi, AbiType::StringAnsi],
+            vec![generic_pointer(false), generic_pointer(false)],
+            vec![
+                generic_pointer(true),
+                generic_pointer(false),
+                generic_pointer(true),
+                generic_pointer(false),
+                generic_pointer(false),
+                generic_pointer(false),
+            ],
+            vec![generic_pointer(false), generic_pointer(false)],
+        ];
+        for ((symbol, ret), params) in return_types.into_iter().zip(param_types) {
+            let signature = catalog.lookup("example.dll", symbol).unwrap();
+            assert_eq!(signature.return_type, ret, "{symbol}");
+            assert_eq!(
+                signature
+                    .params
+                    .iter()
+                    .map(|param| param.abi_type.clone())
+                    .collect::<Vec<_>>(),
+                params,
+                "{symbol}"
+            );
+        }
+        let pointers = catalog.lookup("example.dll", "pointers").unwrap();
+        assert_eq!(pointers.params[4].name, "arg4");
+        assert_eq!(pointers.params[5].name, "arg5");
     }
 
     #[test]

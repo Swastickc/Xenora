@@ -910,6 +910,42 @@ fn terminating_a_thread_discards_fls_values_without_callbacks() {
 }
 
 #[test]
+fn an_exit_from_fls_cleanup_ends_the_worker_without_restarting_cleanup() {
+    let worker = u64::from(MAIN_ID + 4);
+    let run = run("main_fls_reenter").halted();
+    assert_eq!(
+        run.outs(16),
+        [
+            worker, 0, 0xF15, 0x12345, worker, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0
+        ]
+    );
+}
+
+#[test]
+fn termination_and_teardown_cancel_suspended_fls_cleanup() {
+    let worker = u64::from(MAIN_ID + 4);
+    for quantum in [1, DEFAULT_QUANTUM] {
+        let run = run_with("main_fls_cancel", quantum, BUDGET).halted();
+        assert_eq!(
+            run.outs(17),
+            [
+                worker, 0, 0xDEAD, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0x12345, 259, 258
+            ]
+        );
+        assert!(run.memory.read_u64(FIRST_SLOT + 0x1000).is_err());
+
+        let run = run_with("main_fls_teardown", quantum, BUDGET).halted();
+        assert_eq!(
+            run.outs(17),
+            [
+                worker, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12345, 259, 258
+            ]
+        );
+        assert!(run.memory.read_u64(FIRST_SLOT + 0x1000).is_err());
+    }
+}
+
+#[test]
 fn every_small_budget_stops_cleanly() {
     for main in [
         "main_limit",

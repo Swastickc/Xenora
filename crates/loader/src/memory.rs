@@ -1507,3 +1507,145 @@ mod mapping_search_contract_tests {
         }
     }
 }
+
+/// An opt-in timing run for the region lookup (#102). It times data reads,
+/// data writes and instruction fetches in tables of 1 to 4096 heap blocks,
+/// with code mapped below and above the heap. Run the same source on the
+/// baseline and the candidate, in a release build, on an otherwise idle host:
+///
+/// ```text
+/// cargo test --release -p xenora-loader --lib region_lookup_timing -- --ignored --nocapture
+/// ```
+///
+/// Every sample is checked: each block holds its own index, so a lookup that
+/// finds the wrong block, or a fetch from the wrong code, fails the run.
+#[cfg(test)]
+mod region_lookup_timing {
+    use super::{MemoryPermissions as P, *};
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    /// Below the heap, where a program's image is.
+    const LOW_CODE: u64 = 0x1_4000_0000;
+    /// Above every heap block: the region a front-to-back scan reaches last.
+    const HIGH_CODE: u64 = 0x7000_0000_0000;
+
+    fn setting(name: &str, default: usize, maximum: usize) -> usize {
+        let value = std::env::var(name).map_or(default, |s| s.parse().expect(name));
+        assert!((1..=maximum).contains(&value), "invalid {name}");
+        value
+    }
+
+    fn quantile(sorted: &[f64], fraction: f64) -> f64 {
+        let rank = (sorted.len() - 1) as f64 * fraction;
+        let lo = rank.floor() as usize;
+        sorted[lo] + (sorted[rank.ceil() as usize] - sorted[lo]) * rank.fract()
+    }
+
+    /// The order in which the blocks are visited: xorshift64 from a fixed
+    /// seed, so every run and both builds visit the same blocks.
+    fn order(blocks: usize, accesses: usize) -> Vec<usize> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        (0..accesses)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % blocks as u64) as usize
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "manual region lookup timing run; release build on an otherwise idle host"]
+    fn region_lookup_timing() {
+        let samples = setting("XENORA_LOOKUP_SAMPLES", 31, 1001);
+        let accesses = setting("XENORA_LOOKUP_ACCESSES", 65_536, 1 << 22);
+        let warmups = 3;
+        for blocks in [1usize, 16, 256, 4096] {
+            let mut memory = GuestMemory::new();
+            memory
+                .map_region_with_data(LOW_CODE, 4096, P::READ_EXECUTE, &[0x90; 4096])
+                .unwrap();
+            let bases: Vec<u64> = (0..blocks)
+                .map(|_| memory.map_heap_allocation(PROCESS_HEAP, 64).unwrap())
+                .collect();
+            assert!(bases.iter().all(|&base| base < HIGH_CODE));
+            memory
+                .map_region_with_data(HIGH_CODE, 4096, P::READ_EXECUTE, &[0xc3; 4096])
+                .unwrap();
+            for (index, &base) in bases.iter().enumerate() {
+                memory.write_u32(base, index as u32).unwrap();
+            }
+            let order = order(blocks, accesses);
+            let expected_sum: u64 = order.iter().map(|&index| index as u64).sum();
+            for label in ["read", "write", "fetch-low", "fetch-high"] {
+                let mut timings = Vec::with_capacity(samples);
+                for sample in 0..samples + warmups {
+                    let started = Instant::now();
+                    let checked = match label {
+                        "read" => {
+                            let mut sum = 0u64;
+                            for &index in &order {
+                                sum += u64::from(memory.read_u32(black_box(bases[index])).unwrap());
+                            }
+                            sum
+                        }
+                        "write" => {
+                            for (step, &index) in order.iter().enumerate() {
+                                memory
+                                    .write_u32(black_box(bases[index] + 4), step as u32)
+                                    .unwrap();
+                            }
+                            0
+                        }
+                        _ => {
+                            let code = if label == "fetch-low" {
+                                LOW_CODE
+                            } else {
+                                HIGH_CODE
+                            };
+                            let mut sum = 0u64;
+                            for step in 0..accesses as u64 {
+                                let address = black_box(code + (step & 0xfff));
+                                sum += u64::from(memory.fetch_instruction_byte(address).unwrap());
+                            }
+                            sum
+                        }
+                    };
+                    let elapsed = started.elapsed();
+                    let expected = match label {
+                        "read" => expected_sum,
+                        "write" => 0,
+                        "fetch-low" => 0x90 * accesses as u64,
+                        _ => 0xc3 * accesses as u64,
+                    };
+                    assert_eq!(black_box(checked), expected, "{label} blocks={blocks}");
+                    if label == "write" {
+                        // The last write to each block holds the step it was made at.
+                        let mut last = vec![None; blocks];
+                        for (step, &index) in order.iter().enumerate() {
+                            last[index] = Some(step as u32);
+                        }
+                        for (index, step) in last.into_iter().enumerate() {
+                            if let Some(step) = step {
+                                assert_eq!(memory.read_u32(bases[index] + 4), Ok(step));
+                            }
+                        }
+                    }
+                    if sample >= warmups {
+                        timings.push(elapsed.as_nanos() as f64 / accesses as f64);
+                    }
+                }
+                timings.sort_by(f64::total_cmp);
+                println!(
+                    "region-lookup op={label} blocks={blocks} regions={} accesses={accesses} samples={samples} warmups={warmups} median_ns_per_access={:.3} p10={:.3} p90={:.3}",
+                    blocks + 2,
+                    quantile(&timings, 0.5),
+                    quantile(&timings, 0.1),
+                    quantile(&timings, 0.9)
+                );
+            }
+        }
+    }
+}

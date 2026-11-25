@@ -111,6 +111,9 @@ struct TexturedFrame {
 
 /// The frame and audio status produced by running the audio/VFS fixture (Gate 6, #284).
 struct AudioVfsFrame {
+    static let expectedSamples: UInt32 = 256
+    static let expectedPCMBytes = Int(expectedSamples) * 2
+
     let status: Int32
     let width: Int
     let height: Int
@@ -118,12 +121,20 @@ struct AudioVfsFrame {
     let totalAudioBytes: UInt64
     let rgba: [UInt8]
     let pcm: [UInt8]
+    let audioCaptureError: String?
 
-    static func run(captureAudio: Bool = false) -> AudioVfsFrame {
+    var previewPCM: [UInt8]? {
+        guard status == XENORA_OK, audioCaptureError == nil, pcm.count == Self.expectedPCMBytes else { return nil }
+        return pcm
+    }
+
+    static func run() -> AudioVfsFrame {
         var session: xenora_session = 0
         var status = xenora_session_create(XENORA_ABI_VERSION, &session)
         guard status == XENORA_OK else {
-            return AudioVfsFrame(status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0, rgba: [], pcm: [])
+            return AudioVfsFrame(
+                status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0,
+                rgba: [], pcm: [], audioCaptureError: nil)
         }
         defer { _ = xenora_session_destroy(session) }
         var rgba = [UInt8](repeating: 0, count: 16)
@@ -137,16 +148,28 @@ struct AudioVfsFrame {
         var queued: UInt32 = 0
         var underruns: UInt32 = 0
         var total: UInt64 = 0
-        _ = xenora_session_audio_status(session, &queued, &underruns, &total)
         var pcm: [UInt8] = []
-        if captureAudio && status == XENORA_OK && queued > 0 && queued <= 256 * 1024 {
-            pcm = [UInt8](repeating: 0, count: Int(queued))
-            var read: UInt64 = 0
-            let readStatus = pcm.withUnsafeMutableBufferPointer { buffer in
-                xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
-            }
-            if readStatus != XENORA_OK || read != UInt64(queued) {
-                pcm.removeAll()
+        var audioCaptureError: String?
+        if status == XENORA_OK {
+            let audioStatus = xenora_session_audio_status(session, &queued, &underruns, &total)
+            if audioStatus != XENORA_OK {
+                audioCaptureError = "Could not read the fixture audio status (status \(audioStatus))."
+            } else if samples != expectedSamples || queued != UInt32(expectedPCMBytes)
+                        || total != UInt64(expectedPCMBytes) || underruns != 0 {
+                audioCaptureError = "The fixture returned an unexpected audio length or an underrun."
+            } else {
+                var bytes = [UInt8](repeating: 0, count: expectedPCMBytes)
+                var read: UInt64 = 0
+                let readStatus = bytes.withUnsafeMutableBufferPointer { buffer in
+                    xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
+                }
+                if readStatus != XENORA_OK {
+                    audioCaptureError = "Could not capture fixture audio (status \(readStatus))."
+                } else if read != UInt64(expectedPCMBytes) {
+                    audioCaptureError = "The fixture audio sample was incomplete."
+                } else {
+                    pcm = bytes
+                }
             }
         }
         return AudioVfsFrame(
@@ -156,7 +179,8 @@ struct AudioVfsFrame {
             samples: samples,
             totalAudioBytes: total,
             rgba: status == XENORA_OK ? rgba : [],
-            pcm: pcm
+            pcm: pcm,
+            audioCaptureError: audioCaptureError
         )
     }
 
@@ -813,14 +837,15 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
         }
         requestedOutput = device
     }
-    let frame = AudioVfsFrame.run(captureAudio: true)
-    guard frame.status == XENORA_OK, frame.samples == 256, frame.pcm.count == 512 else {
+    let frame = AudioVfsFrame.run()
+    guard let pcm = frame.previewPCM else {
+        print(frame.audioCaptureError ?? "Audio/VFS fixture failed (status \(frame.status)).")
         print("smoke-native-audio: fixture PCM unavailable")
         exit(1)
     }
     do {
         let played = try playFixturePCM(
-            frame.pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
+            pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
         )
         print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) queueUnderruns=\(played.underruns) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
         let expected = nativeAudioStreamSmoke ? (8192, 8, 5) : (256, 2, 0)
@@ -836,7 +861,10 @@ if CommandLine.arguments.contains("--smoke-audio-vfs") {
     let frame = AudioVfsFrame.run()
     print("smoke-audio-vfs: \(frame.summary)")
     let expected: [UInt8] = [255, 128, 0, 255, 128, 0, 255, 255, 0, 255, 128, 255, 255, 0, 128, 255]
-    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256 && frame.rgba == expected && frame.totalAudioBytes == 512 ? 0 : 1)
+    let pcmPrefix: [UInt8] = [0x00, 0x00, 0xaf, 0x03, 0x5b, 0x07, 0x00, 0x0b]
+    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256
+         && frame.rgba == expected && frame.totalAudioBytes == 512
+         && frame.previewPCM?.starts(with: pcmPrefix) == true ? 0 : 1)
 }
 
 // `--smoke-interactive` runs 60 frames with queued inputs on the Metal device and exits.

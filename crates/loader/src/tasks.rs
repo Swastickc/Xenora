@@ -64,6 +64,12 @@ struct Pending<T, E> {
     cancellation: Option<CancellationToken>,
 }
 
+impl<T, E> Pending<T, E> {
+    fn is_expired(&self, now: Duration) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
+}
+
 struct Completion<T, E> {
     id: TaskId,
     result: TaskResult<T, E>,
@@ -183,14 +189,14 @@ impl<T, E> TaskQueue<T, E> {
 
     /// Run one queued operation. An expired operation completes without running.
     pub fn dispatch_work(&mut self, now: Duration) -> bool {
-        self.advance_time(now);
+        self.observe_worker_deadline(now);
         if self.worker.is_some() {
             return false;
         }
         let Some(task) = self.pending.pop_front() else {
             return false;
         };
-        let result = if task.deadline.is_some_and(|deadline| now >= deadline) {
+        let result = if task.is_expired(now) {
             TaskResult::TimedOut
         } else {
             TaskResult::Finished((task.work)())
@@ -213,9 +219,28 @@ impl<T, E> TaskQueue<T, E> {
         true
     }
 
-    /// Record expiry of the active worker and request cooperative exit when available.
-    /// A completion already available when the clock is sampled keeps its result.
+    /// Record deadlines at `now` without dispatching work or invoking callbacks.
+    /// Expired queued operations enter the completion port in submission order.
+    /// Results already available when the clock is sampled are preserved.
+    /// Active work keeps its slot until exit, with a cooperative exit request when supported.
     pub fn advance_time(&mut self, now: Duration) {
+        self.observe_worker_deadline(now);
+        for _ in 0..self.pending.len() {
+            let task = self.pending.pop_front().expect("unexamined pending task");
+            if task.is_expired(now) {
+                self.completions.push_back(Completion {
+                    id: task.id,
+                    result: TaskResult::TimedOut,
+                    callback: task.callback,
+                });
+            } else {
+                self.pending.push_back(task);
+            }
+        }
+    }
+
+    fn observe_worker_deadline(&mut self, now: Duration) {
+        // Work already finished when sampled keeps the outcome collected here.
         self.collect_worker();
         if let Some(worker) = &mut self.worker
             && worker.deadline.is_some_and(|deadline| now >= deadline)
@@ -260,14 +285,14 @@ impl<T, E> TaskQueue<T, E> {
 impl<T: Send + 'static, E: Send + 'static> TaskQueue<T, E> {
     /// Start one background operation. At most one worker runs per queue.
     pub fn dispatch_background(&mut self, now: Duration) -> std::io::Result<bool> {
-        self.advance_time(now);
+        self.observe_worker_deadline(now);
         if self.worker.is_some() {
             return Ok(false);
         }
         let Some(task) = self.pending.front() else {
             return Ok(false);
         };
-        if task.deadline.is_some_and(|deadline| now >= deadline) {
+        if task.is_expired(now) {
             return Ok(self.dispatch_work(now));
         }
         let (send, receive) = std::sync::mpsc::channel::<Work<T, E>>();
@@ -436,6 +461,121 @@ fn sampled_deadline_applies_to_a_plain_worker_until_it_exits() {
     assert_eq!(results.try_recv().unwrap(), (id, TaskResult::TimedOut));
     assert!(!queue.dispatch_completion());
     assert!(queue.submit(None, || Ok(0), |_, _| {}).is_ok());
+}
+
+#[cfg(test)]
+#[test]
+fn clock_sample_completes_expired_pending_work_while_the_worker_is_busy() {
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    let mut queue = TaskQueue::<u32, u32>::new(5);
+    let (release, gate) = channel();
+    let (completed, results) = channel();
+    let callback = || {
+        let completed = completed.clone();
+        move |id, result| completed.send((id, result)).unwrap()
+    };
+    let worker = queue
+        .submit(
+            None,
+            move || {
+                gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(11)
+            },
+            callback(),
+        )
+        .unwrap();
+    assert!(queue.dispatch_background(Duration::ZERO).unwrap());
+    let deadline = Duration::from_millis(10);
+    let first = queue.submit(None, || Ok(22), callback()).unwrap();
+    let expired_first = queue
+        .submit(Some(deadline), || panic!("expired work ran"), callback())
+        .unwrap();
+    let second = queue
+        .submit(
+            Some(deadline + Duration::from_millis(1)),
+            || Ok(33),
+            callback(),
+        )
+        .unwrap();
+    let expired_second = queue
+        .submit(
+            Some(deadline - Duration::from_millis(1)),
+            || panic!("expired work ran"),
+            callback(),
+        )
+        .unwrap();
+
+    queue.advance_time(deadline - Duration::from_millis(2));
+    assert!(!queue.dispatch_completion());
+    queue.advance_time(deadline);
+    queue.advance_time(deadline);
+    assert_eq!(
+        queue.submit(None, || Ok(44), callback()),
+        Err(SubmitError::Full)
+    );
+    assert!(!queue.cancel(expired_first));
+    for expired in [expired_first, expired_second] {
+        assert!(queue.dispatch_completion());
+        assert_eq!(results.try_recv().unwrap(), (expired, TaskResult::TimedOut));
+    }
+    assert!(!queue.dispatch_completion());
+    assert!(!queue.dispatch_work(deadline));
+
+    release.send(()).unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while !queue.dispatch_completion() {
+        assert!(Instant::now() < until, "worker did not complete");
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        results.try_recv().unwrap(),
+        (worker, TaskResult::Finished(Ok(11)))
+    );
+    for (id, value) in [(first, 22), (second, 33)] {
+        assert!(queue.dispatch_work(deadline));
+        assert!(queue.dispatch_completion());
+        assert_eq!(
+            results.try_recv().unwrap(),
+            (id, TaskResult::Finished(Ok(value)))
+        );
+    }
+    assert!(!queue.dispatch_work(deadline));
+    assert!(!queue.dispatch_completion());
+}
+
+#[cfg(test)]
+#[test]
+fn either_work_port_retires_only_one_expired_task_per_dispatch() {
+    use std::sync::mpsc::channel;
+
+    let deadline = Duration::from_millis(5);
+    for background in [false, true] {
+        let mut queue = TaskQueue::<u32, u32>::new(2);
+        let (completed, results) = channel();
+        let ids: [_; 2] = std::array::from_fn(|_| {
+            let completed = completed.clone();
+            queue
+                .submit(
+                    Some(deadline),
+                    || panic!("expired work ran"),
+                    move |id, result| completed.send((id, result)).unwrap(),
+                )
+                .unwrap()
+        });
+        for id in ids {
+            let dispatched = if background {
+                queue.dispatch_background(deadline).unwrap()
+            } else {
+                queue.dispatch_work(deadline)
+            };
+            assert!(dispatched);
+            assert!(queue.dispatch_completion());
+            assert_eq!(results.try_recv().unwrap(), (id, TaskResult::TimedOut));
+            assert!(!queue.dispatch_completion());
+        }
+    }
 }
 
 #[cfg(test)]

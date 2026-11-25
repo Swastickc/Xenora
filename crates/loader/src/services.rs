@@ -1467,6 +1467,13 @@ pub(crate) mod handlers {
         Ok(())
     }
 
+    /// The CRT process-id query reads the same identity as the Win32 one:
+    /// xenora runs exactly one guest process per invocation, so the id is
+    /// stable for the process lifetime.
+    pub fn crt_getpid(context: &mut ServiceContext<'_>) -> Outcome<i32> {
+        Ok(context.state.process_id as i32)
+    }
+
     pub fn set_new_mode(context: &mut ServiceContext<'_>, mode: i32) -> Outcome<i32> {
         let previous = context.state.crt_startup().set_new_mode(mode);
         match previous {

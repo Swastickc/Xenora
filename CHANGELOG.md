@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Byte-range file locking (LockFile and the Ex forms) with Windows conflict semantics, console queries that answer the honest truth of pipe-backed handles, GetFileAttributesEx sizes and the CRT process-id query.
 - Kernel32 file and heap queries real programs hit: GetFileSize, AreFileApisANSI with faithful mode tracking, FlushFileBuffers and FlushViewOfFile as the honest no-op of memory-backed storage, GetDiskFreeSpace of the confined volume, HeapCompact and HeapValidate.
 - IsDebuggerPresent answers false and OutputDebugString drops its output, the documented behavior of a machine with no debugger attached.
 - Paging-file-backed memory mappings (`CreateFileMappingA/W`, `MapViewOfFile`, `UnmapViewOfFile`) with zero-filled views tracked in the central handle table, and `CreateProcessA/W` failing honestly with ERROR_NOT_SUPPORTED since the guest is the only process. Verified through the unit tests of `runtime_file_mapping.rs`.

@@ -1037,3 +1037,11 @@ service kernel32.dll SetUnhandledExceptionFilter(filter: ptr) -> ptr
     fails never
     ref errhandlingapi.h SetUnhandledExceptionFilter
     test crt_startup_handlers_return_the_previous_handler
+
+service ucrtbase.dll _getpid() -> i32
+    handler crt_getpid
+    status implemented
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails never
+    ref process.h _getpid
+    test crt_getpid_matches_the_process_identity

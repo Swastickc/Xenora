@@ -135,3 +135,4 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!__p__commode` | `() -> ptr` | partial | stops the guest when the variable cannot be allocated |
 | `ucrtbase.dll!signal` | `(signal: i32, handler: ptr) -> ptr` | partial | SIG_ERR with errno EINVAL for a signal the documentation does not list |
 | `kernel32.dll!SetUnhandledExceptionFilter` | `(filter: ptr) -> ptr` | partial | never |
+| `ucrtbase.dll!_getpid` | `() -> i32` | implemented | never |

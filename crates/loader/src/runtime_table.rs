@@ -1296,6 +1296,17 @@ pub static SERVICES: [ServiceMetadata; 117] = [
         reference: "errhandlingapi.h SetUnhandledExceptionFilter",
         tests: &["crt_startup_handlers_return_the_previous_handler"],
     },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_getpid",
+        parameters: &[],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-runtime-l1-1-0.dll"],
+        failure: "never",
+        reference: "process.h _getpid",
+        tests: &["crt_getpid_matches_the_process_identity"],
+    },
 ];
 
 /// Register every generated service and its API-set aliases.
@@ -2290,6 +2301,13 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.u64(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::set_unhandled_exception_filter(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_getpid", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let _ = args;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::crt_getpid(&mut context)?;
         Ok(result.place(cpu))
     });
     for service in &SERVICES {

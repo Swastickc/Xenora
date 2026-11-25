@@ -1172,13 +1172,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     // is attached, so control events never occur and the handler never runs,
     // which matches what a detached process observes.
     let console_query = Arc::clone(state);
-    registry.register(KERNEL32, "GetConsoleScreenBufferInfo", move |args, cpu, _memory| {
-        console_query.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0)
-    });
+    registry.register(
+        KERNEL32,
+        "GetConsoleScreenBufferInfo",
+        move |args, cpu, _memory| console_query.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+    );
     let console_attr = Arc::clone(state);
-    registry.register(KERNEL32, "SetConsoleTextAttribute", move |args, cpu, _memory| {
-        console_attr.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0)
-    });
+    registry.register(
+        KERNEL32,
+        "SetConsoleTextAttribute",
+        move |args, cpu, _memory| console_attr.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+    );
     registry.register(KERNEL32, "SetConsoleCtrlHandler", move |_, _, _| Ok(1));
 
     // LockFileEx routes through an OVERLAPPED carrying the offset in its

@@ -361,99 +361,81 @@ fn find_first(
     Ok(handle)
 }
 
-#[allow(clippy::too_many_lines)]
-fn create_file(
-    state: &ServicesState,
-    args: &crate::imports::Win64Args,
-    cpu: &mut crate::cpu::CpuState,
-    memory: &mut GuestMemory,
-    path: Option<String>,
-) -> Result<u64, ExitReason> {
-    let access = args.rdx as u32;
-    let share = args.r8 as u32;
-    let disposition = args.get(4, memory).map_err(ExitReason::MemoryFault)? as u32;
-    let flags = args.get(5, memory).map_err(ExitReason::MemoryFault)? as u32;
-    let template = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
-    if args.r9 != 0
-        || template != 0
-        || !matches!(flags, 0 | 0x80)
-        || access & !(READ | WRITE) != 0
-        || share & !3 != 0
-    {
-        return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, INVALID_HANDLE);
-    }
-    if !(1..=5).contains(&disposition) {
-        return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, INVALID_HANDLE);
-    }
-    if matches!(disposition, 2 | 5) && access & WRITE == 0 {
-        return state.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
-    }
-    let Some(path) = path else {
-        return state.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
-    };
-    let mut objects = state.objects.lock().expect("guest object state");
-    let parent = parent(&path);
-    if !parent.is_empty() && !objects.directories.contains(parent) {
-        return state.fail(cpu.gs_base, PATH_NOT_FOUND, INVALID_HANDLE);
-    }
-    if objects.directories.contains(&path) {
-        return state.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
-    }
-    let exists = objects.files.contains_key(&path);
-    if exists && disposition == 1 {
-        return state.fail(cpu.gs_base, FILE_EXISTS, INVALID_HANDLE);
-    }
-    if !exists && matches!(disposition, 3 | 5) {
-        return state.fail(cpu.gs_base, FILE_NOT_FOUND, INVALID_HANDLE);
-    }
-    for object in objects.handles.values() {
-        if let GuestObject::File(file) = object
-            && file.path == path
-            && (share_mask(access) & !file.share != 0 || share_mask(file.open_access) & !share != 0)
-        {
-            return state.fail(cpu.gs_base, SHARING_VIOLATION, INVALID_HANDLE);
-        }
-    }
-    let Some(handle) = objects.next_handle() else {
-        return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
-    };
-    if !exists {
-        if objects.files.len() >= MAX_FILES {
-            return state.fail(cpu.gs_base, DISK_FULL, INVALID_HANDLE);
-        }
-        objects.files.insert(path.clone(), Vec::new());
-    } else if matches!(disposition, 2 | 5) {
-        *objects.files.get_mut(&path).expect("existing file") = Vec::new();
-    }
-    if matches!(disposition, 2 | 4) {
-        state.fail(cpu.gs_base, if exists { ALREADY_EXISTS } else { 0 }, 0)?;
-    }
-    objects.insert_handle(
-        handle,
-        GuestObject::File(OpenFile {
-            path,
-            position: Arc::new(AtomicU64::new(0)),
-            open_access: access,
-            access,
-            share,
-        }),
-    );
-    Ok(handle)
-}
-
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
-    for (symbol, narrow) in [("CreateFileA", true), ("CreateFileW", false)] {
-        let open = Arc::clone(state);
-        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
-            let path = if narrow {
-                guest_path_a(memory, args.rcx)
-            } else {
-                guest_path(memory, args.rcx)
-            };
-            let path = path.map_err(ExitReason::MemoryFault)?;
-            create_file(&open, args, cpu, memory, path)
-        });
-    }
+    let open = Arc::clone(state);
+    registry.register(KERNEL32, "CreateFileW", move |args, cpu, memory| {
+        let access = args.rdx as u32;
+        let share = args.r8 as u32;
+        let disposition = args.get(4, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let flags = args.get(5, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let template = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
+        if args.r9 != 0
+            || template != 0
+            || !matches!(flags, 0 | 0x80)
+            || access & !(READ | WRITE) != 0
+            || share & !3 != 0
+        {
+            return open.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, INVALID_HANDLE);
+        }
+        if !(1..=5).contains(&disposition) {
+            return open.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, INVALID_HANDLE);
+        }
+        if matches!(disposition, 2 | 5) && access & WRITE == 0 {
+            return open.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
+        }
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return open.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
+        };
+        let mut objects = open.objects.lock().expect("guest object state");
+        let parent = parent(&path);
+        if !parent.is_empty() && !objects.directories.contains(parent) {
+            return open.fail(cpu.gs_base, PATH_NOT_FOUND, INVALID_HANDLE);
+        }
+        if objects.directories.contains(&path) {
+            return open.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
+        }
+        let exists = objects.files.contains_key(&path);
+        if exists && disposition == 1 {
+            return open.fail(cpu.gs_base, FILE_EXISTS, INVALID_HANDLE);
+        }
+        if !exists && matches!(disposition, 3 | 5) {
+            return open.fail(cpu.gs_base, FILE_NOT_FOUND, INVALID_HANDLE);
+        }
+        for object in objects.handles.values() {
+            if let GuestObject::File(file) = object
+                && file.path == path
+                && (share_mask(access) & !file.share != 0
+                    || share_mask(file.open_access) & !share != 0)
+            {
+                return open.fail(cpu.gs_base, SHARING_VIOLATION, INVALID_HANDLE);
+            }
+        }
+        let Some(handle) = objects.next_handle() else {
+            return open.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+        };
+        if !exists {
+            if objects.files.len() >= MAX_FILES {
+                return open.fail(cpu.gs_base, DISK_FULL, INVALID_HANDLE);
+            }
+            objects.files.insert(path.clone(), Vec::new());
+        } else if matches!(disposition, 2 | 5) {
+            *objects.files.get_mut(&path).expect("existing file") = Vec::new();
+        }
+        if matches!(disposition, 2 | 4) {
+            open.fail(cpu.gs_base, if exists { ALREADY_EXISTS } else { 0 }, 0)?;
+        }
+        objects.insert_handle(
+            handle,
+            GuestObject::File(OpenFile {
+                path,
+                position: Arc::new(AtomicU64::new(0)),
+                open_access: access,
+                access,
+                share,
+            }),
+        );
+        Ok(handle)
+    });
 
     let create = Arc::clone(state);
     registry.register(KERNEL32, "CreateDirectoryW", move |args, cpu, memory| {
@@ -509,59 +491,53 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
     });
 
-    for (symbol, narrow) in [("DeleteFileA", true), ("DeleteFileW", false)] {
-        let delete = Arc::clone(state);
-        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
-            let reader = if narrow { guest_path_a } else { guest_path };
-            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-                return delete.fail(cpu.gs_base, INVALID_NAME, 0);
-            };
-            let mut objects = delete.objects.lock().expect("guest object state");
-            if objects.directories.contains(&path) {
-                return delete.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
-            }
-            let parent = parent(&path);
-            if !parent.is_empty() && !objects.directories.contains(parent) {
-                return delete.fail(cpu.gs_base, PATH_NOT_FOUND, 0);
-            }
-            if objects
-                .handles
-                .values()
-                .any(|object| matches!(object, GuestObject::File(file) if file.path == path))
-            {
-                return delete.fail(cpu.gs_base, SHARING_VIOLATION, 0);
-            }
-            if objects.files.remove(&path).is_none() {
-                return delete.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
-            }
-            Ok(1)
-        });
-    }
+    let delete = Arc::clone(state);
+    registry.register(KERNEL32, "DeleteFileW", move |args, cpu, memory| {
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return delete.fail(cpu.gs_base, INVALID_NAME, 0);
+        };
+        let mut objects = delete.objects.lock().expect("guest object state");
+        if objects.directories.contains(&path) {
+            return delete.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
+        }
+        let parent = parent(&path);
+        if !parent.is_empty() && !objects.directories.contains(parent) {
+            return delete.fail(cpu.gs_base, PATH_NOT_FOUND, 0);
+        }
+        if objects
+            .handles
+            .values()
+            .any(|object| matches!(object, GuestObject::File(file) if file.path == path))
+        {
+            return delete.fail(cpu.gs_base, SHARING_VIOLATION, 0);
+        }
+        if objects.files.remove(&path).is_none() {
+            return delete.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
+        }
+        Ok(1)
+    });
 
-    for (symbol, narrow) in [("GetFileAttributesA", true), ("GetFileAttributesW", false)] {
-        let attributes = Arc::clone(state);
-        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
-            const INVALID_ATTRIBUTES: u64 = u32::MAX as u64;
-            let reader = if narrow { guest_path_a } else { guest_path };
-            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-                return attributes.fail(cpu.gs_base, INVALID_NAME, INVALID_ATTRIBUTES);
-            };
-            let objects = attributes.objects.lock().expect("guest object state");
-            if objects.directories.contains(&path) {
-                return Ok(0x10); // FILE_ATTRIBUTE_DIRECTORY
-            }
-            if objects.files.contains_key(&path) {
-                return Ok(0x80); // FILE_ATTRIBUTE_NORMAL
-            }
-            let parent = parent(&path);
-            let error = if parent.is_empty() || objects.directories.contains(parent) {
-                FILE_NOT_FOUND
-            } else {
-                PATH_NOT_FOUND
-            };
-            attributes.fail(cpu.gs_base, error, INVALID_ATTRIBUTES)
-        });
-    }
+    let attributes = Arc::clone(state);
+    registry.register(KERNEL32, "GetFileAttributesW", move |args, cpu, memory| {
+        const INVALID_ATTRIBUTES: u64 = u32::MAX as u64;
+        let Some(path) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return attributes.fail(cpu.gs_base, INVALID_NAME, INVALID_ATTRIBUTES);
+        };
+        let objects = attributes.objects.lock().expect("guest object state");
+        if objects.directories.contains(&path) {
+            return Ok(0x10); // FILE_ATTRIBUTE_DIRECTORY
+        }
+        if objects.files.contains_key(&path) {
+            return Ok(0x80); // FILE_ATTRIBUTE_NORMAL
+        }
+        let parent = parent(&path);
+        let error = if parent.is_empty() || objects.directories.contains(parent) {
+            FILE_NOT_FOUND
+        } else {
+            PATH_NOT_FOUND
+        };
+        attributes.fail(cpu.gs_base, error, INVALID_ATTRIBUTES)
+    });
 
     let rename = Arc::clone(state);
     registry.register(KERNEL32, "MoveFileW", move |args, cpu, memory| {
@@ -686,33 +662,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
-    // The 32-bit split form of the size query: the low half is the return,
-    // the high half goes through the optional out pointer. A file beyond
-    // 4 GiB without the pointer reports the documented INVALID_FILE_SIZE.
-    let size32 = Arc::clone(state);
-    registry.register(KERNEL32, "GetFileSize", move |args, cpu, memory| {
-        let objects = size32.objects.lock().expect("guest object state");
-        let Some(GuestObject::File(file)) = objects.handles.get(&args.rcx) else {
-            return size32.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0xffffffff);
-        };
-        let bytes = objects
-            .files
-            .get(&file.path)
-            .expect("open file exists")
-            .len() as u64;
-        let low = bytes as u32;
-        if args.rdx != 0 {
-            if memory.write_u32(args.rdx, (bytes >> 32) as u32).is_err() {
-                return size32.fail(cpu.gs_base, ERROR_NOACCESS, 0xffffffff);
-            }
-            return Ok(u64::from(low));
-        }
-        if bytes > u64::from(u32::MAX) {
-            return size32.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0xffffffff);
-        }
-        Ok(u64::from(low))
-    });
-
     // The narrow file APIs of this machine use the ANSI translation; the mode
     // is recorded faithfully so a program that switches to OEM reads back the
     // truth of its own switch. Path bytes reach the drive as written either
@@ -730,17 +679,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     registry.register(KERNEL32, "SetFileApisToOEM", move |_, _, _| {
         oem_set.set_file_apis_ansi(false);
         Ok(0)
-    });
-
-    // Flushing a memory-backed file has nothing to do: the bytes are already
-    // as durable as this machine makes them, which is the honest success.
-    let flush = Arc::clone(state);
-    registry.register(KERNEL32, "FlushFileBuffers", move |args, cpu, _| {
-        let objects = flush.objects.lock().expect("guest object state");
-        if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::File(_))) {
-            return flush.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
-        }
-        Ok(1)
     });
 
     // Free space of the confined synthetic volume: the drive's byte budget
@@ -1122,48 +1060,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
-    // GetFileAttributesEx reports the standard info level: attributes,
-    // three FILETIMEs and the 64-bit size. The confined file system has no
-    // time dimension, so the timestamps read zero - documented rather than
-    // invented. The size is the truth of the memory-backed contents.
-    for (symbol, narrow) in [
-        ("GetFileAttributesExA", true),
-        ("GetFileAttributesExW", false),
-    ] {
-        let attrex = Arc::clone(state);
-        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
-            if args.rdx != 0 {
-                return attrex.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
-            }
-            let reader = if narrow { guest_path_a } else { guest_path };
-            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
-                return attrex.fail(cpu.gs_base, INVALID_NAME, 0);
-            };
-            let objects = attrex.objects.lock().expect("guest object state");
-            let (attributes, size) = if objects.directories.contains(&path) {
-                (0x10u32, 0u64)
-            } else if let Some(data) = objects.files.get(&path) {
-                (0x80u32, data.len() as u64)
-            } else {
-                let parent = parent(&path);
-                let error = if parent.is_empty() || objects.directories.contains(parent) {
-                    FILE_NOT_FOUND
-                } else {
-                    PATH_NOT_FOUND
-                };
-                return attrex.fail(cpu.gs_base, error, 0);
-            };
-            let mut block = [0u8; 36];
-            block[0..4].copy_from_slice(&attributes.to_le_bytes());
-            block[28..32].copy_from_slice(&(size as u32).to_le_bytes());
-            block[32..36].copy_from_slice(&((size >> 32) as u32).to_le_bytes());
-            if memory.write_bytes(args.r8, &block).is_err() {
-                return attrex.fail(cpu.gs_base, ERROR_NOACCESS, 0);
-            }
-            Ok(1)
-        });
-    }
-
     // Console queries on pipe-backed handles. sqlite asks whether standard
     // output is a console to pick interactive mode; xenora's standard handles
     // are pipes, and Windows itself answers ERROR_INVALID_HANDLE when the
@@ -1175,13 +1071,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     registry.register(
         KERNEL32,
         "GetConsoleScreenBufferInfo",
-        move |args, cpu, _memory| console_query.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+        move |_args, cpu, _memory| console_query.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
     );
     let console_attr = Arc::clone(state);
     registry.register(
         KERNEL32,
         "SetConsoleTextAttribute",
-        move |args, cpu, _memory| console_attr.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+        move |_args, cpu, _memory| console_attr.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
     );
     registry.register(KERNEL32, "SetConsoleCtrlHandler", move |_, _, _| Ok(1));
 
@@ -1288,18 +1184,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "CreateDirectoryW",
         "RemoveDirectoryW",
         "DeleteFileW",
-        "DeleteFileA",
-        "LockFile",
-        "GetConsoleScreenBufferInfo",
-        "SetConsoleTextAttribute",
-        "SetConsoleCtrlHandler",
-        "UnlockFile",
-        "LockFileEx",
-        "UnlockFileEx",
         "GetFileAttributesW",
-        "GetFileAttributesA",
-        "GetFileAttributesExA",
-        "GetFileAttributesExW",
         "MoveFileW",
         "FindFirstFileW",
         "FindNextFileW",
@@ -1317,13 +1202,18 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "SetFileAttributesW",
         "SetFilePointer",
         "GetTempFileNameA",
-        "GetFileSize",
         "AreFileApisANSI",
         "SetFileApisToANSI",
         "SetFileApisToOEM",
-        "FlushFileBuffers",
         "GetDiskFreeSpaceA",
         "GetDiskFreeSpaceW",
+        "GetConsoleScreenBufferInfo",
+        "SetConsoleTextAttribute",
+        "SetConsoleCtrlHandler",
+        "LockFile",
+        "UnlockFile",
+        "LockFileEx",
+        "UnlockFileEx",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

@@ -52,8 +52,9 @@ library checks, and runs the original trusted fixture through the app and its
 worker with Metal validation enabled. A successful build writes `Xenora.zip`,
 `manifest.json`, preview notes and license notices. The verifier compares
 checksums, the signed bundle metadata and the required signatures without
-launching the app. Checksums identify changes relative to the supplied manifest.
+launching the app. The build and fixture results are historical records.
 Keep the manifest with the archive and obtain both from a trusted source.
+Checksums identify changes relative to that manifest.
 
 The default build uses local ad-hoc signatures. For an authorized Apple
 submission, provide both `--developer-id` with the Developer ID Application
@@ -62,8 +63,9 @@ sign the app and its worker with Hardened Runtime, run the original fixture
 before submission, and send a temporary ZIP to Apple. An accepted submission
 is stapled to the app and verified again after the final ZIP is extracted.
 Use `verify --require-developer-id <directory>` to require the Developer ID
-workflow when verifying a preview. Keychain credentials stay outside the
-repository and the output.
+workflow when verifying a preview. The check accepts a valid Apple Developer ID
+signature and does not identify the repository's publisher. Keychain credentials
+stay outside the repository and the output.
 
 The preview tool leaves release creation and public distribution to the
 maintainers. See the [remaining attribution and corresponding-source

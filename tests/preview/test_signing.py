@@ -7,7 +7,7 @@ import plistlib
 import subprocess
 import unittest
 
-from scripts.preview.signing import notarize, sign_bundle, verify_distribution, verify_local
+from preview.signing import notarize, sign_bundle, verify_distribution, verify_local
 
 
 APP = Path("/staged/Xenora.app")

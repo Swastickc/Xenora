@@ -3,7 +3,6 @@
 
 import hashlib
 import json
-import re
 import shutil
 from dataclasses import asdict
 from pathlib import Path
@@ -15,7 +14,9 @@ APP_ARCHIVE = "Xenora.zip"
 MANIFEST = "manifest.json"
 NOTES = "PREVIEW.md"
 NOTICE_FILES = {
+    "Cargo.lock": "Cargo.lock",
     "LICENSE": "LICENSE",
+    "LICENSE-AMD": "crates/isa/LICENSE-AMD",
     "THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
     "bitflags-LICENSE-MIT": "licenses/bitflags-LICENSE-MIT",
     "objc2-LICENSE-MIT.txt": "licenses/objc2-LICENSE-MIT.txt",
@@ -54,8 +55,11 @@ def copy_notices(source_root: Path, directory: Path, source: Source, mode: str):
         "Build inputs come from the Git commit above. The repository's app build script\n"
         "and the locked dependency graph identify the build and source inputs. A commit\n"
         "from a contribution branch may be available on its fork before upstream. Keep\n"
-        "this metadata and the accompanying notices with the archive. The dependency\n"
-        "inventory documents the remaining release attribution and corresponding-source\n"
+        "this metadata and the accompanying notices with the archive. The packaged\n"
+        "license texts are [GPL-3.0-or-later](LICENSE), [AMD](LICENSE-AMD),\n"
+        "[bitflags](bitflags-LICENSE-MIT), [objc2](objc2-LICENSE-MIT.txt) and its\n"
+        "[upstream notice](objc2-LICENSE.md). The [dependency review](dependency-licenses.md)\n"
+        "documents the remaining release attribution and corresponding-source\n"
         "work for public distribution.\n\n"
         "This Apple Silicon preview covers original synthetic fixtures. Commercial game\n"
         "execution and authentic Xbox startup are unsupported.\n",
@@ -79,7 +83,7 @@ def write_manifest(
     )
 
 
-def read_verified_manifest(directory: Path) -> tuple[Source, str]:
+def read_verified_manifest(directory: Path) -> tuple[Source, str, dict]:
     path = directory / MANIFEST
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 128 * 1024:
         raise ValueError("expected a regular manifest.json of at most 128 KiB")
@@ -92,21 +96,34 @@ def read_verified_manifest(directory: Path) -> tuple[Source, str]:
         mode = signing["mode"]
         submission = signing["submission_id"]
         records = manifest["artifacts"]
+        app = manifest["app"]
+        build = manifest["build"]
     except (KeyError, TypeError) as error:
         raise ValueError("invalid preview manifest") from error
     if mode == "ad-hoc":
         if submission is not None:
             raise ValueError("ad-hoc preview cannot declare an Apple submission")
     elif mode == "developer-id":
-        if not isinstance(submission, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", submission):
-            raise ValueError("missing Apple submission ID")
-        UUID(submission)
+        try:
+            if not isinstance(submission, str) or str(UUID(submission)) != submission.lower():
+                raise ValueError
+        except ValueError:
+            raise ValueError("missing or invalid Apple submission ID") from None
     else:
         raise ValueError("invalid preview signing mode")
 
+    if not isinstance(app, dict) or not app:
+        raise ValueError("manifest has no bundle inspection")
+    if (
+        not isinstance(build, dict)
+        or build.get("locked_app_build_and_smoke") is not True
+        or not isinstance(build.get("environment"), dict)
+        or not isinstance(build.get("fixtures"), dict)
+    ):
+        raise ValueError("manifest has no build or fixture evidence")
     if not isinstance(records, dict) or set(records) != set(ARTIFACTS):
         raise ValueError("manifest artifact list differs from the preview format")
     for name, current in artifact_records(directory).items():
         if records[name] != current:
             raise ValueError(f"preview artifact differs from the manifest: {name}")
-    return source, mode
+    return source, mode, app

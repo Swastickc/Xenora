@@ -7,6 +7,7 @@ import os
 import platform
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -163,15 +164,31 @@ def build(
             published = True
     finally:
         if not published:
-            destination.rmdir()
+            with suppress(OSError):
+                destination.rmdir()
+
+
+def app_inventory(evidence: dict) -> dict:
+    # Treat the human-readable `file` description as diagnostic text.
+    inventory = dict(evidence)
+    try:
+        inventory["executables"] = {
+            name: {key: value for key, value in record.items() if key != "file"}
+            for name, record in evidence["executables"].items()
+        }
+    except (AttributeError, KeyError):
+        raise ValueError("invalid bundle inspection in preview manifest") from None
+    return inventory
 
 
 def verify(directory: Path, *, require_developer_id=False, run=run):
-    source, mode = read_verified_manifest(directory)
+    source, mode, app_evidence = read_verified_manifest(directory)
     if require_developer_id and mode != "developer-id":
         raise ValueError("preview manifest does not identify a Developer ID build")
     with TemporaryDirectory(prefix="xenora-preview-verify-") as temp:
-        check_archive(directory, Path(temp) / "extracted", source, mode, run=run)
+        _, inspected = check_archive(directory, Path(temp) / "extracted", source, mode, run=run)
+        if app_inventory(inspected) != app_inventory(app_evidence):
+            raise ValueError("bundle inspection differs from the preview manifest")
     return source, mode
 
 

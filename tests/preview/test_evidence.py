@@ -8,6 +8,8 @@ from preview.evidence import APP_ARCHIVE, ARTIFACTS, MANIFEST, read_verified_man
 from preview.source import Source
 
 SOURCE = Source("4" * 40, "0.1.0", "17")
+APP_EVIDENCE = {"info_plist": SOURCE.bundle_fields()}
+BUILD_EVIDENCE = {"locked_app_build_and_smoke": True, "environment": {}, "fixtures": {}}
 
 
 class EvidenceTests(unittest.TestCase):
@@ -21,11 +23,12 @@ class EvidenceTests(unittest.TestCase):
 
     def write_manifest(self, mode="ad-hoc", submission_id=None):
         write_manifest(
-            self.directory, SOURCE, mode=mode, submission_id=submission_id, app={}, build={}
+            self.directory, SOURCE, mode=mode, submission_id=submission_id,
+            app=APP_EVIDENCE, build=BUILD_EVIDENCE,
         )
 
     def test_accepts_matching_preview(self):
-        self.assertEqual(read_verified_manifest(self.directory), (SOURCE, "ad-hoc"))
+        self.assertEqual(read_verified_manifest(self.directory), (SOURCE, "ad-hoc", APP_EVIDENCE))
 
     def test_rejects_tampered_or_missing_payload(self):
         archive = self.directory / APP_ARCHIVE
@@ -54,7 +57,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_distinguishes_local_and_developer_id_manifests(self):
         self.write_manifest("developer-id")
-        with self.assertRaisesRegex(ValueError, "missing Apple submission ID"):
+        with self.assertRaisesRegex(ValueError, "missing or invalid Apple submission ID"):
             read_verified_manifest(self.directory)
 
         submission = "2efe2717-52ef-43a5-96dc-0797e4ca1041"
@@ -63,4 +66,4 @@ class EvidenceTests(unittest.TestCase):
             read_verified_manifest(self.directory)
 
         self.write_manifest("developer-id", submission)
-        self.assertEqual(read_verified_manifest(self.directory), (SOURCE, "developer-id"))
+        self.assertEqual(read_verified_manifest(self.directory), (SOURCE, "developer-id", APP_EVIDENCE))

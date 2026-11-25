@@ -81,7 +81,7 @@ enum ProgramRunner {
 
     /// The last `trace stage=<name>` line's stage name.
     static func lastStage(in text: String) -> String? {
-        text.split(separator: "\n").reversed().lazy.compactMap { line -> String? in
+        text.split(whereSeparator: \.isNewline).reversed().lazy.compactMap { line -> String? in
             guard line.hasPrefix("trace stage=") else { return nil }
             return line.dropFirst("trace stage=".count).split(separator: " ").first.map(String.init)
         }.first

@@ -45,3 +45,11 @@ struct ProgramArgumentsTests {
         #expect(ProgramRunner.arguments(for: file, trace: false, programArguments: model.workerArguments) == base + ["--", ""])
     }
 }
+
+struct ProgramTraceTests {
+    @Test func retainsFinalTraceAfterGuestCRLF() {
+        let output = "trace stage=entry step_limit=100\nguest error\r\ntrace stage=exit entry_steps=3\n"
+        #expect(ProgramRunner.lastStage(in: output) == "exit")
+        #expect(ProgramRunner.lastStage(in: "guest error\r\n") == nil)
+    }
+}

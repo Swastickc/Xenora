@@ -58,6 +58,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Public sources](research/sources.md), [RDNA 2 notes](research/rdna2.md), and [Xbox GPU evidence](research/xbox-gpu.md) — Specifications, evidence scope, and unknown console behavior.
 - [Shader inputs](research/shader-containers.md) and [risk register](risk-register.md) — Input provenance and unresolved engineering risks.
 - [Texture format inventory](research/texture-formats.md) — Formats and layouts by stage (decode, layout, native upload, sampling, guest), their public specifications, unknowns and ranked follow-ups.
+- [Xbox Series X|S executable startup](research/xbox-launch.md) — Experimental manifest preflight, PE32+ startup audit, and console research blockers.
 - [Exception and unwind requirements](research/exception-handling.md) — The Windows x64 exception and unwind ABI mapped to missing guest runtime pieces, measured probe results, unknowns, a fixture plan and ranked follow-ups.
 - [Synthetic integration and upstream evidence](research/synthetic-integration.md) — Audited source snapshots and remaining commercial startup prerequisites.
 

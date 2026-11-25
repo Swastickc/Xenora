@@ -185,6 +185,13 @@ impl<'a> RelocationReader<'a> {
         }
     }
 
+    fn take_contiguous(&mut self, len: usize) -> Option<&'a [u8]> {
+        let (bytes, rest) = self.current.bytes.split_at_checked(len)?;
+        self.current.bytes = rest;
+        self.current.file_offset += len;
+        Some(bytes)
+    }
+
     fn read<const N: usize>(&mut self) -> [u8; N] {
         if let Some((value, rest)) = self.current.bytes.split_first_chunk::<N>() {
             self.current.bytes = rest;
@@ -273,64 +280,27 @@ pub fn apply_relocations(
             });
         }
 
-        let num_entries = (block_size as usize - 8) / 2;
-        for _ in 0..num_entries {
-            let entry_val = u16::from_le_bytes(reader.read());
-            let reloc_type = (entry_val >> 12) as u8;
-            let offset_in_page = (entry_val & 0x0FFF) as u32;
-
-            report.total_entries += 1;
-
-            match reloc_type {
-                IMAGE_REL_BASED_ABSOLUTE => {
-                    // Padding entry, ignore
-                    report.skipped_absolute += 1;
-                }
-                IMAGE_REL_BASED_DIR64 => {
-                    // Target VA = loaded_base + page_rva + offset_in_page
-                    let target_rva = page_rva
-                        .checked_add(offset_in_page)
-                        .ok_or(RelocationError::ArithmeticOverflow)?;
-                    // The 8-byte target must lie inside the image, not in other mapped memory.
-                    if target_rva
-                        .checked_add(8)
-                        .is_none_or(|end| end > pe.size_of_image)
-                    {
-                        return Err(RelocationError::TargetOutOfBounds {
-                            target_va: loaded_base.wrapping_add(u64::from(target_rva)),
-                        });
-                    }
-                    let target_va = loaded_base
-                        .checked_add(target_rva as u64)
-                        .ok_or(RelocationError::ArithmeticOverflow)?;
-
-                    // Read current 64-bit value at target_va
-                    // Use write_u64_bypass / read_u64_bypass if section is read-only
-                    let orig_val = memory.read_u64_bypass(target_va).map_err(|e| match e {
-                        MemoryError::UnmappedAddress(_) => {
-                            RelocationError::TargetOutOfBounds { target_va }
-                        }
-                        other => RelocationError::Memory(other),
-                    })?;
-
-                    // Rebase: new_val = orig_val + delta_i64
-                    let new_val = ((orig_val as i128) + (delta_i64 as i128)) as u64;
-
-                    memory
-                        .write_u64_bypass(target_va, new_val)
-                        .map_err(|e| match e {
-                            MemoryError::UnmappedAddress(_) => {
-                                RelocationError::TargetOutOfBounds { target_va }
-                            }
-                            other => RelocationError::Memory(other),
-                        })?;
-
-                    report.applied_dir64 += 1;
-                }
-                other => {
-                    return Err(RelocationError::UnsupportedRelocationType(other));
-                }
-            }
+        let entries_size = block_size as usize - 8;
+        if let Some(raw_entries) = reader.take_contiguous(entries_size) {
+            let entries = raw_entries.as_chunks::<2>().0.iter().copied();
+            apply_entries(
+                entries.map(u16::from_le_bytes),
+                page_rva,
+                pe.size_of_image,
+                loaded_base,
+                memory,
+                &mut report,
+            )?;
+        } else {
+            let entries = (0..entries_size / 2).map(|_| u16::from_le_bytes(reader.read()));
+            apply_entries(
+                entries,
+                page_rva,
+                pe.size_of_image,
+                loaded_base,
+                memory,
+                &mut report,
+            )?;
         }
 
         read_bytes += block_size as usize;
@@ -348,6 +318,72 @@ pub fn apply_relocations(
     }
 
     Ok(report)
+}
+
+fn apply_entries(
+    entries: impl Iterator<Item = u16>,
+    page_rva: u32,
+    image_size: u32,
+    loaded_base: u64,
+    memory: &mut GuestMemory,
+    report: &mut RelocationReport,
+) -> Result<(), RelocationError> {
+    for entry_val in entries {
+        let reloc_type = (entry_val >> 12) as u8;
+        let offset_in_page = (entry_val & 0x0FFF) as u32;
+
+        report.total_entries += 1;
+
+        match reloc_type {
+            IMAGE_REL_BASED_ABSOLUTE => {
+                // Padding entry, ignore
+                report.skipped_absolute += 1;
+            }
+            IMAGE_REL_BASED_DIR64 => {
+                // Target VA = loaded_base + page_rva + offset_in_page
+                let target_rva = page_rva
+                    .checked_add(offset_in_page)
+                    .ok_or(RelocationError::ArithmeticOverflow)?;
+                // The 8-byte target must lie inside the image, not in other mapped memory.
+                if target_rva.checked_add(8).is_none_or(|end| end > image_size) {
+                    return Err(RelocationError::TargetOutOfBounds {
+                        target_va: loaded_base.wrapping_add(u64::from(target_rva)),
+                    });
+                }
+                let target_va = loaded_base
+                    .checked_add(target_rva as u64)
+                    .ok_or(RelocationError::ArithmeticOverflow)?;
+
+                // Read current 64-bit value at target_va
+                // Use write_u64_bypass / read_u64_bypass if section is read-only
+                let orig_val = memory.read_u64_bypass(target_va).map_err(|e| match e {
+                    MemoryError::UnmappedAddress(_) => {
+                        RelocationError::TargetOutOfBounds { target_va }
+                    }
+                    other => RelocationError::Memory(other),
+                })?;
+
+                // Rebase: new_val = orig_val + delta_i64
+                let new_val = ((orig_val as i128) + (report.delta as i128)) as u64;
+
+                memory
+                    .write_u64_bypass(target_va, new_val)
+                    .map_err(|e| match e {
+                        MemoryError::UnmappedAddress(_) => {
+                            RelocationError::TargetOutOfBounds { target_va }
+                        }
+                        other => RelocationError::Memory(other),
+                    })?;
+
+                report.applied_dir64 += 1;
+            }
+            other => {
+                return Err(RelocationError::UnsupportedRelocationType(other));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // Called only for loads at a nonpreferred base.

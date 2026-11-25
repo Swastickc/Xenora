@@ -1649,3 +1649,265 @@ mod region_lookup_timing {
         }
     }
 }
+
+/// What a lookup finds in large tables (#102). Expected values follow from
+/// the layouts built here and the contract the other tests pin: the earliest
+/// mapping that covers a byte supplies it, an access may continue into the
+/// next mapping, and a failure reports the lowest address it may not touch.
+#[cfg(test)]
+mod region_lookup_contract_tests {
+    use super::{MemoryPermissions as P, *};
+
+    /// Where a zero-size dynamic allocation is placed when a mapping starts
+    /// there: the first candidate base.
+    const SHARED: u64 = 0x0000_0003_0000_0000;
+    const LOW: u64 = 0x10_0000;
+    const HIGH: u64 = 0x5_0000_0000;
+    const STRIDE: u64 = 0x100;
+    const SIZE: usize = 0x40;
+
+    fn byte_of(index: usize) -> u8 {
+        (index % 251) as u8 + 1
+    }
+
+    fn permissions_of(index: usize) -> P {
+        if index % 3 == 2 {
+            P::READ_ONLY
+        } else {
+            P::READ_WRITE_EXECUTE
+        }
+    }
+
+    /// `count` mappings from `start`, each `SIZE` bytes of one value, with
+    /// empty mappings at the base and the end of every fifth one.
+    fn map_run(memory: &mut GuestMemory, start: u64, first: usize, count: usize) {
+        for index in first..first + count {
+            let base = start + (index - first) as u64 * STRIDE;
+            if index % 5 == 0 {
+                memory.map_region(base, 0, P::NO_ACCESS).unwrap();
+            }
+            memory
+                .map_region_with_data(base, SIZE, permissions_of(index), &[byte_of(index); SIZE])
+                .unwrap();
+            if index % 5 == 0 {
+                memory.map_region(base, 0, P::NO_ACCESS).unwrap();
+                memory
+                    .map_region(base + SIZE as u64, 0, P::READ_WRITE_EXECUTE)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Check every mapping of a run and the gaps around it.
+    fn check_run(memory: &mut GuestMemory, start: u64, first: usize, count: usize) {
+        for index in first..first + count {
+            let base = start + (index - first) as u64 * STRIDE;
+            let end = base + SIZE as u64;
+            let byte = byte_of(index);
+            let permissions = permissions_of(index);
+            for at in [base, base + 1, end - 1] {
+                assert_eq!(memory.read_u8(at), Ok(byte), "{at:#x}");
+                assert_eq!(
+                    memory.fetch_instruction_byte(at),
+                    if permissions.execute {
+                        Ok(byte)
+                    } else {
+                        Err(MemoryError::PermissionViolation {
+                            address: at,
+                            required: "execute",
+                        })
+                    },
+                    "{at:#x}"
+                );
+            }
+            let mut out = [0u8; SIZE];
+            assert_eq!(memory.read_bytes(base, &mut out), Ok(()));
+            assert_eq!(out, [byte; SIZE]);
+            let written = if permissions.write {
+                Ok(())
+            } else {
+                Err(MemoryError::PermissionViolation {
+                    address: base + 2,
+                    required: "write",
+                })
+            };
+            assert_eq!(memory.write_u8(base + 2, byte), written, "{base:#x}");
+            for gap in [base - 1, end] {
+                assert_eq!(memory.read_u8(gap), Err(MemoryError::UnmappedAddress(gap)));
+                assert_eq!(
+                    memory.fetch_instruction_byte(gap),
+                    Err(MemoryError::UnmappedAddress(gap))
+                );
+            }
+            // Running off the end reports the first unmapped byte, and the
+            // output is untouched.
+            let mut failed = [0xee; 4];
+            assert_eq!(
+                memory.read_bytes(end - 2, &mut failed),
+                Err(MemoryError::UnmappedAddress(end))
+            );
+            assert_eq!(failed, [0xee; 4]);
+            assert_eq!(memory.read_bytes(end, &mut []), Ok(()), "{end:#x}");
+        }
+    }
+
+    #[test]
+    fn large_tables_keep_every_mapping_gap_and_permission() {
+        let mut memory = GuestMemory::new();
+        map_run(&mut memory, HIGH, 700, 700);
+        map_run(&mut memory, LOW, 0, 700);
+        check_run(&mut memory, LOW, 0, 700);
+        check_run(&mut memory, HIGH, 700, 700);
+        assert_eq!(memory.read_u8(0), Err(MemoryError::UnmappedAddress(0)));
+        let last = HIGH + 699 * STRIDE + SIZE as u64;
+        assert_eq!(
+            memory.fetch_instruction_byte(u64::MAX - 1),
+            Err(MemoryError::UnmappedAddress(u64::MAX - 1))
+        );
+        assert_eq!(
+            memory.read_u8(last + 0x1000),
+            Err(MemoryError::UnmappedAddress(last + 0x1000))
+        );
+    }
+
+    #[test]
+    fn overlapping_mappings_keep_first_mapping_priority_in_a_large_table() {
+        let mut memory = GuestMemory::new();
+        map_run(&mut memory, LOW, 0, 400);
+        map_run(&mut memory, HIGH, 400, 400);
+        // A mapping at the first candidate base, then two empty heap blocks,
+        // one per heap, that land on it and grow in place over it: three
+        // mappings at one base, in the order they were made.
+        memory
+            .map_region_with_data(SHARED, 4, P::READ_EXECUTE, &[1, 2, 3, 4])
+            .unwrap();
+        let first = memory.map_heap_allocation(PROCESS_HEAP, 0).unwrap();
+        assert_eq!(first, SHARED);
+        assert_eq!(
+            memory.resize_heap_allocation(PROCESS_HEAP, first, 8, true),
+            Ok(SHARED)
+        );
+        let heap = memory.create_private_heap(0).unwrap();
+        let second = memory.map_heap_allocation(heap, 0).unwrap();
+        assert_eq!(second, SHARED);
+        assert_eq!(
+            memory.resize_heap_allocation(heap, second, 12, true),
+            Ok(SHARED)
+        );
+        // Bytes 0-3 come from the mapping, 4-7 from the first block and 8-11
+        // from the second; both blocks start zeroed.
+        let mut out = [0xee; 12];
+        assert_eq!(memory.read_bytes(SHARED, &mut out), Ok(()));
+        assert_eq!(out, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // The mapping is not writable, so a write that starts in it fails at
+        // its first byte and writes nothing.
+        assert_eq!(
+            memory.write_u8(SHARED + 1, 9),
+            Err(MemoryError::PermissionViolation {
+                address: SHARED + 1,
+                required: "write",
+            })
+        );
+        // The blocks are writable and not executable.
+        assert_eq!(memory.write_u8(SHARED + 5, 0x55), Ok(()));
+        assert_eq!(memory.write_u8(SHARED + 9, 0x99), Ok(()));
+        assert_eq!(memory.read_u8(SHARED + 5), Ok(0x55));
+        assert_eq!(memory.read_u8(SHARED + 9), Ok(0x99));
+        assert_eq!(memory.fetch_instruction_byte(SHARED + 3), Ok(4));
+        for at in [SHARED + 4, SHARED + 11] {
+            assert_eq!(
+                memory.fetch_instruction_byte(at),
+                Err(MemoryError::PermissionViolation {
+                    address: at,
+                    required: "execute",
+                })
+            );
+        }
+        // A write across the mapping into the blocks fails at the mapping;
+        // one that starts in the first block runs on into the second.
+        assert_eq!(
+            memory.write_bytes(SHARED + 2, &[7; 4]),
+            Err(MemoryError::PermissionViolation {
+                address: SHARED + 2,
+                required: "write",
+            })
+        );
+        assert_eq!(memory.write_bytes(SHARED + 6, &[7; 6]), Ok(()));
+        let mut out = [0xee; 13];
+        assert_eq!(
+            memory.read_bytes(SHARED, &mut out),
+            Err(MemoryError::UnmappedAddress(SHARED + 12))
+        );
+        assert_eq!(out, [0xee; 13], "a failed read writes nothing");
+        let mut out = [0xee; 12];
+        memory.read_bytes(SHARED, &mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 0, 0x55, 7, 7, 7, 7, 7, 7]);
+        assert_eq!(
+            memory.read_u8(SHARED + 12),
+            Err(MemoryError::UnmappedAddress(SHARED + 12))
+        );
+        check_run(&mut memory, LOW, 0, 400);
+        check_run(&mut memory, HIGH, 400, 400);
+    }
+
+    #[test]
+    fn accesses_split_across_adjacent_mappings_in_a_large_table() {
+        let mut memory = GuestMemory::new();
+        map_run(&mut memory, LOW, 0, 500);
+        // Three adjacent mappings in the middle of the table, the last not
+        // readable.
+        const SPLIT: u64 = 0x2_0000_0000;
+        memory
+            .map_region_with_data(SPLIT, 8, P::READ_WRITE, &[0x11; 8])
+            .unwrap();
+        memory
+            .map_region_with_data(SPLIT + 8, 8, P::READ_EXECUTE, &[0x22; 8])
+            .unwrap();
+        memory
+            .map_region_with_data(SPLIT + 16, 8, P::NO_ACCESS, &[0x33; 8])
+            .unwrap();
+        map_run(&mut memory, HIGH, 500, 500);
+        // Twelve bytes from the middle of the first mapping run on through
+        // the second.
+        let mut out = [0u8; 12];
+        assert_eq!(memory.read_bytes(SPLIT + 4, &mut out), Ok(()));
+        assert_eq!(
+            out,
+            [
+                0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22
+            ]
+        );
+        // One byte further reaches the mapping that cannot be read.
+        let mut out = [0xee; 13];
+        assert_eq!(
+            memory.read_bytes(SPLIT + 4, &mut out),
+            Err(MemoryError::PermissionViolation {
+                address: SPLIT + 16,
+                required: "read",
+            })
+        );
+        assert_eq!(out, [0xee; 13]);
+        assert_eq!(
+            memory.write_bytes(SPLIT + 4, &[0x44; 8]),
+            Err(MemoryError::PermissionViolation {
+                address: SPLIT + 8,
+                required: "write",
+            })
+        );
+        assert_eq!(memory.read_u64(SPLIT), Ok(0x1111_1111_1111_1111));
+        assert_eq!(
+            memory.fetch_instruction_byte(SPLIT + 7),
+            Err(MemoryError::PermissionViolation {
+                address: SPLIT + 7,
+                required: "execute"
+            })
+        );
+        assert_eq!(memory.fetch_instruction_byte(SPLIT + 8), Ok(0x22));
+        assert_eq!(
+            memory.read_u8(SPLIT + 24),
+            Err(MemoryError::UnmappedAddress(SPLIT + 24))
+        );
+        check_run(&mut memory, LOW, 0, 500);
+        check_run(&mut memory, HIGH, 500, 500);
+    }
+}

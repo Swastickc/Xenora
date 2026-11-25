@@ -3,8 +3,9 @@
 //! Bounded synthetic C: drive with no host filesystem mapping.
 
 use super::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
-    ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32, ServicesState,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_LOCK_VIOLATION,
+    ERROR_NOACCESS, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32,
+    ServicesState,
 };
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -1121,6 +1122,99 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
+    // LockFileEx routes through an OVERLAPPED carrying the offset in its
+    // first two 32-bit fields; the flags pick exclusive/shared and whether a
+    // conflicting lock fails at once. xenora has no async completion, so the
+    // overlapped event field is ignored and the call completes synchronously,
+    // which is the documented fast path when the region is free. Shared and
+    // exclusive locks conflict exactly as Windows specifies.
+    for (symbol, unlock) in [("LockFileEx", false), ("UnlockFileEx", true)] {
+        let lock_state = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let handle = args.rcx;
+            let overlapped = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            let mut fields = [0u8; 8];
+            memory
+                .read_bytes(overlapped, &mut fields)
+                .map_err(ExitReason::MemoryFault)?;
+            let offset = u64::from(u32::from_le_bytes(
+                fields[0..4].try_into().expect("4 bytes"),
+            )) | u64::from(u32::from_le_bytes(
+                fields[4..8].try_into().expect("4 bytes"),
+            )) << 32;
+            let length = u64::from(args.get(3, memory).map_err(ExitReason::MemoryFault)? as u32)
+                << 32
+                | u64::from(args.get(2, memory).map_err(ExitReason::MemoryFault)? as u32);
+            let exclusive = args.rdx & 2 != 0;
+            let mut objects = lock_state.objects.lock().expect("guest object state");
+            let path = match objects.handles.get(&handle) {
+                Some(GuestObject::File(file)) => file.path.clone(),
+                _ => return lock_state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+            };
+            let ranges = objects.locks.entry(path).or_default();
+            if unlock {
+                match ranges.iter().position(|&(owner, at, len, _)| {
+                    owner == handle && at == offset && len == length
+                }) {
+                    Some(index) => {
+                        ranges.swap_remove(index);
+                        Ok(1)
+                    }
+                    None => lock_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
+                }
+            } else {
+                let end = offset.saturating_add(length);
+                let conflicts = ranges.iter().any(|&(_, at, len, other_exclusive)| {
+                    offset < at.saturating_add(len) && at < end && (exclusive || other_exclusive)
+                });
+                if conflicts {
+                    return lock_state.fail(cpu.gs_base, ERROR_LOCK_VIOLATION, 0);
+                }
+                ranges.push((handle, offset, length, exclusive));
+                Ok(1)
+            }
+        });
+    }
+
+    for (symbol, unlock) in [("LockFile", false), ("UnlockFile", true)] {
+        let lock_state = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let exclusive = true;
+            let handle = args.rcx;
+            let offset = (args.r8 as u32 as u64) << 32 | args.rdx as u32 as u64;
+            let length = (args.get(4, memory).map_err(ExitReason::MemoryFault)? as u32 as u64)
+                << 32
+                | args.r9 as u32 as u64;
+            let mut objects = lock_state.objects.lock().expect("guest object state");
+            let path = match objects.handles.get(&handle) {
+                Some(GuestObject::File(file)) => file.path.clone(),
+                _ => return lock_state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+            };
+            let ranges = objects.locks.entry(path).or_default();
+            if unlock {
+                match ranges.iter().position(|&(owner, at, len, _)| {
+                    owner == handle && at == offset && len == length
+                }) {
+                    Some(index) => {
+                        ranges.swap_remove(index);
+                        Ok(1)
+                    }
+                    None => lock_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
+                }
+            } else {
+                let end = offset.saturating_add(length);
+                let conflicts = ranges.iter().any(|&(_, at, len, other_exclusive)| {
+                    offset < at.saturating_add(len) && at < end && (exclusive || other_exclusive)
+                });
+                if conflicts {
+                    return lock_state.fail(cpu.gs_base, ERROR_LOCK_VIOLATION, 0);
+                }
+                ranges.push((handle, offset, length, exclusive));
+                Ok(1)
+            }
+        });
+    }
+
     for symbol in [
         "CreateFileW",
         "GetFileSizeEx",
@@ -1132,6 +1226,10 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "RemoveDirectoryW",
         "DeleteFileW",
         "DeleteFileA",
+        "LockFile",
+        "UnlockFile",
+        "LockFileEx",
+        "UnlockFileEx",
         "GetFileAttributesW",
         "GetFileAttributesA",
         "MoveFileW",

@@ -57,6 +57,8 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_NOT_SUPPORTED: u32 = 50;
+/// Locking a range that overlaps an existing lock fails with this error.
+pub(crate) const ERROR_LOCK_VIOLATION: u32 = 33;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 const ERROR_INVALID_ADDRESS: u32 = 487;
 const THREAD_QUERY_RIGHTS: u32 = 0x0040 | 0x0800;
@@ -182,6 +184,10 @@ struct ObjectState {
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
     directories: BTreeSet<String>,
+    /// Locked byte ranges per file path, as (owning handle, offset, length, exclusive).
+    /// Windows forbids overlapping locks even from the same handle, and an
+    /// unlock must exactly match a locked range.
+    locks: BTreeMap<String, Vec<(u64, u64, u64, bool)>>,
     next_temp: u32,
 }
 

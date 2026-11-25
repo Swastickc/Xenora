@@ -152,7 +152,8 @@ exits with the program's exit status.
   were hashed are the bytes that run.
 - **Limits that stay.** The program runs in a separate worker process with a
   15 second wall deadline and a step limit (`--max-steps`, default 1,000,000,
-  at most 50,000,000). A file of more than 64 MiB is not read. The fixture
+  at most 50,000,000). The file's size is not capped: it is read whole, and
+  the loader refuses an image that maps to more than 256 MiB. The fixture
   draw service is not registered.
 - **Exit codes.** A host exit code has eight bits and a guest status has
   thirty-two. The low eight bits are returned, except that a status other

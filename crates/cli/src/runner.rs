@@ -32,8 +32,6 @@ const EXPECTED_PIXEL: [u8; 4] = [255, 0, 0, 255];
 /// before its own. The 15 second wall deadline still applies.
 const PROGRAM_DEFAULT_STEPS: usize = 1_000_000;
 const PROGRAM_MAX_STEPS: usize = 50_000_000;
-/// The largest program that is read.
-const PROGRAM_MAX_BYTES: u64 = 64 << 20;
 /// Exit codes of a program run that are not the guest's own, after
 /// `timeout(1)`: the wall deadline, and any other failure of the runner or
 /// the guest.
@@ -297,18 +295,18 @@ fn start_deadline() -> std::io::Result<()> {
 /// Read a program. If the user gave a SHA-256, the file is admitted only when
 /// its bytes have it; the bytes that were hashed are the bytes that run, so a
 /// change to the file afterwards cannot matter.
+///
+/// The file's size is not capped here. The whole file is read into memory, and
+/// the loader still refuses an image that maps to more than its own limit
+/// (`MAX_MAPPED_IMAGE_BYTES` in `crates/loader/src/pe.rs`).
 fn read_program(path: &Path, digest: Option<[u8; 32]>) -> Result<Vec<u8>, Box<dyn Error>> {
-    let size = "execution denied: a program must be a regular file of at most 64 MiB";
-    let file = File::open(path)?;
+    let mut file = File::open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > PROGRAM_MAX_BYTES {
-        return Err(size.into());
+    if !metadata.is_file() {
+        return Err("execution denied: a program must be a regular file".into());
     }
     let mut bytes = Vec::new();
-    file.take(PROGRAM_MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > PROGRAM_MAX_BYTES {
-        return Err(size.into());
-    }
+    file.read_to_end(&mut bytes)?;
     if let Some(expected) = digest
         && Sha256::digest(&bytes).as_slice() != expected
     {

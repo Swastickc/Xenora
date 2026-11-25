@@ -15,7 +15,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var next: xenora_session = 1
     private var codes: [Operation: Int32] = [:]
     private var calls: [Operation] = []
-    private var sentInputs: [xenora_controller_input] = []
+    private var sentInputs: [(handle: xenora_session, input: xenora_controller_input)] = []
     private var invalidCalls = 0
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
 
@@ -31,7 +31,9 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
         lock.withLock { calls.filter { $0 == operation }.count }
     }
 
-    var inputs: [xenora_controller_input] { lock.withLock { sentInputs } }
+    var inputs: [xenora_controller_input] { lock.withLock { sentInputs.map(\.input) } }
+
+    var lastInputHandle: xenora_session? { lock.withLock { sentInputs.last?.handle } }
 
     var clean: Bool { lock.withLock { live == 0 && invalidCalls == 0 } }
 
@@ -70,7 +72,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
 
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32 {
         lock.withLock {
-            sentInputs.append(input)
+            sentInputs.append((handle, input))
             return call(.sendInput, handle)
         }
     }
@@ -375,6 +377,14 @@ private func checkControllerHandoffs() -> [String] {
     model.startInteractive()
     model.pause()
     expectInput(9, left, connected: 1, "a replacement interactive session starts with only physical input")
+
+    let previousHandle = api.lastInputHandle
+    model.startInteractive()
+    model.pause()
+    expectInput(10, left, connected: 1, "another replacement resends the same held physical input")
+    if api.lastInputHandle == previousHandle {
+        failures.append("the identical physical input was not submitted to the new session")
+    }
     return failures
 }
 

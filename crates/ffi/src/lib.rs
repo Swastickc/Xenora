@@ -112,50 +112,50 @@ impl AudioSubsystem {
         self.total_submitted_bytes = self
             .total_submitted_bytes
             .saturating_add(bytes.len() as u64);
-        let processed_bytes: Vec<u8> = if self.format == XENORA_AUDIO_FORMAT_PCM_S16LE {
-            let mut out = bytes.to_vec();
-            for chunk in out.as_chunks_mut::<2>().0 {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                let attenuated = if self.muted {
-                    0i16
-                } else {
-                    let scaled = (sample as f32) * self.volume;
-                    scaled.clamp(-32768.0, 32767.0) as i16
-                };
-                let res_bytes = attenuated.to_le_bytes();
-                chunk[0] = res_bytes[0];
-                chunk[1] = res_bytes[1];
-            }
-            out
-        } else {
-            let mut out = bytes.to_vec();
-            for chunk in out.as_chunks_mut::<4>().0 {
-                let sample = f32::from_le_bytes(*chunk);
-                let scaled = if self.muted || !sample.is_finite() {
-                    0.0
-                } else {
-                    (sample * self.volume).clamp(-1.0, 1.0)
-                };
-                *chunk = scaled.to_le_bytes();
-            }
-            out
-        };
-
-        for b in processed_bytes {
+        for &byte in bytes {
             if self.queue.len() >= self.max_capacity_bytes {
                 self.queue.pop_front();
             }
-            self.queue.push_back(b);
+            self.queue.push_back(byte);
         }
     }
 
     pub fn read(&mut self, out: &mut [u8]) -> usize {
         let usable = out.len().min(self.queue.len());
         let count = usable - usable % self.frame_bytes();
-        for b in out.iter_mut().take(count) {
-            *b = self.queue.pop_front().unwrap_or(0);
+        let drained = &mut out[..count];
+        for byte in drained.iter_mut() {
+            *byte = self.queue.pop_front().unwrap_or(0);
         }
+        self.apply_playback_controls(drained);
         count
+    }
+
+    fn apply_playback_controls(&self, pcm: &mut [u8]) {
+        if self.muted {
+            pcm.fill(0);
+            return;
+        }
+        if self.format == XENORA_AUDIO_FORMAT_PCM_S16LE {
+            if self.volume == 1.0 {
+                return;
+            }
+            for chunk in pcm.as_chunks_mut::<2>().0 {
+                let sample = i16::from_le_bytes(*chunk);
+                let scaled = f32::from(sample) * self.volume;
+                *chunk = (scaled.clamp(-32768.0, 32767.0) as i16).to_le_bytes();
+            }
+        } else {
+            for chunk in pcm.as_chunks_mut::<4>().0 {
+                let sample = f32::from_le_bytes(*chunk);
+                let scaled = if sample.is_finite() {
+                    (sample * self.volume).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                };
+                *chunk = scaled.to_le_bytes();
+            }
+        }
     }
 
     fn render(&mut self, out: &mut [u8]) -> usize {
@@ -2605,6 +2605,86 @@ mod tests {
         assert!(split(res_reused).1 > split(res).1);
 
         xenora_session_destroy(session);
+    }
+
+    #[test]
+    fn queued_s16_pcm_uses_controls_at_the_next_render() {
+        let _guard = serial();
+        let session = create();
+        assert_eq!(
+            xenora_session_audio_init(session, 48_000, 1, XENORA_AUDIO_FORMAT_PCM_S16LE),
+            XENORA_OK
+        );
+        let pcm = [0xe8, 0x03, 0x18, 0xfc, 0xd0, 0x07]; // 1000, -1000, 2000
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, pcm.as_ptr(), pcm.len() as u64) },
+            XENORA_OK
+        );
+
+        let mut output = [0xaa; 2];
+        let mut supplied = 0;
+        for (gain, muted, expected) in [(1.0, 0, 1000i16), (1.0, 1, 0), (0.5, 0, 1000)] {
+            assert_eq!(
+                xenora_session_audio_set_volume(session, gain, muted),
+                XENORA_OK
+            );
+            assert_eq!(
+                unsafe {
+                    xenora_session_audio_render(session, output.as_mut_ptr(), 2, &mut supplied)
+                },
+                XENORA_OK
+            );
+            assert_eq!(supplied, 2);
+            assert_eq!(output, expected.to_le_bytes());
+        }
+
+        let (mut queued, mut underruns, mut total) = (99, 99, 0);
+        assert_eq!(
+            unsafe {
+                xenora_session_audio_status(session, &mut queued, &mut underruns, &mut total)
+            },
+            XENORA_OK
+        );
+        assert_eq!((queued, underruns, total), (0, 0, 6));
+        assert_eq!(xenora_session_destroy(session), XENORA_OK);
+    }
+
+    #[test]
+    fn queued_float_pcm_retains_samples_submitted_while_muted() {
+        let _guard = serial();
+        let session = create();
+        assert_eq!(
+            xenora_session_audio_init(session, 48_000, 2, XENORA_AUDIO_FORMAT_PCM_F32LE),
+            XENORA_OK
+        );
+        assert_eq!(xenora_session_audio_set_volume(session, 1.0, 1), XENORA_OK);
+        let pcm: Vec<u8> = [0.75_f32, -0.5, f32::INFINITY, -4.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        assert_eq!(
+            unsafe { xenora_session_audio_submit(session, pcm.as_ptr(), pcm.len() as u64) },
+            XENORA_OK
+        );
+        assert_eq!(xenora_session_audio_set_volume(session, 0.5, 0), XENORA_OK);
+
+        let mut output = [0xaa; 17];
+        let mut actual = 0;
+        assert_eq!(
+            unsafe { xenora_session_audio_read(session, output.as_mut_ptr(), 17, &mut actual) },
+            XENORA_OK
+        );
+        assert_eq!(actual, 16);
+        for (sample, expected) in output[..16]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip([0.375_f32, -0.25, 0.0, -1.0])
+        {
+            assert_eq!(*sample, expected.to_le_bytes());
+        }
+        assert_eq!(output[16], 0xaa);
+        assert_eq!(xenora_session_destroy(session), XENORA_OK);
     }
 
     #[test]

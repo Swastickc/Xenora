@@ -15,6 +15,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var next: xenora_session = 1
     private var codes: [Operation: Int32] = [:]
     private var calls: [Operation] = []
+    private var sentInputs: [xenora_controller_input] = []
     private var invalidCalls = 0
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
 
@@ -29,6 +30,8 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     func count(_ operation: Operation) -> Int {
         lock.withLock { calls.filter { $0 == operation }.count }
     }
+
+    var inputs: [xenora_controller_input] { lock.withLock { sentInputs } }
 
     var clean: Bool { lock.withLock { live == 0 && invalidCalls == 0 } }
 
@@ -66,7 +69,10 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     }
 
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32 {
-        lock.withLock { call(.sendInput, handle) }
+        lock.withLock {
+            sentInputs.append(input)
+            return call(.sendInput, handle)
+        }
     }
 
     func pause(_ handle: xenora_session) -> Int32 { lock.withLock { call(.pause, handle) } }
@@ -176,7 +182,7 @@ func checkFrameLoopFailures() async -> [String] {
            "teardown leaked its model or session")
     try? await Task.sleep(for: .milliseconds(35))
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
-    return failures + (await checkFramePolling())
+    return failures + (await checkFramePolling()) + checkControllerComposition()
 }
 
 @MainActor
@@ -250,6 +256,42 @@ private func checkFramePolling() async -> [String] {
     expect(model.state == XENORA_LOOP_STOPPED && model.canStart && model.image === second
            && api.count(.status) == 4,
            "stop did not immediately publish terminal status and retain the last frame")
+    return failures
+}
+
+@MainActor
+private func checkControllerComposition() -> [String] {
+    var failures: [String] = []
+    let left = UInt32(XENORA_INPUT_LEFT)
+    let right = UInt32(XENORA_INPUT_RIGHT)
+    let action = UInt32(XENORA_INPUT_ACTION_A)
+    let api = ScriptedFrameLoop()
+    let controller = DetectedController(
+        identity: ObjectIdentifier(api), name: "Held controller", supportsHaptics: false,
+        snapshot: ControllerSnapshot(
+            buttons: left | action, x: 1, y: -1, leftTrigger: 0.25, rightTrigger: 0.75
+        )
+    )
+    let model = FrameLoopModel(api: api, readController: { controller })
+    model.startInteractive()
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    model.sendInput(buttons: right)
+    model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
+    model.pause()
+
+    let inputs = api.inputs
+    let expectedButtons = [left | action, right | action, left | action]
+    let actualButtons = inputs.map { $0.state.buttons }
+    if actualButtons != expectedButtons {
+        failures.append("controller composition sent buttons \(actualButtons), expected \(expectedButtons)")
+    }
+    if !inputs.allSatisfy({ input in
+        input.state.connected == 1 && input.state.stick_x == 32767 && input.state.stick_y == -32767
+            && input.left_trigger == 16384 && input.right_trigger == 49151
+    }) {
+        failures.append("screen direction or release replaced the connected controller's analog input")
+    }
     return failures
 }
 

@@ -78,6 +78,11 @@ final class FrameLoopModel: ObservableObject {
     private let api: any FrameLoopAPI
     private let readController: @MainActor () -> DetectedController?
     private let sleepBeforePoll: (@MainActor (Duration) async throws -> Void)?
+    private static let directions = UInt32(
+        XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT | XENORA_INPUT_UP | XENORA_INPUT_DOWN
+    )
+    private var screenDirection: UInt32 = 0
+    private var lastSentInput = xenora_controller_input()
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
     private var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
@@ -133,6 +138,8 @@ final class FrameLoopModel: ObservableObject {
         state = UInt32(XENORA_LOOP_FAILED)
         isInteractive = false
         controller = nil
+        screenDirection = 0
+        lastSentInput = xenora_controller_input()
         completed = 0
         frameId = XENORA_NO_FRAME
         image = nil
@@ -183,39 +190,44 @@ final class FrameLoopModel: ObservableObject {
     }
 
     func sendInput(buttons: UInt32) {
-        sendInput(buttons: buttons, x: 0, y: 0, connected: true)
-    }
-
-    private func sendInput(
-        buttons: UInt32, x: Int16, y: Int16, connected: Bool,
-        leftTrigger: Float = 0, rightTrigger: Float = 0
-    ) {
         guard session != 0, isInteractive else { return }
-        let state = xenora_input_state(
-            buttons: buttons,
-            stick_x: x,
-            stick_y: y,
-            mouse_dx: 0,
-            mouse_dy: 0,
-            mouse_buttons: 0,
-            connected: connected ? 1 : 0,
-            reserved: 0
-        )
-        var input = xenora_controller_input(
-            state: state, left_trigger: UInt16((leftTrigger * 65535).rounded()),
-            right_trigger: UInt16((rightTrigger * 65535).rounded())
-        )
-        check(api.sendInput(session, &input), operation: "send controller input")
+        screenDirection = buttons & Self.directions
+        updateGameController()
     }
 
     private func updateGameController() {
         let next = readController()
-        guard next != controller else { return }
-        controller = next
+        if next != controller { controller = next }
         let snapshot = next?.snapshot
-        sendInput(buttons: snapshot?.buttons ?? 0, x: snapshot?.x ?? 0, y: snapshot?.y ?? 0,
-                  connected: next != nil, leftTrigger: snapshot?.leftTrigger ?? 0,
-                  rightTrigger: snapshot?.rightTrigger ?? 0)
+        let physicalButtons = snapshot?.buttons ?? 0
+        // The screen replaces only directional buttons until Release.
+        let buttons = screenDirection == 0
+            ? physicalButtons : (physicalButtons & ~Self.directions) | screenDirection
+        let state = xenora_input_state(
+            buttons: buttons,
+            stick_x: snapshot?.x ?? 0,
+            stick_y: snapshot?.y ?? 0,
+            mouse_dx: 0,
+            mouse_dy: 0,
+            mouse_buttons: 0,
+            connected: next != nil || screenDirection != 0 ? 1 : 0,
+            reserved: 0
+        )
+        var input = xenora_controller_input(
+            state: state,
+            left_trigger: UInt16(((snapshot?.leftTrigger ?? 0) * 65535).rounded()),
+            right_trigger: UInt16(((snapshot?.rightTrigger ?? 0) * 65535).rounded())
+        )
+        guard state.buttons != lastSentInput.state.buttons
+            || state.stick_x != lastSentInput.state.stick_x
+            || state.stick_y != lastSentInput.state.stick_y
+            || state.connected != lastSentInput.state.connected
+            || input.left_trigger != lastSentInput.left_trigger
+            || input.right_trigger != lastSentInput.right_trigger else { return }
+
+        if check(api.sendInput(session, &input), operation: "send controller input") {
+            lastSentInput = input
+        }
     }
 
     func pause() {

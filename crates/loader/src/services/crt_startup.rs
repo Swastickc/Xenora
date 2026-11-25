@@ -29,7 +29,6 @@ pub(super) struct CrtStartup {
     per_thread_locale: bool,
     user_math_error: u64,
     invalid_parameter_handler: u64,
-    unhandled_exception_filter: u64,
     /// Handlers other than the default, `SIG_DFL`, which is zero.
     signals: BTreeMap<i32, u64>,
     /// Guest address of `_fmode`. `_commode` is the `int` after it.
@@ -79,10 +78,6 @@ impl CrtStartup {
 
     pub(super) fn set_invalid_parameter_handler(&mut self, handler: u64) -> u64 {
         std::mem::replace(&mut self.invalid_parameter_handler, handler)
-    }
-
-    pub(super) fn set_unhandled_exception_filter(&mut self, filter: u64) -> u64 {
-        std::mem::replace(&mut self.unhandled_exception_filter, filter)
     }
 
     /// The previous handler, or `None` for a signal the documentation does not

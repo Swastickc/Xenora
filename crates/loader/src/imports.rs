@@ -734,6 +734,7 @@ impl ImportRegistry {
             || rip == ENTRY_RETURN
             || rip == crate::exceptions::EXCEPTION_RETURN
             || rip == crate::exceptions::SCOPE_RETURN
+            || rip == crate::exceptions::FILTER_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -766,6 +767,9 @@ impl ImportRegistry {
         }
         if rip == crate::exceptions::SCOPE_RETURN {
             return crate::exceptions::scope_resume(cpu, memory);
+        }
+        if rip == crate::exceptions::FILTER_RETURN {
+            return crate::exceptions::filter_resume(cpu, memory);
         }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));

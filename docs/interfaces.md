@@ -307,12 +307,22 @@ catch when the process has an exception directory:
 Every other fault still stops the guest: `GeneralProtection`, `SimdException`,
 `IllegalInstruction` at any other opcode (it may be a valid instruction Xenora
 does not implement) including the runtime-limit marker `0xFE`, faults inside
-host services, and faults whose stack has no room for the dispatcher. A fault
-no filter accepts stops the guest with the original reason at the faulting
-instruction; a raised exception no frame accepts stops it with
-`ExitReason::UnhandledException(code)`. The filter stored by
-`SetUnhandledExceptionFilter` is not called. Nothing here was compared with
-Windows or with an Xbox console.
+host services, and faults whose stack has no room for the dispatcher.
+
+When a search for a fault or a raised exception reaches the end of the stack
+with no frame accepting it, the filter stored by `SetUnhandledExceptionFilter`
+is called as guest code with an `EXCEPTION_POINTERS` (#476). Its result
+`EXCEPTION_CONTINUE_EXECUTION` (-1) continues from the exception context,
+with any change the filter made to it; `EXCEPTION_CONTINUE_SEARCH` (0) and
+`EXCEPTION_EXECUTE_HANDLER` (1) take the default action, as does an exception
+with no filter set. Xenora's default action, a policy since the pages read
+give no exit status, is `ExitReason::ProcessExit(code)` with the exception
+code as the status and the registers of the raise or fault. Any other filter
+result, continuing a noncontinuable exception, an exit unwind (`RtlUnwindEx`
+with a NULL target frame) and the `ExceptionNestedException` and
+`ExceptionCollidedUnwind` dispositions stop the guest with
+`ExitReason::InvalidUnwind`. Nothing here was compared with Windows or with an
+Xbox console.
 
 ### CRT strings and byte memory
 
@@ -1029,7 +1039,7 @@ They are declared in the typed registry (`docs/runtime/services.md`), all
 | `_set_invalid_parameter_handler(handler)` | the previous handler, null at first | No service calls it for an invalid argument |
 | `__p__fmode()`, `__p__commode()` | the address of the guest `int` `_fmode` (initially `_O_TEXT`, `0x4000`, as documented) or `_commode` (initially 0; its documentation gives no initial value) | Nothing reads either until stdio exists |
 | `signal(sig, handler)` | the previous handler, `SIG_DFL` at first; `SIG_ERR` and `errno` `EINVAL` for a signal other than `SIGINT`, `SIGILL`, `SIGFPE`, `SIGSEGV`, `SIGTERM` and `SIGABRT` | No signal is ever raised. One table serves the process |
-| `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | No exception reaches it |
+| `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | Called at the end of an unhandled search (see "Structured exceptions and CPU faults"); no debugger or error-mode handling |
 
 `_fmode` and `_commode` share one 8-byte block allocated from the process heap
 on the first call to either. `ServicesState::crt_app_type` and

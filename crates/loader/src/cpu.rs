@@ -221,9 +221,6 @@ pub enum ExitReason {
     GuestYield,
     /// The running guest thread ended itself.
     GuestThreadExited,
-    /// A raised exception reached the end of the stack with no handler
-    /// accepting it. Holds the exception code.
-    UnhandledException(u32),
     /// Exception dispatch or unwinding stopped: malformed or unknown unwind
     /// data, an invalid handler disposition, a target frame that is not on
     /// the stack, or a request the dispatcher does not model.
@@ -244,7 +241,6 @@ impl fmt::Display for ExitReason {
             Self::GeneralProtection => write!(f, "guest general-protection fault"),
             Self::SimdException => write!(f, "guest SIMD floating-point exception"),
             Self::ProcessExit(status) => write!(f, "guest process exited with status {status}"),
-            Self::UnhandledException(code) => write!(f, "unhandled guest exception 0x{code:08x}"),
             Self::InvalidUnwind => write!(f, "guest exception dispatch or unwind failed"),
             Self::ServiceAbiViolation => {
                 write!(f, "host service changed a nonvolatile guest register")

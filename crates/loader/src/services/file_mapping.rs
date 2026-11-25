@@ -117,7 +117,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     {
         let views = Arc::clone(&views);
         let flush_state = Arc::clone(state);
-        registry.register(KERNEL32, "FlushViewOfFile", move |args, cpu, memory| {
+        registry.register(KERNEL32, "FlushViewOfFile", move |args, cpu, _memory| {
             let known = views
                 .lock()
                 .expect("file mapping views")

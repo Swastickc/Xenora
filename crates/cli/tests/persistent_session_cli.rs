@@ -251,6 +251,39 @@ fn existing_export_destinations_are_not_modified() {
 }
 
 #[test]
+fn a_closed_stdout_rolls_back_exports_and_allows_retry() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::Stdio;
+
+    let scratch = Scratch::new();
+    let frame_dir = scratch.0.join("retry frames");
+    let sequence = ["right", "left"];
+    let (reader, writer) = UnixStream::pair().expect("open a stream pair");
+    drop(reader);
+    let failed = Command::new(EXECUTABLE)
+        .args(["--backend", "reference", "--frame-dir"])
+        .arg(&frame_dir)
+        .args(sequence)
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .output()
+        .expect("run the CLI with a closed output stream");
+
+    status(&failed, 125);
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("could not write result"));
+    assert!(!frame_dir.exists(), "failed stdout left a frame directory");
+
+    let retry = Command::new(EXECUTABLE)
+        .args(["--backend", "reference", "--frame-dir"])
+        .arg(&frame_dir)
+        .args(sequence)
+        .output()
+        .expect("retry the CLI with working stdout");
+    verify_run(retry, "reference", &sequence, "RL", 0);
+    verify_exports(&frame_dir, &sequence);
+}
+
+#[test]
 #[ignore = "requires a native Metal device and validation enabled"]
 fn default_metal_backend_draws_every_frame_natively() {
     verify_run(

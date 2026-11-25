@@ -292,31 +292,50 @@ fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
     Ok(result)
 }
 
-fn write_frames(dir: &Path, frames: &[Frame]) -> io::Result<()> {
-    fs::create_dir(dir)?;
-    let mut created = Vec::with_capacity(frames.len());
-    let result = (|| {
-        for frame in frames {
-            let path = dir.join(format!("frame-{:04}.ppm", frame.sequence));
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            created.push(path);
-            write!(file, "P6\n{WIDTH} {HEIGHT}\n255\n")?;
-            for pixel in frame.rgba.as_chunks::<4>().0 {
-                file.write_all(&pixel[..3])?;
-            }
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        for path in created {
-            let _ = fs::remove_file(path);
-        }
-        let _ = fs::remove_dir(dir);
+#[derive(Debug)]
+struct PendingExport<'a> {
+    dir: &'a Path,
+    created: Vec<PathBuf>,
+    committed: bool,
+}
+
+impl PendingExport<'_> {
+    fn commit(mut self) {
+        self.committed = true;
     }
-    result
+}
+
+impl Drop for PendingExport<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            for path in &self.created {
+                let _ = fs::remove_file(path);
+            }
+            let _ = fs::remove_dir(self.dir);
+        }
+    }
+}
+
+fn write_frames<'a>(dir: &'a Path, frames: &[Frame]) -> io::Result<PendingExport<'a>> {
+    fs::create_dir(dir)?;
+    let mut export = PendingExport {
+        dir,
+        created: Vec::with_capacity(frames.len()),
+        committed: false,
+    };
+    for frame in frames {
+        let path = dir.join(format!("frame-{:04}.ppm", frame.sequence));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        export.created.push(path);
+        write!(file, "P6\n{WIDTH} {HEIGHT}\n255\n")?;
+        for pixel in frame.rgba.as_chunks::<4>().0 {
+            file.write_all(&pixel[..3])?;
+        }
+    }
+    Ok(export)
 }
 
 fn print_result(
@@ -409,21 +428,29 @@ fn main() -> ExitCode {
             return ExitCode::from(125);
         }
     };
-    if let Some(dir) = &options.frame_dir
-        && let Err(error) = write_frames(dir, &result.frames)
-    {
-        eprintln!(
-            "xenora-session: could not export frames to {}: {error}",
-            dir.display()
-        );
-        if error.kind() == io::ErrorKind::AlreadyExists {
-            return ExitCode::from(2);
+    let export = if let Some(dir) = &options.frame_dir {
+        match write_frames(dir, &result.frames) {
+            Ok(export) => Some(export),
+            Err(error) => {
+                eprintln!(
+                    "xenora-session: could not export frames to {}: {error}",
+                    dir.display()
+                );
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    return ExitCode::from(2);
+                }
+                return ExitCode::from(125);
+            }
         }
-        return ExitCode::from(125);
-    }
+    } else {
+        None
+    };
     if let Err(error) = print_result(&options, &result, io::stdout().lock()) {
         eprintln!("xenora-session: could not write result: {error}");
         return ExitCode::from(125);
+    }
+    if let Some(export) = export {
+        export.commit();
     }
     ExitCode::SUCCESS
 }

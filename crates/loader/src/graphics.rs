@@ -1374,6 +1374,8 @@ impl GraphicsContext {
     /// the start instance 0, or the draw is rejected; a zero index or instance
     /// count draws nothing. Index values are ordinary triangle-list indices
     /// (no primitive restart), range checked after adding the base vertex.
+    /// With a textured root signature, both position and texture coordinates
+    /// come from each resolved vertex.
     pub fn cmd_draw_indexed_instanced(
         &mut self,
         list: GraphicsHandle,
@@ -2082,14 +2084,18 @@ impl GraphicsContext {
                     if *index_count_per_instance == 0 || *instance_count == 0 {
                         continue;
                     }
-                    let indices = self.resolve_triangle_indices(
-                        memory,
-                        index_buffer,
-                        *start_index_location,
-                        *base_vertex_location,
-                    )?;
+                    let (index_handle, index_offset, format) =
+                        index_buffer.ok_or(GraphicsError::InvalidResourceHandle)?;
+                    let index_resource = self
+                        .resources
+                        .get(&index_handle)
+                        .ok_or(GraphicsError::InvalidResourceHandle)?;
+                    let index_view = (index_resource, index_offset, format);
+                    let index_range = (*start_index_location, *base_vertex_location);
                     let vertex_view = (vertex_resource, vertex_offset, vertex_stride);
                     let pixels = if let Some((_, root_signature)) = bindings.root_signature {
+                        let indices =
+                            Self::resolve_triangle_indices(memory, index_view, index_range)?;
                         self.textured_draw(
                             memory,
                             &bindings,
@@ -2100,8 +2106,12 @@ impl GraphicsContext {
                             (textured_renderer, backend_id),
                         )?
                     } else {
-                        let vertices =
-                            self.fetch_indexed_positions(memory, vertex_view, indices)?;
+                        let vertices = self.fetch_indexed_positions(
+                            memory,
+                            vertex_view,
+                            index_view,
+                            index_range,
+                        )?;
                         if let Some(renderer) = backend_renderer {
                             renderer(&vertices, viewport, clear_color)?
                         } else if backend_id == GraphicsBackendId::MetalNative {
@@ -2241,18 +2251,10 @@ impl GraphicsContext {
 
     /// Decode three indices from the bound view and apply the signed base vertex.
     fn resolve_triangle_indices(
-        &self,
         memory: &GuestMemory,
-        index_buffer: Option<(GraphicsHandle, usize, IndexFormat)>,
-        start: u32,
-        base_vertex: i32,
+        (index_res, index_offset, format): (&GraphicsResource, usize, IndexFormat),
+        (start, base_vertex): (u32, i32),
     ) -> Result<[usize; 3], GraphicsError> {
-        let (index_handle, index_offset, format) =
-            index_buffer.ok_or(GraphicsError::InvalidResourceHandle)?;
-        let index_res = self
-            .resources
-            .get(&index_handle)
-            .ok_or(GraphicsError::InvalidResourceHandle)?;
         let size = format.size();
         let mut raw_indices = [0u8; 12];
         let raw_indices = &mut raw_indices[..3 * size];
@@ -2278,7 +2280,8 @@ impl GraphicsContext {
         &self,
         memory: &GuestMemory,
         (vertex_resource, vertex_offset, vertex_stride): (Option<GraphicsHandle>, usize, usize),
-        indices: [usize; 3],
+        index_view: (&GraphicsResource, usize, IndexFormat),
+        index_range: (u32, i32),
     ) -> Result<[[f32; 4]; 3], GraphicsError> {
         let vertex_res = vertex_resource
             .and_then(|handle| self.resources.get(&handle))
@@ -2286,6 +2289,8 @@ impl GraphicsContext {
         if vertex_stride < 16 {
             return Err(GraphicsError::InvalidDescriptor);
         }
+        // Preserve flat draws' binding validation before reading index data.
+        let indices = Self::resolve_triangle_indices(memory, index_view, index_range)?;
         let mut vertices = [[0.0f32; 4]; 3];
         for (row, vertex) in vertices.iter_mut().zip(indices) {
             let at = vertex

@@ -825,6 +825,35 @@ fn run_indexed(
 }
 
 #[test]
+fn flat_indexed_draw_checks_the_vertex_binding_before_reading_indices() {
+    let mut rig = rig();
+    let (resource, offset, format) = index_buffer(&mut rig, R16_UINT);
+    for (stride, expected) in [
+        (None, GraphicsError::InvalidResourceHandle),
+        (Some(8), GraphicsError::InvalidDescriptor),
+    ] {
+        rig.ctx.reset_command_list(rig.list, rig.alloc).unwrap();
+        rig.ctx
+            .cmd_set_index_buffer(rig.list, resource, offset, format)
+            .unwrap();
+        if let Some(stride) = stride {
+            rig.ctx
+                .cmd_set_vertex_buffer(rig.list, rig.vb, 0, stride)
+                .unwrap();
+        }
+        rig.ctx
+            .cmd_draw_indexed_instanced(rig.list, 3, 1, u32::MAX, 0, 0)
+            .unwrap();
+        rig.ctx.close_command_list(rig.list).unwrap();
+        assert_eq!(
+            rig.ctx
+                .execute_command_list(rig.queue, rig.list, &rig.memory),
+            Err(expected)
+        );
+    }
+}
+
+#[test]
 fn indexed_inputs_require_buffer_resources() {
     let mut rig = rig();
     let texture = rig

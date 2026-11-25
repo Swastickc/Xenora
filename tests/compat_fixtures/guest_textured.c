@@ -166,20 +166,24 @@ static unsigned char texture_pixels[TEXTURE_BYTES] = {
     0, 0, 255, 255,   /* row 1, column 1: blue */
 };
 
-// The full-screen triangle. Every vertex carries the same texture coordinate,
-// so every pixel samples column 0 of the texture, which is red.
+// Sequential draws use a red full-screen triangle. In the indexed variants
+// those first three records form a degenerate triangle, so even an indexed
+// UV fetch cannot produce a blue frame when positions are fetched in order.
 static float scene[][VERTEX_FLOATS] = {
-    {-1.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
-    {3.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
-    {-1.0f, 3.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
 #if defined(GATE_INDEX16) || defined(GATE_INDEX32)
-    // Interleave the blue triangle's records with unused points. The
-    // resolved indices 7, 3, 5 cover the screen and sample column 1.
+    {-1.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
+    {-1.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
+    {-1.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
+    // The resolved indices 7, 3, 5 cover the screen and sample column 1.
     {-1.0f, -1.0f, 0.5f, 1.0f, 0.75f, 0.5f, 0.0f, 0.0f},
     {0.0f, 0.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
     {3.0f, -1.0f, 0.5f, 1.0f, 0.75f, 0.5f, 0.0f, 0.0f},
     {0.0f, 0.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
     {-1.0f, 3.0f, 0.5f, 1.0f, 0.75f, 0.5f, 0.0f, 0.0f},
+#else
+    {-1.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
+    {3.0f, -1.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
+    {-1.0f, 3.0f, 0.5f, 1.0f, 0.25f, 0.5f, 0.0f, 0.0f},
 #endif
 };
 

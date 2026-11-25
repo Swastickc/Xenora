@@ -50,6 +50,7 @@ remains unsupported.
 - Extended the read-only RDNA2 planning CLI (`python3 -m qa rdna2`) with family/status filters, compact summaries, Codex-ready manifests under `artifacts/`, active-claim exclusion (family claims exclude those families; path-only claims block overlapping permitted files), coverage reconcile against `semantic_coverage` without inflating counts, and inventory diffs. Covered by `tests/qa/test_rdna2_plan.py`; planning only, no GPU production edits.
 
 ### Fixed
+- The synthetic runtime task queue reports a timeout when a background operation without a cancellation token returns after its deadline was observed (#621).
 - The PE loader ignores thread-local storage directory bytes outside the optional header's declared directory count, so padding is not treated as TLS metadata (#573).
 - Structured startup reports now preserve the guest exit status when a thread-local storage callback ends the process before the entry point. The report keeps TLS as the last completed stage (#483).
 - `xenora run --startup-report` preserves piped guest input and applies the usual input size and deadline limits (#547).

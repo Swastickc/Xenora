@@ -213,7 +213,7 @@ impl<T, E> TaskQueue<T, E> {
         true
     }
 
-    /// Advance the queue's clock and request cooperative exit from expired work.
+    /// Record expiry of the active worker and request cooperative exit when available.
     /// A completion already available when the clock is sampled keeps its result.
     pub fn advance_time(&mut self, now: Duration) {
         self.collect_worker();
@@ -222,7 +222,7 @@ impl<T, E> TaskQueue<T, E> {
             && worker
                 .cancellation
                 .as_ref()
-                .is_some_and(CancellationToken::request)
+                .is_none_or(CancellationToken::request)
         {
             worker.timed_out = true;
         }
@@ -397,6 +397,45 @@ fn background_worker_preserves_capacity_and_manual_completion() {
         (id, TaskResult::Finished(Ok(17)))
     );
     assert!(!queue.dispatch_completion());
+}
+
+#[cfg(test)]
+#[test]
+fn sampled_deadline_applies_to_a_plain_worker_until_it_exits() {
+    use std::sync::mpsc::channel;
+    use std::time::Instant;
+
+    let mut queue = TaskQueue::<u32, u32>::new(1);
+    let (release, gate) = channel();
+    let (completed, results) = channel();
+    let deadline = Duration::from_millis(5);
+    let id = queue
+        .submit(
+            Some(deadline),
+            move || {
+                gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(17)
+            },
+            move |id, result| completed.send((id, result)).unwrap(),
+        )
+        .unwrap();
+    assert!(queue.dispatch_background(Duration::ZERO).unwrap());
+    queue.advance_time(deadline);
+    assert!(!queue.dispatch_completion());
+    assert_eq!(
+        queue.submit(None, || Ok(0), |_, _| {}),
+        Err(SubmitError::Full)
+    );
+
+    release.send(()).unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while !queue.dispatch_completion() {
+        assert!(Instant::now() < until, "worker did not complete");
+        std::thread::yield_now();
+    }
+    assert_eq!(results.try_recv().unwrap(), (id, TaskResult::TimedOut));
+    assert!(!queue.dispatch_completion());
+    assert!(queue.submit(None, || Ok(0), |_, _| {}).is_ok());
 }
 
 #[cfg(test)]

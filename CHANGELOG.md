@@ -6,6 +6,10 @@ exact revision and known limitations.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
+
 ### Fixed
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).
 - The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).

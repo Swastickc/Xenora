@@ -102,8 +102,8 @@ pub(super) const DEFAULT_HEIGHT: u16 = 25;
 
 pub(super) fn register(registry: &mut crate::imports::ImportRegistry, state: &Arc<ServicesState>) {
     use super::{
-        ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, GuestObject,
-        KERNEL32,
+        ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS, ERROR_NOT_ENOUGH_MEMORY,
+        ERROR_NOT_SUPPORTED, GuestObject, KERNEL32,
     };
     use crate::cpu::ExitReason;
     let create = Arc::clone(state);
@@ -295,6 +295,101 @@ pub(super) fn register(registry: &mut crate::imports::ImportRegistry, state: &Ar
         },
     );
 
+    // The console input buffer is empty and stays empty: the machine has no
+    // keyboard. Counting its events is exact.
+    let count_events = Arc::clone(state);
+    registry.register(
+        KERNEL32,
+        "GetNumberOfConsoleInputEvents",
+        move |args, cpu, memory| {
+            if !is_input(args.rcx) {
+                return count_events.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+            }
+            if args.rdx == 0 {
+                return count_events.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            memory
+                .write_u32(args.rdx, 0)
+                .map_err(ExitReason::MemoryFault)?;
+            Ok(1)
+        },
+    );
+
+    // Peeking an empty input buffer succeeds and reads nothing, as
+    // documented for an empty buffer.
+    let peek = Arc::clone(state);
+    for (name, _) in [("PeekConsoleInputA", ()), ("PeekConsoleInputW", ())] {
+        let peek = Arc::clone(&peek);
+        registry.register(KERNEL32, name, move |args, cpu, memory| {
+            if !is_input(args.rcx) {
+                return peek.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+            }
+            let written = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            if written != 0 {
+                memory
+                    .write_u32(written, 0)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            Ok(1)
+        });
+    }
+
+    // Reading console input would block forever on a machine with no
+    // keyboard, and blocking the only executor deadlocks it: the read is
+    // honestly unsupported rather than a silent hang.
+    let read_input = Arc::clone(state);
+    for (name, _) in [("ReadConsoleInputA", ()), ("ReadConsoleInputW", ())] {
+        let read_input = Arc::clone(&read_input);
+        registry.register(KERNEL32, name, move |_args, cpu, memory| {
+            let _ = memory;
+            read_input.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+        });
+    }
+
+    // The console code pages are UTF-8. Setting UTF-8 is a correct no-op;
+    // anything else would contradict the capture, which stays UTF-8.
+    let set_cp = Arc::clone(state);
+    for (name, _) in [("SetConsoleCP", ()), ("SetConsoleOutputCP", ())] {
+        let set_cp = Arc::clone(&set_cp);
+        registry.register(KERNEL32, name, move |args, cpu, memory| {
+            let _ = memory;
+            if args.rcx == 65001 {
+                Ok(1)
+            } else {
+                set_cp.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+            }
+        });
+    }
+
+    // Control handlers are stored and never fire: the machine generates no
+    // control events, so never firing is the correct behavior rather than a
+    // missing feature. The machine keeps no list beyond the count, since
+    // nothing reads the list back.
+    let ctrl = Arc::clone(state);
+    registry.register(
+        KERNEL32,
+        "SetConsoleCtrlHandler",
+        move |args, cpu, memory| {
+            let _ = memory;
+            if args.rcx == 0 && args.rdx != 0 {
+                return ctrl.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            Ok(1)
+        },
+    );
+
+    // Generating a control event would need asynchronous delivery to the
+    // one process, machinery the machine does not have: honestly unsupported.
+    let generate = Arc::clone(state);
+    registry.register(
+        KERNEL32,
+        "GenerateConsoleCtrlEvent",
+        move |_args, cpu, memory| {
+            let _ = memory;
+            generate.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+        },
+    );
+
     for symbol in [
         "CreateConsoleScreenBuffer",
         "GetConsoleScreenBufferInfo",
@@ -305,6 +400,15 @@ pub(super) fn register(registry: &mut crate::imports::ImportRegistry, state: &Ar
         "FillConsoleOutputCharacterA",
         "FillConsoleOutputCharacterW",
         "FillConsoleOutputAttribute",
+        "GetNumberOfConsoleInputEvents",
+        "PeekConsoleInputA",
+        "PeekConsoleInputW",
+        "ReadConsoleInputA",
+        "ReadConsoleInputW",
+        "SetConsoleCP",
+        "SetConsoleOutputCP",
+        "SetConsoleCtrlHandler",
+        "GenerateConsoleCtrlEvent",
     ] {
         registry.alias(CONSOLE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, crate::imports::ServiceStatus::Partial);
@@ -395,4 +499,10 @@ fn fill_cells(
             .map_err(ExitReason::MemoryFault)?;
     }
     Ok(1)
+}
+
+/// The input half of the console is the standard input device: screen
+/// buffers carry no input.
+fn is_input(handle: u64) -> bool {
+    handle == INPUT_HANDLE
 }

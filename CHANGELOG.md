@@ -6,10 +6,6 @@ exact revision and known limitations.
 
 ## [Unreleased]
 
-### Added
-
-- The interpreter and ARM64 dynamic binary translator accept 256-bit AVX2 packed integer arithmetic, comparisons, min/max, saturation, pack/unpack, horizontal arithmetic, absolute value and byte shuffles through shared semantics (#711).
-
 ### Fixed
 
 - PE startup and static inspection now keep ordinary import descriptors within the declared directory. Startup reports a missing in-range terminator at import binding, and static inspection retains the imports found before the error.

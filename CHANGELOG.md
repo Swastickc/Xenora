@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Fixed
+- The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).
 
 - PE startup and static inspection now keep ordinary import descriptors within the declared directory. Startup reports a missing in-range terminator at import binding, and static inspection retains the imports found before the error.
 

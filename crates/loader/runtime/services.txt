@@ -2028,3 +2028,98 @@ service ucrtbase.dll _getpid() -> i32
     fails never
     ref process.h _getpid
     test crt_getpid_matches_the_process_identity
+
+# The COM base surface: the per-thread apartment, the GUID constructors and
+# parsers, the task allocator and the PROPVARIANT clear. The runtime has no
+# class registry, so CoCreateInstance answers the documented "class not
+# registered" failure. crates/loader/src/services/com.rs
+
+service combase.dll CoInitializeEx(reserved: ptr, model: u32) -> i32
+    handler co_initialize_ex
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails E_INVALIDARG for a non-null reserved pointer or a COINIT bit outside the documented set; RPC_E_CHANGED_MODE when the thread already initialized the other apartment model
+    ref combaseapi.h CoInitializeEx and the COINIT enumeration
+    test co_initialize_ex_tracks_the_apartment_per_thread
+
+service combase.dll CoUninitialize() -> void
+    handler co_uninitialize
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails never; a thread with no outstanding initialization is left unchanged
+    ref combaseapi.h CoUninitialize
+    test co_uninitialize_balances_each_initialization
+
+service combase.dll CoCreateGuid(guid: out<16>) -> i32
+    handler co_create_guid
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails E_UNEXPECTED when the host has no entropy; a guest fault for an address it cannot write
+    ref combaseapi.h CoCreateGuid; RFC 4122 version 4 and variant bits
+    test co_create_guid_returns_a_version_four_guid
+
+service combase.dll StringFromGUID2(guid: ptr, text: ptr, capacity: i32) -> i32
+    handler string_from_guid2
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails 0 and no write when capacity is below 39 units; a guest fault for a GUID or buffer address it cannot access
+    ref combaseapi.h StringFromGUID2 and the CLSID text form
+    test string_from_guid2_renders_the_documented_text_form
+
+service combase.dll CLSIDFromString(text: ptr, clsid: out<16>) -> i32
+    handler clsid_from_string
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails CO_E_CLASSSTRING and no write for text that is not the braced or bare CLSID form; a guest fault for an address it cannot read
+    ref combaseapi.h CLSIDFromString
+    test clsid_from_string_parses_the_braced_and_bare_forms
+
+service combase.dll CoTaskMemAlloc(size: u64) -> ptr
+    handler co_task_mem_alloc
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails null when the task allocator cannot map the block; a zero size yields the smallest block, never null
+    ref combaseapi.h CoTaskMemAlloc
+    test co_task_memory_owns_its_blocks
+
+service combase.dll CoTaskMemFree(address: ptr) -> void
+    handler co_task_mem_free
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails never for the null pointer; a guest fault for a block the task allocator does not own, the analogue of the corruption a mismatched free causes
+    ref combaseapi.h CoTaskMemFree
+    test co_task_memory_owns_its_blocks
+
+service combase.dll CoTaskMemRealloc(address: ptr, size: u64) -> ptr
+    handler co_task_mem_realloc
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails null with the original block unchanged when the grow fails, null after freeing for a zero size, and a guest fault for a block the task allocator does not own
+    ref combaseapi.h CoTaskMemRealloc
+    test co_task_mem_realloc_preserves_contents_and_refuses_foreign_blocks
+
+service combase.dll CoCreateInstance(clsid: ptr, outer: ptr, class_context: u32, iid: ptr, object: ptr) -> i32
+    handler co_create_instance
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails E_POINTER for a null out pointer, E_INVALIDARG for a null CLSID or IID, and REGDB_E_CLASSNOTREG for every class because none is registered; the out pointer is nulled first
+    ref combaseapi.h CoCreateInstance
+    test co_create_instance_reports_an_unregistered_class
+
+service combase.dll PropVariantClear(variant: ptr) -> i32
+    handler prop_variant_clear
+    status partial
+    alias api-ms-win-core-com-l1-1-0.dll
+    alias ole32.dll
+    fails S_OK for the null pointer; stops the guest for the array, vector and by-reference forms and for VT_BSTR, VT_UNKNOWN and VT_DISPATCH, whose release paths are not modelled
+    ref propidl.h PROPVARIANT and PropVariantClear
+    test prop_variant_clear_clears_values_and_frees_task_strings

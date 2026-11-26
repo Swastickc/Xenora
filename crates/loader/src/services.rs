@@ -31,6 +31,7 @@ mod errors;
 mod events;
 mod file_mapping;
 mod files;
+pub mod gaming_runtime;
 mod gdk_queue;
 mod graphics;
 mod heap;

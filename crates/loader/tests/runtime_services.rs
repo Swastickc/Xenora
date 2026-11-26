@@ -7083,3 +7083,71 @@ fn vsscanf_scans_through_the_va_list() {
         assert_eq!(guest.memory.read_u32(work + 0x60).unwrap(), 42);
     }
 }
+
+#[test]
+fn synthetic_lifecycle_queue_teardown_is_terminal_only_with_open_handles() {
+    use xenora_loader::services::gaming_runtime::register_synthetic_lifecycle;
+    let names = [
+        "XGameRuntimeInitialize",
+        "XGameRuntimeUninitialize",
+        "XTaskQueueCreate",
+        "XTaskQueueCloseHandle",
+    ];
+    for close_before_teardown in [true, false] {
+        let imports: Vec<_> = names
+            .iter()
+            .map(|name| ("xgameruntime.dll", Symbol::Name(name)))
+            .collect();
+        let image = build(&imports);
+        let pe = ParsedPe::parse(&image.bytes).unwrap();
+        let mut memory = pe.load_into_memory(&image.bytes).unwrap().memory;
+        memory
+            .map_region(SCRATCH, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory
+            .map_region(STACK, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let (mut registry, _, state) = standard_with_state(0);
+        register_synthetic_lifecycle(&mut registry, state);
+        assert_eq!(
+            registry
+                .bind_imports(&pe, &image.bytes, BASE, &mut memory)
+                .unwrap(),
+            4
+        );
+        let mut engine = DbtEngine::new(256 * 1024).unwrap();
+        engine.set_import_registry(registry);
+        let mut call = |index: u64, args: &[u64]| {
+            let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index, STACK_TOP);
+            for (reg, value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+                .into_iter()
+                .zip(args)
+            {
+                cpu.set(reg, *value);
+            }
+            assert_eq!(
+                engine.run(&mut cpu, &mut memory, 20).exit_reason,
+                ExitReason::Halt
+            );
+            (cpu.get(Register::Rax), memory.read_u64(SCRATCH).unwrap())
+        };
+        assert_eq!(call(0, &[]).0, 0);
+        assert_eq!(call(0, &[]).0, 0);
+        let (status, handle) = call(2, &[0, 0, SCRATCH]);
+        assert_eq!(status, 0);
+        assert_ne!(handle, 0);
+        if close_before_teardown {
+            call(3, &[handle]);
+        }
+        call(1, &[]);
+        let expected = if close_before_teardown {
+            0
+        } else {
+            0x8924_0105
+        };
+        assert_eq!(call(0, &[]).0, expected);
+        call(3, &[handle]);
+        call(1, &[]);
+        assert_eq!(call(0, &[]).0, expected);
+    }
+}

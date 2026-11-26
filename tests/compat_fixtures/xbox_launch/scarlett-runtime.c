@@ -8,6 +8,14 @@ int launch_entry(void) {
     if (result < 0) {
         return 1;
     }
+    if (XGameRuntimeInitialize() != 0) {
+        return 2;
+    }
+    XGameRuntimeUninitialize();
+    if (XGameRuntimeInitialize() != 0) {
+        return 3;
+    }
+    XGameRuntimeUninitialize();
     XGameRuntimeUninitialize();
     return 0;
 }

@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 116 |
-| Generated adapters | 116 |
-| Unique handler implementations | 116 |
-| Implemented | 24 |
+| Services with a declared ABI | 117 |
+| Generated adapters | 117 |
+| Unique handler implementations | 117 |
+| Implemented | 25 |
 | Partial | 90 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 116 |
-| API-set aliases (not services) | 116 |
+| Conformance-tested through guest dispatch | 117 |
+| API-set aliases (not services) | 117 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -36,6 +36,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!__stdio_common_vsprintf_s` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null buffer, a zero count, a null or invalid format, or ERANGE when the text does not fit, and the buffer becomes empty; the invalid parameter handler is not modelled, so execution always continues |
 | `ucrtbase.dll!__stdio_common_vfprintf_s` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or format or an invalid format; identical to the plain form here because %n is always invalid |
 | `ucrtbase.dll!putchar` | `(character: i32) -> i32` | implemented | never: writing stdout cannot fail, as the output is captured |
+| `ucrtbase.dll!puts` | `(text: ptr) -> i32` | implemented | EOF with errno EINVAL for a null string; writing stdout cannot otherwise fail, as the output is captured |
 | `ucrtbase.dll!fwrite` | `(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64` | partial | 0 with errno EINVAL for a null buffer or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fputs` | `(text: ptr, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fflush` | `(stream: ptr) -> i32` | partial | stops the guest for a pointer that is no stream |

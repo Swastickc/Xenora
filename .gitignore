@@ -38,9 +38,8 @@
 
 __pycache__/
 *.pyc
-/diagnostics/probe/
-/diagnostics/gta6-candidate-*/
-/diagnostics/gta6-check/
+# Local probe reports and other diagnostics
+/diagnostics/
 
 # Native application build output
 /app/.build/

@@ -333,6 +333,28 @@ up to 1 MiB. Each nonempty span must be fully mapped with the required permissio
 A span may cross adjacent guest regions. Writes validate the full destination before changing
 bytes, and moves preserve the original source bytes when ranges overlap.
 
+
+The registry also provides the small CRT utilities of the survey under UCRT,
+the CRT string, convert and environment API sets and - for the copying forms
+and `strrchr` - the private API set mingw imports them through: `strcpy`,
+`strncpy`, `strcat` and `strncat` copy and concatenate with the documented
+zero padding and termination of the bounded forms. `strrchr` scans to the
+terminator included. `_strdup` copies into process-heap memory the caller
+owns. `_strlwr`, `_strupr` and `_strrev` convert or reverse in place with
+the ASCII semantics of the C locale, as do the collation forms `strcoll`
+(byte-wise) and `strxfrm` (the identity copy with the documented length
+answer). `memcpy_s` and `memmove_s` enforce the Annex K constraints: a null
+pointer is invalid, a count over the destination size zeroes the destination
+and answers ERANGE, and `memcpy_s` also rejects overlapping ranges. The
+integer formatting family `_itoa`, `_ltoa`, `_i64toa`, `_ultoa`, `_ui64toa`
+and `_itoa_s` formats radix 2 through 36 with lowercase digits; negative
+numbers in radix ten carry a minus sign, in every other radix the value is
+its unsigned width. The `_s` form answers EINVAL when the buffer cannot hold
+the digits. `getenv_s` answers the documented empty over the empty
+environment: length zero, no error. All of this is implemented behaviour
+verified through the unit tests and the hosted `crt_crtutils` fixture.
+Nothing here was compared with Windows or with an Xbox console.
+
 ### Program arguments and environment
 
 A hosted C program's startup code gets `argc`, `argv` and `envp` for `main`
@@ -575,6 +597,61 @@ the first unparsed guest address to a supplied end pointer. Overflow
 clamps the result and sets ERANGE. Scans have a 1 MiB input budget. The long-long variants and
 Microsoft's _strtoi64, _strtoui64, _wcstoi64, and _wcstoui64 apply the
 same rules with 64-bit results.
+
+### The narrow file services
+
+The narrow forms of the directory, move, copy and find services read UTF-8
+paths, coherent with the process code page, and share one implementation
+and one drive with the wide forms: a file written through one width is the
+file read through the other. `CopyFile` onto itself is a sharing violation,
+`GetFullPathName` resolves relative names against the synthetic root -
+there is no current directory yet - `SetFileAttributes` accepts only the
+normal and archive bits because the drive keeps no attribute state, and
+`GetTempFileName` answers unique names within a run. Nothing was compared
+with Windows.
+
+### The legacy memory services
+
+`GlobalAlloc` and `LocalAlloc` are thin wrappers over the process heap, as
+on every 32- or 64-bit Windows: memory is always fixed, the handle is the
+pointer itself, and the moveable bit and the discardable hints of the
+16-bit memory manager are accepted and inert. Freeing the null handle is
+a no-op success; freeing a non-allocation answers the handle itself with
+the invalid-handle error. Flags outside the documented mask are an invalid
+parameter. Nothing was compared with Windows.
+
+### Error reporting
+
+`FormatMessage` reads the system table for the error codes the synthetic
+services produce, in en-US, with the trailing newline real messages carry.
+Insert sequences expand string and numeric specifiers; the arguments are
+read as a flat array of machine words, so floating point inserts are not
+formatted. The allocate form allocates from the process heap and the memory
+is released with `LocalFree`, as documented. Unknown identifiers fail with
+the missing-message error; module tables do not exist yet and
+`FORMAT_MESSAGE_FROM_HMODULE` is refused as unsupported. `SetErrorMode`
+stores and exchanges the mode even though no error dialogs exist. Nothing
+was compared with Windows.
+
+### The environment block
+
+The environment is empty, so expansion is the identity - the documented
+result when no variable is defined. `ExpandEnvironmentStrings` counts the
+terminator in both its success return and its required-size answer.
+`GetEnvironmentStringsW` hands each caller its own copy of the empty block
+from the process heap, because the documentation requires the caller to
+free it.
+
+### The simulated machine
+
+`GetVersionEx` reports a Windows 10 era NT workstation, coherent with the
+GDK-era programs the runtime hosts; it is simulated, not measured.
+`GetWindowsDirectory` and `GetSystemDirectory` answer the synthetic drive's
+layout, the computer name is XENORA, and the processor topology is one core
+in one package in one group, coherent with the count `GetSystemInfo`
+reports. Numa, cache and group relationships are not modeled yet:
+enumerating them alone answers zero entries. Nothing was compared with
+Windows.
 
 ### Guest modules
 
@@ -1044,3 +1121,38 @@ yet and `xenora run` takes `--metal-hud` for the embedded fixtures only, so
 for a program the switch turns on tracing instead. Apple's Metal Performance
 HUD cannot attach to these frames, which are read back from offscreen Metal
 targets and drawn as images.
+
+### Module file names
+
+`GetModuleFileNameA` and `GetModuleFileNameW` answer the path the program was
+started with - the same string the command line is built from - for a null
+module handle or the main image base. A small buffer receives the documented
+truncation form: what fits, terminated, with the capacity itself as the
+answer and ERROR_INSUFFICIENT_BUFFER. A foreign module fails with
+ERROR_MOD_NOT_FOUND because no library is ever loaded into the address
+space as an image. This is implemented behaviour verified through the unit
+tests. Nothing here was compared with Windows or with an Xbox console.
+
+### The registry is honestly empty
+
+The advapi32 registry services - `RegOpenKeyExA/W`, `RegQueryValueExA/W`
+and `RegCloseKey` - model the machine's registry as empty. The predefined
+roots open because they always exist; every subkey and every value is
+absent with ERROR_FILE_NOT_FOUND, which is what a fresh Windows answers
+for the keys a program would probe. Programs that need registry values to
+exist are not supported. This is implemented behaviour verified through
+the unit tests. Nothing here was compared with Windows or with an Xbox
+console.
+
+### Memory mappings and process creation
+
+`CreateFileMappingA/W` support paging-file-backed shared memory only:
+`INVALID_HANDLE_VALUE` creates an object tracked in the central handle
+table, a real file fails honestly with ERROR_NOT_SUPPORTED rather than
+serving content writes could not reach. `MapViewOfFile` allocates the
+zero-filled view fresh pages document; views from offsets or at chosen
+addresses are not modelled. `UnmapViewOfFile` releases the view.
+`CreateProcessA/W` fail honestly with ERROR_NOT_SUPPORTED and zero the
+process information structure, because the guest is the only process.
+This is implemented behaviour verified through the unit tests. Nothing
+here was compared with Windows or with an Xbox console.

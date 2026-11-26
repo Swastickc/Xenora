@@ -114,7 +114,7 @@ implemented wrongly.
 - **MODE holds two round-mode fields and two denormal fields.** Page 47:
   `FP_ROUND[1:0]` is the single-precision mode and `[3:2]` the double and half
   mode; `FP_DENORM[5:4]` is single and `[7:6]` double and half.
-- **`S_BFE_U32` and `S_BFE_I32` write SCC.** Page 113 gives `SCC = (D.u != 0)`.
+- **`S_BFE_U32` and `S_BFE_I32` write SCC.** Pages 104 and 105 give `SCC = (D.u != 0)` and `SCC = (D.i != 0)`.
   Older guides omit the SCC line, which is why the errata list mentions them.
 
 ## Second sources
@@ -125,7 +125,7 @@ re-derive from the guide, and are never a substitute for it.
 - Mesa's `src/amd/compiler/README-ISA.md`, an unofficial GCN and RDNA errata
   list. It covers several of the rows above and adds the hardware hazard notes
   below. Two of its items do not apply to this guide: it says `s_bfe_*` omit
-  the SCC write, which document 70648 states on page 113, and it reports a
+  the SCC write, which document 70648 states on pages 104 and 105, and it reports a
   conflict between guide sections 9.3 and 13.8.1 over the FLAT `SADDR` field,
   where page 86 already accepts both "NULL or 0x7f".
 - An independent audit of this guide by another RDNA2 project, whose findings

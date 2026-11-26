@@ -15,7 +15,7 @@ exact revision and known limitations.
 - Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
 
 ### Fixed
-- The RDNA 2 errata record named `V_FFBH`/`V_FFBL` as users of the undefined `FindFirst1fromLSB` helper and said its empty-mask result was missing. Its only user is `V_READFIRSTLANE_B32`, whose text gives that result; the row is corrected. `S_BFE_I32` now carries the SCC note its PR described.
+- The RDNA 2 errata record named `V_FFBH`/`V_FFBL` as users of the undefined `FindFirst1fromLSB` helper and said its empty-mask result was missing. Its only user is `V_READFIRSTLANE_B32`, whose text gives that result; the row is corrected. `S_BFE_I32` now carries the SCC note its PR described, and the `S_BFE_*` SCC citation names pages 104 and 105 instead of 113.
 - PE inspection and import binding now require the complete two-byte Hint before a named symbol in both ordinary and delayed import tables (#768).
 - Synchronous runtime tasks that unwind now retain their queue slot and deliver a `WorkerPanicked` completion, matching background work (#755).
 - The synthetic registry returns Win32 status codes to guest callers and preserves the identity of predefined root handles, including the Win64 SDK constants (#760).

@@ -178,7 +178,17 @@ fn split_named_declarator(declaration: &str) -> Option<(&str, &str)> {
 fn is_c_qualifier(word: &str) -> bool {
     matches!(
         word,
-        "const" | "volatile" | "restrict" | "__restrict" | "__restrict__"
+        "const"
+            | "volatile"
+            | "restrict"
+            | "__restrict"
+            | "__restrict__"
+            | "_Nullable"
+            | "_Nonnull"
+            | "_Null_unspecified"
+            | "__nullable"
+            | "__nonnull"
+            | "__null_unspecified"
     )
 }
 
@@ -203,7 +213,11 @@ fn parse_c_type(s: &str) -> Option<AbiType> {
         });
     }
 
-    let normalized = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = s
+        .split_whitespace()
+        .filter(|word| !is_c_qualifier(word))
+        .collect::<Vec<_>>()
+        .join(" ");
     match normalized.as_str() {
         "void" => Some(AbiType::Void),
         "int" | "int32_t" => Some(AbiType::I32),
@@ -275,6 +289,75 @@ mod tests {
             .map(|param| (param.name.as_str(), param.abi_type.clone()))
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn postfix_qualified_scalars_keep_their_abi_types() {
+        let mut catalog = MetadataCatalog::new();
+        let declarations = "void inspect(double const, float const, int const, unsigned int const, long long const, double const named);";
+        assert_eq!(
+            parse_c_declarations(&mut catalog, "example.dll", "test.h", declarations),
+            1
+        );
+        let signature = catalog.lookup("example.dll", "inspect").unwrap();
+        let expected = vec![
+            ("arg0", AbiType::F64),
+            ("arg1", AbiType::F32),
+            ("arg2", AbiType::I32),
+            ("arg3", AbiType::U32),
+            ("arg4", AbiType::I64),
+            ("named", AbiType::F64),
+        ];
+        let actual: Vec<_> = signature
+            .params
+            .iter()
+            .map(|param| (param.name.as_str(), param.abi_type.clone()))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sdk_nullability_annotations_do_not_become_parameter_names() {
+        let mut catalog = MetadataCatalog::new();
+        let declarations = "void inspect(char * _Nullable, int * _Nonnull);";
+        assert_eq!(
+            parse_c_declarations(&mut catalog, "example.dll", "test.h", declarations),
+            1
+        );
+        let signature = catalog.lookup("example.dll", "inspect").unwrap();
+        let pointer = AbiType::Pointer {
+            is_const: false,
+            pointee: "void".into(),
+        };
+        assert_eq!(
+            signature
+                .params
+                .iter()
+                .map(|param| (param.name.as_str(), param.abi_type.clone()))
+                .collect::<Vec<_>>(),
+            vec![("arg0", AbiType::StringAnsi), ("arg1", pointer)]
+        );
+    }
+
+    #[test]
+    fn pointer_return_types_are_ingested() {
+        let mut catalog = MetadataCatalog::new();
+        let declarations = "void *opaque(void);\nchar **table(void);\nstruct record *record(void);";
+        assert_eq!(
+            parse_c_declarations(&mut catalog, "example.dll", "test.h", declarations),
+            3
+        );
+        let pointer = AbiType::Pointer {
+            is_const: false,
+            pointee: "void".into(),
+        };
+        for symbol in ["opaque", "table", "record"] {
+            assert_eq!(
+                catalog.lookup("example.dll", symbol).unwrap().return_type,
+                pointer,
+                "{symbol}"
+            );
+        }
     }
 
     #[test]

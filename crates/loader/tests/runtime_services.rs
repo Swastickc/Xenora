@@ -2476,6 +2476,109 @@ fn a_file_written_through_a_stream_reads_back_line_by_line() {
 /// at the end of the file"; "r+" needs the file to exist; "w+" and "a+" also
 /// read. A null or empty name or mode returns null with `EINVAL`.
 #[test]
+fn fread_reads_whole_items_from_files_and_stdin() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "read.bin", b"0123456789abcdef");
+    let file = opened(&mut guest, "read.bin", "rb");
+
+    // Four items of four bytes, then a partial read: only whole items count.
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 4, 4, file]), 4);
+    let mut stored = [0u8; 16];
+    guest.memory.read_bytes(TEXT + 0x4000, &mut stored).unwrap();
+    assert_eq!(&stored, b"0123456789abcdef");
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 4, 4, file]), 0);
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+
+    // A five-byte remainder with four-byte items reads one whole item.
+    close(&mut guest, file);
+    store(&mut guest, "odd.bin", b"abcde");
+    let file = opened(&mut guest, "odd.bin", "rb");
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 4, 4, file]), 1);
+    let mut stored = [0u8; 4];
+    guest.memory.read_bytes(TEXT + 0x4000, &mut stored).unwrap();
+    assert_eq!(&stored, b"abcd");
+
+    // fread may read stdin, a write-only stream may not be read.
+    close(&mut guest, file);
+    let file = opened(&mut guest, "writeonly.bin", "wb");
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 1, 4, file]), 0);
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    close(&mut guest, file);
+
+    // A null buffer or stream is EINVAL; no items or no size reads nothing.
+    for args in [[0, 1, 4, 1], [TEXT + 0x4000, 1, 4, 0]] {
+        let file = opened(&mut guest, "odd.bin", "rb");
+        let mut use_args = args;
+        use_args[3] = if args[3] == 1 { file } else { 0 };
+        assert_eq!(guest.call("fread", &use_args), 0);
+        assert_eq!(guest.errno(), EINVAL);
+        guest.set_errno(0);
+        close(&mut guest, file);
+    }
+
+    // fgetc walks the file byte by byte and answers EOF at its end.
+    let file = opened(&mut guest, "odd.bin", "rb");
+    for expected in b"abcde".iter() {
+        assert_eq!(
+            guest.call("fgetc", &[file]) & 0xFFFF_FFFF,
+            u64::from(*expected)
+        );
+    }
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    close(&mut guest, file);
+    assert_eq!(guest.call("fgetc", &[0]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EINVAL);
+    guest.set_errno(0);
+}
+
+#[test]
+fn fseek_ftell_and_rewind_move_through_file_streams() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "seek.bin", b"0123456789abcdef");
+    let file = opened(&mut guest, "seek.bin", "rb");
+
+    // ftell starts at zero; SEEK_SET, SEEK_CUR and SEEK_END move as documented.
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("fseek", &[file, 4, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 4);
+    assert_eq!(guest.call("fseek", &[file, 2, 1]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 6);
+    // SEEK_END minus four: the sign bit of the 32-bit form travels as unsigned.
+    assert_eq!(
+        guest.call("fseek", &[file, 0xFFFF_FFFC, 2]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 12);
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, u64::from(b'c'));
+
+    // Reading past the position the seek set proves the move, and rewind
+    // returns to the start while clearing the end-of-file indicator.
+    assert_eq!(guest.call("fseek", &[file, 16, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    guest.call("rewind", &[file]);
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, u64::from(b'0'));
+
+    // A bad origin, a null stream and a position before the start are EINVAL.
+    for args in [[file, 0, 7], [file, 0xFFFF_FFFF, 0]] {
+        assert_eq!(
+            guest.call("fseek", &args) & 0xFFFF_FFFF,
+            0xFFFF_FFFF,
+            "{args:x?}"
+        );
+        assert_eq!(guest.errno(), EINVAL, "{args:x?}");
+        guest.set_errno(0);
+    }
+    assert_eq!(guest.call("ftell", &[0]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EINVAL);
+    guest.set_errno(0);
+    close(&mut guest, file);
+}
+
+#[test]
 fn fopen_modes_follow_the_documentation() {
     let (mut guest, _) = stdio_guest();
     guest.set_errno(0);

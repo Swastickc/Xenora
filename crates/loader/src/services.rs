@@ -18,6 +18,7 @@ mod crt_callbacks;
 mod crt_clock;
 mod crt_files;
 mod crt_format;
+mod crt_legacy;
 mod crt_math;
 mod crt_startup;
 mod crt_streams;
@@ -711,6 +712,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     // The legacy CRT's printf family, which the variadic calling convention
     // keeps out of the typed table (#459).
     crt_streams::register_legacy(registry);
+    crt_legacy::register(registry, &state);
     heap::register(registry, &state);
     cxx::register(registry, &state);
 

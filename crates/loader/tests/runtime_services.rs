@@ -4343,7 +4343,7 @@ const LEGACY_DATA_SYMBOLS: [&str; 7] = [
 /// Legacy-linked binaries import these services from `msvcrt.dll`, where the
 /// compatibility mapping resolves them to the same handlers as the modern
 /// runtime.
-const LEGACY_FUNCTION_SYMBOLS: [&str; 11] = [
+const LEGACY_FUNCTION_SYMBOLS: [&str; 17] = [
     "strlen",
     "memcpy",
     "malloc",
@@ -4355,6 +4355,12 @@ const LEGACY_FUNCTION_SYMBOLS: [&str; 11] = [
     "sprintf",
     "_vsnprintf",
     "_vscprintf",
+    "_time64",
+    "_tzset",
+    "_umask",
+    "_getpid",
+    "rand",
+    "srand",
 ];
 
 const JUNK: u64 = 0xFFFF_FFFF_0000_0000;
@@ -6484,4 +6490,40 @@ fn legacy_printf_forms_format_and_count() {
     let mut whole = [0u8; 7];
     guest.memory.read_bytes(work + 0x180, &mut whole).unwrap();
     assert_eq!(&whole, b"42-fin\0");
+}
+
+#[test]
+fn legacy_time_pid_mask_and_random_services_run() {
+    let mut guest = Guest::new();
+    // `_time64` answers the injected clock: the fixture starts at
+    // 0x01DA000012345678 100-nanosecond intervals past 1601 and advances a
+    // few ticks an operation, so the seconds sit inside the window the two
+    // readings around the call bracket.
+    guest.call("GetSystemTimeAsFileTime", &[SCRATCH]);
+    let before = guest.memory.read_u64(SCRATCH).unwrap();
+    let seconds = guest.call("_time64", &[0]);
+    guest.call("GetSystemTimeAsFileTime", &[SCRATCH]);
+    let after = guest.memory.read_u64(SCRATCH).unwrap();
+    let unix = |filetime: u64| (filetime - 116_444_736_000_000_000) / 10_000_000;
+    assert!(unix(before) <= seconds && seconds <= unix(after));
+    assert_eq!(seconds, 0x652C_E246);
+    // The store form writes the same value through a non-null argument.
+    let work = guest.call("malloc", &[0x40]);
+    assert_eq!(guest.call("_time64", &[work]), seconds);
+    assert_eq!(guest.memory.read_u64(work).unwrap(), seconds);
+    // `_tzset` is void and leaves no error behind.
+    guest.call("_tzset", &[]);
+    // `_umask` answers the previous mask: first zero, then the one just set.
+    assert_eq!(guest.call("_umask", &[0o022]), 0);
+    assert_eq!(guest.call("_umask", &[0o077]), 0o022);
+    // `_getpid` answers the hosted process identifier, as GetCurrentProcessId.
+    assert_ne!(guest.call("_getpid", &[]), 0);
+    // `rand` follows the documented recurrence from its default seed: the
+    // published reference sequence of the legacy CRT is 41, 18467, 6334.
+    assert_eq!(guest.call("rand", &[]), 41);
+    assert_eq!(guest.call("rand", &[]), 18467);
+    assert_eq!(guest.call("rand", &[]), 6334);
+    // `srand` restarts the sequence: seed 1 is the default state.
+    guest.call("srand", &[1]);
+    assert_eq!(guest.call("rand", &[]), 41);
 }

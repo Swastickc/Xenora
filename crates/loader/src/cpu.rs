@@ -132,6 +132,8 @@ pub struct CpuState {
     /// Starts as FNINIT leaves it. The value an operating system gives a new
     /// thread is not modelled.
     pub x87: X87State,
+    /// Bits 255:128 of YMM0-YMM15. Legacy SSE instructions never change them.
+    pub ymm_high: [u128; 16],
 }
 
 impl CpuState {
@@ -148,6 +150,7 @@ impl CpuState {
             mxcsr: Mxcsr::default(),
             df: false,
             x87: X87State::INIT,
+            ymm_high: [0; 16],
         }
     }
 

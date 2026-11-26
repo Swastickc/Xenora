@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assemble the original x86-64 fixtures with the LLVM assembler.
 
-  generate   write integer.txt, vector.txt and float.txt next to this file
+  generate   write integer.txt, vector.txt, float.txt, avx.txt and avx_forms.txt next to this file
   --check    reassemble in memory and fail if a committed fixture differs
 
 Each output line is `<hex bytes> | <Intel-syntax text>`. The assembler is
@@ -246,6 +246,186 @@ def float_cases():
     return out
 
 
+def avx_cases():
+    place = " ptr [rsi + 4*rdi + 16]"
+    whole = {"xmm": "xmmword" + place, "ymm": "ymmword" + place}
+    xmm, quad, dword = "xmmword" + place, "qword" + place, "dword" + place
+    out = ["vzeroupper", "vzeroall"]
+    for v in ("xmm", "ymm"):
+        for op in "vmovaps vmovapd vmovups vmovupd vmovdqa vmovdqu".split():
+            out += [f"{op} {v}3, {v}9", f"{op} {v}10, {v}1", f"{op} {v}2, {v}2", f"{op} {v}12, {whole[v]}",
+                    f"{op} {whole[v]}, {v}11"]
+        for op in "vmovntps vmovntpd vmovntdq".split():
+            out.append(f"{op} {whole[v]}, {v}11")
+        out.append(f"vlddqu {v}12, {whole[v]}")
+        for op in "vandps vandpd vandnps vandnpd vorps vorpd vxorps vxorpd".split():
+            out += [f"{op} {v}3, {v}9, {v}10", f"{op} {v}12, {v}1, {whole[v]}", f"{op} {v}2, {v}2, {v}2",
+                    f"{op} {v}3, {v}3, {v}9", f"{op} {v}3, {v}9, {v}3"]
+        for op in "vmovsldup vmovshdup vmovddup".split():
+            out += [f"{op} {v}3, {v}9", f"{op} {v}12, {v}1", f"{op} {v}2, {v}2"]
+        for op in ("vmovsldup", "vmovshdup"):
+            out.append(f"{op} {v}12, {whole[v]}")
+        for op in ("vmovmskps", "vmovmskpd"):
+            out += [f"{op} ebx, {v}9", f"{op} r10d, {v}3"]
+        out.append(f"vbroadcastss {v}12, {dword}")
+        for op in ("vpermilps", "vpermilpd"):
+            out += [f"{op} {v}3, {v}9, {n}" for n in (0, 1, 2, 5, 27, 78, 177, 228, 255)]
+            out += [f"{op} {v}12, {whole[v]}, 114", f"{op} {v}2, {v}2, 57", f"{op} {v}3, {v}9, {v}10",
+                    f"{op} {v}12, {v}1, {whole[v]}", f"{op} {v}2, {v}2, {v}2", f"{op} {v}3, {v}9, {v}3"]
+    out += [f"vmovddup xmm12, {quad}", f"vmovddup ymm12, {whole['ymm']}", f"vmovntdqa xmm12, {xmm}"]
+    for op in "vpand vpandn vpor vpxor".split():
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, {xmm}", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3"]
+    for op, width in (("vmovss", dword), ("vmovsd", quad)):
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, xmm2", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3", f"{op} xmm12, {width}", f"{op} {width}, xmm11"]
+    out += [f"vmovq xmm3, xmm9", "vmovq xmm2, xmm2", f"vmovq xmm12, {quad}", f"vmovq {quad}, xmm11"]
+    out += ["vmovd xmm3, r9d", "vmovd xmm12, eax", "vmovq xmm3, r9", "vmovd r9d, xmm3", "vmovd ebx, xmm12",
+            "vmovq r9, xmm3", f"vmovd xmm3, {dword}", f"vmovd {dword}, xmm9"]
+    for op in "vmovlps vmovlpd vmovhps vmovhpd".split():
+        out += [f"{op} xmm3, xmm9, {quad}", f"{op} xmm2, xmm2, {quad}", f"{op} {quad}, xmm9"]
+    for op in ("vmovhlps", "vmovlhps"):
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, xmm2", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3"]
+    out += [f"vbroadcastsd ymm12, {quad}", f"vbroadcastf128 ymm12, {xmm}"]
+    for n in (0, 1, 2, 255):
+        out += [f"vinsertf128 ymm3, ymm9, xmm10, {n}", f"vinsertf128 ymm12, ymm1, {xmm}, {n}",
+                f"vinsertf128 ymm2, ymm2, xmm2, {n}", f"vextractf128 xmm3, ymm9, {n}",
+                f"vextractf128 xmm2, ymm2, {n}", f"vextractf128 {xmm}, ymm11, {n}"]
+    for n in (*range(0, 64), 128, 136, 200, 255):
+        out.append(f"vperm2f128 ymm3, ymm9, ymm10, {n}")
+    out += [f"vperm2f128 ymm12, ymm1, {whole['ymm']}, {n}" for n in (0, 33, 49, 131)]
+    out += ["vperm2f128 ymm2, ymm2, ymm2, 1", "vperm2f128 ymm3, ymm9, ymm3, 48"]
+    out += [f"vldmxcsr {dword}", f"vstmxcsr {dword}"]
+    return list(dict.fromkeys(out))
+
+
+# The compare predicates in immediate order, by their names in the Intel SDM.
+PREDICATES = """eq_oq lt_os le_os unord_q neq_uq nlt_us nle_us ord_q eq_uq nge_us ngt_us false_oq neq_oq ge_os gt_os
+true_uq eq_os lt_oq le_oq unord_s neq_us nlt_uq nle_uq ord_s eq_us nge_uq ngt_uq false_os neq_os ge_oq gt_oq
+true_us""".split()
+PACKED_128 = [op for op in PACKED if op[0] == "p" and op not in ("pand", "pandn", "por", "pxor", "pabsb", "pabsw", "pabsd")] + """
+pmuldq pcmpeqq pcmpgtq packusdw pminsb pminsd pminuw pminud pmaxsb pmaxsd pmaxuw pmaxud pmulld""".split()
+
+
+def avx_form_cases():
+    """VEX forms of legacy SSE instructions."""
+    place = " ptr [rsi + 4*rdi + 16]"
+    byte, word, dword, quad, xmm, ymm = (w + place for w in "byte word dword qword xmmword ymmword".split())
+    whole = {"xmm": xmm, "ymm": ymm}
+    out = []
+
+    # The assembler may exchange the sources of a commutative instruction to shorten it
+    # when only the second is one of registers 8 to 15, so none is written that way.
+    def three(op, v, tail=""):
+        out.extend([f"{op} {v}3, {v}9, {v}10{tail}", f"{op} {v}12, {v}1, {whole[v]}{tail}",
+                    f"{op} {v}2, {v}2, {v}2{tail}", f"{op} {v}3, {v}9, {v}3{tail}", f"{op} {v}3, {v}3, {v}5{tail}"])
+
+    def two(op, v, memory, tail=""):
+        out.extend([f"{op} {v}3, {v}9{tail}", f"{op} {v}12, {memory}{tail}", f"{op} {v}2, {v}2{tail}"])
+
+    for op in PACKED_128:
+        three("v" + op, "xmm")
+    for op in "pabsb pabsw pabsd phminposuw ptest".split():
+        two("v" + op, "xmm", xmm)
+    two("vptest", "ymm", ymm)
+    for kind, width in (("bw", quad), ("bd", dword), ("bq", word), ("wd", quad), ("wq", dword), ("dq", quad)):
+        for op in ("vpmovsx", "vpmovzx"):
+            two(op + kind, "xmm", width)
+    for op, bits in (("w", 16), ("d", 32), ("q", 64)):
+        for name in ("vpsll", "vpsrl", "vpsra"):
+            if name + op != "vpsraq":
+                out += [f"{name}{op} xmm{3 + 9 * (n % 2)}, xmm9, {n}" for n in (0, 1, 7, bits - 1, bits, 255)]
+                out.append(f"{name}{op} xmm2, xmm2, 3")
+    for op in ("vpslldq", "vpsrldq"):
+        out += [f"{op} xmm12, xmm9, {n}" for n in (0, 1, 5, 15, 16, 255)] + [f"{op} xmm2, xmm2, 3"]
+    for op in "vpshufd vpshufhw vpshuflw".split():
+        for n in (0, 27, 78, 177, 255):
+            two(op, "xmm", xmm, f", {n}")
+    for op, values in (("vpalignr", (0, 1, 5, 15, 16, 17, 31, 32, 255)), ("vpblendw", (0, 1, 2, 90, 165, 255)),
+                       ("vmpsadbw", (*range(8), 129, 255))):
+        for n in values:
+            three(op, "xmm", f", {n}")
+    out += ["vpmovmskb ebx, xmm9", "vpmovmskb r10d, xmm3"]
+    for v, fourth in (("xmm", (0, 3, 7, 9, 12, 15)), ("ymm", (0, 3, 7, 9, 12, 15))):
+        for op in ("vblendvps", "vblendvpd") + (("vpblendvb",) if v == "xmm" else ()):
+            for n in fourth:
+                out.append(f"{op} {v}3, {v}9, {v}10, {v}{n}")
+                out.append(f"{op} {v}12, {v}1, {whole[v]}, {v}{n}")
+            out += [f"{op} {v}2, {v}2, {v}2, {v}2", f"{op} {v}3, {v}9, {v}3, {v}9"]
+        for op in "vunpcklps vunpcklpd vunpckhps vunpckhpd".split():
+            three(op, v)
+        for n in (0, 27, 78, 177, 228, 255):
+            three("vshufps", v, f", {n}")
+        for n in (*range(16), 255):
+            three("vshufpd", v, f", {n}")
+            three("vblendpd", v, f", {n}")
+        for n in (0, 1, 2, 4, 8, 16, 32, 64, 128, 90, 165, 255):
+            three("vblendps", v, f", {n}")
+    for n in (0, 16, 32, 48, 64, 81, 98, 152, 160, 199, 228, 254, 255):
+        out += [f"vinsertps xmm3, xmm9, xmm10, {n}", f"vinsertps xmm12, xmm1, {dword}, {n}",
+                f"vinsertps xmm2, xmm2, xmm2, {n}", f"vinsertps xmm3, xmm9, xmm3, {n}"]
+    for n in (0, 1, 2, 3, 4, 255):
+        out += [f"vextractps {r}, xmm9, {n}" for r in ("ebx", "r9d", "ebp")] + [f"vextractps {dword}, xmm3, {n}"]
+    for op, regs, width in (("b", ("ebx", "r9d", "ebp"), byte), ("w", ("ebx", "r9d", "ebp"), word),
+                            ("d", ("ebx", "r9d"), dword), ("q", ("rbx", "r9"), quad)):
+        for n in (0, 1, 2, 7, 15, 31, 255):
+            for general in regs:
+                out.append(f"vpinsr{op} xmm3, xmm9, {general}, {n}")
+                out.append(f"vpextr{op} {general}, xmm9, {n}")
+            out += [f"vpinsr{op} xmm12, xmm1, {width}, {n}", f"vpinsr{op} xmm2, xmm2, {regs[0]}, {n}",
+                    f"vpextr{op} {width}, xmm3, {n}"]
+    for op in "vpcmpestri vpcmpestrm vpcmpistri vpcmpistrm".split():
+        for n in (0, 1, 12, 13, 24, 56, 68, 70, 75, 121):
+            two(op, "xmm", xmm, f", {n}")
+        out += [f"{op} xmm0, xmm9, 12", f"{op} xmm3, xmm0, 68"]
+
+    scalar = {"ss": dword, "sd": quad}
+    for kind in ("ps", "pd"):
+        for v in ("xmm", "ymm"):
+            for op in "add sub mul div min max".split():
+                three(f"v{op}{kind}", v)
+            for name in PREDICATES:
+                three(f"vcmp{name}{kind}", v)
+            two(f"vsqrt{kind}", v, whole[v])
+            for n in (*range(16), 244):
+                two(f"vround{kind}", v, whole[v], f", {n}")
+    for kind, width in scalar.items():
+        def single(op, tail=""):
+            out.extend([f"{op}{kind} xmm3, xmm9, xmm10{tail}", f"{op}{kind} xmm12, xmm1, {width}{tail}",
+                        f"{op}{kind} xmm2, xmm2, xmm2{tail}", f"{op}{kind} xmm3, xmm9, xmm3{tail}"])
+        for op in "add sub mul div min max sqrt".split():
+            single("v" + op)
+        for name in PREDICATES:
+            single("vcmp" + name)
+        for n in (*range(16), 244):
+            single("vround", f", {n}")
+        for op in ("vcomi", "vucomi"):
+            two(op + kind, "xmm", width)
+        for op in ("vcvt", "vcvtt"):
+            for reg in ("r9d", "r9"):
+                out += [f"{op}{kind}2si {reg}, xmm9", f"{op}{kind}2si {reg}, {width}"]
+        for reg, size in (("r9d", dword), ("r9", quad)):
+            out += [f"vcvtsi2{kind} xmm3, xmm9, {reg}", f"vcvtsi2{kind} xmm12, xmm1, {size}"]
+    for op, width in (("vcvtss2sd", dword), ("vcvtsd2ss", quad)):
+        out += [f"{op} xmm3, xmm9, xmm10", f"{op} xmm12, xmm1, {width}", f"{op} xmm2, xmm2, xmm2",
+                f"{op} xmm3, xmm9, xmm3"]
+    for op in "vcvtdq2ps vcvtps2dq vcvttps2dq".split():
+        two(op, "xmm", xmm)
+        two(op, "ymm", ymm)
+    for op in "vcvtps2pd vcvtdq2pd".split():
+        two(op, "xmm", quad)
+        out += [f"{op} ymm3, xmm9", f"{op} ymm12, {xmm}", f"{op} ymm2, xmm2"]
+    for op in "vcvtpd2ps vcvtpd2dq vcvttpd2dq".split():
+        two(op, "xmm", xmm)
+        out += [f"{op} xmm3, ymm9", f"{op} xmm12, {ymm}", f"{op} xmm2, ymm2"]
+    # The tests put every other immediate in the last byte.
+    three("vdpps", "xmm", ", 255")
+    three("vdpps", "ymm", ", 255")
+    three("vdppd", "xmm", ", 255")
+    return list(dict.fromkeys(out))
+
+
 def assemble(lines):
     with tempfile.TemporaryDirectory() as directory:
         source, obj = Path(directory, "a.s"), Path(directory, "a.o")
@@ -269,7 +449,8 @@ def main(argv):
     if len(argv) != 2 or argv[1] not in ("generate", "--check"):
         sys.exit("usage: assemble.py generate|--check")
     for name, lines in (("integer.txt", cases()), ("vector.txt", vector_cases()),
-                        ("float.txt", float_cases())):
+                        ("float.txt", float_cases()), ("avx.txt", avx_cases()),
+                        ("avx_forms.txt", avx_form_cases())):
         text = assemble(lines)
         if argv[1] == "generate":
             (HERE / name).write_text(text)

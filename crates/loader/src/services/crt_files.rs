@@ -113,12 +113,16 @@ struct FileStream {
     writable: bool,
     append: bool,
     text: bool,
+    /// `tmpfile` opened it: the file is deleted when the stream closes.
+    temporary: bool,
 }
 
 #[derive(Default)]
 pub(super) struct FileStreams {
     /// Open streams by the guest address of their `FILE` object.
     open: BTreeMap<u64, FileStream>,
+    /// The counter `tmpnam` and `tmpfile` names come from.
+    temporary_counter: u32,
 }
 
 impl FileStreams {
@@ -172,18 +176,74 @@ impl FileStreams {
                 writable: mode.writable,
                 append: mode.append,
                 text: mode.text,
+                temporary: false,
             },
         );
         Ok(file)
     }
 
-    /// `fclose`. False when `file` is not an open stream.
-    pub(super) fn close(&mut self, memory: &mut GuestMemory, file: u64) -> bool {
-        if self.open.remove(&file).is_none() {
+    /// `fclose`. False when `file` is not an open stream. A stream
+    /// `tmpfile` opened takes its file with it.
+    pub(super) fn close(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+        file: u64,
+    ) -> bool {
+        let Some(stream) = self.open.remove(&file) else {
             return false;
+        };
+        if stream.temporary {
+            drive.drive_remove(&stream.path);
         }
         memory.release_heap_allocation(PROCESS_HEAP, file);
         true
+    }
+
+    /// A name `tmpnam` and `tmpfile` can use: `tmp` and a decimal counter,
+    /// never one the drive holds. The CRT counts from 1 for the lifetime of
+    /// the process, and so does this.
+    pub(super) fn temporary_name(&mut self, drive: &ObjectState) -> String {
+        loop {
+            self.temporary_counter += 1;
+            let name = format!("tmp{}", self.temporary_counter);
+            if matches!(drive.drive_entry(&name), DriveEntry::Missing { .. }) {
+                return name;
+            }
+        }
+    }
+
+    /// `tmpfile`: a stream open for reading and writing in binary, on a
+    /// file no other stream uses, deleted when the stream closes.
+    pub(super) fn open_temporary(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+    ) -> Result<u64, u32> {
+        if self.open.len() >= MAX_OPEN_STREAMS {
+            return Err(EMFILE);
+        }
+        let file = memory
+            .map_heap_allocation(PROCESS_HEAP, 8)
+            .map_err(|_| ENOMEM)?;
+        let path = self.temporary_name(drive);
+        if !drive.drive_create(&path) {
+            memory.release_heap_allocation(PROCESS_HEAP, file);
+            return Err(ENOSPC);
+        }
+        self.open.insert(
+            file,
+            FileStream {
+                path,
+                position: 0,
+                readable: true,
+                writable: true,
+                append: false,
+                text: false,
+                temporary: true,
+            },
+        );
+        Ok(file)
     }
 
     /// Write to an open stream, in its mode. Returns the `errno` value of a

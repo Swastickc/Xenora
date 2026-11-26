@@ -4,13 +4,18 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{IsTerminal, Read, Write};
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use xenora_loader::startup::{StartupEvent, StartupLayout, run_synthetic_startup_with_observer};
+use xenora_loader::scheduler::DEFAULT_QUANTUM;
+use xenora_loader::startup::{
+    StartupEvent, StartupLayout, run_synthetic_startup_scheduled,
+    run_synthetic_startup_with_observer,
+};
 use xenora_loader::{
     ExitReason, ImportRegistry, Register, ServicesState, SystemClock, register_standard_services,
 };
@@ -56,7 +61,7 @@ struct Options {
     program: bool,
     trace: bool,
     startup_report: bool,
-    report_worker: bool,
+    report_fd: Option<RawFd>,
     hud: bool,
     /// If given, the file runs only when its SHA-256 is this.
     digest: Option<[u8; 32]>,
@@ -92,7 +97,7 @@ impl Options {
         let (mut experimental, mut trace, mut hud, mut worker) = (false, false, false, false);
         let mut program = false;
         let mut startup_report = false;
-        let mut report_worker = false;
+        let mut report_fd = None;
         let mut wall_seconds = None;
         while let Some(arg) = args.next() {
             match arg.to_str() {
@@ -132,7 +137,13 @@ impl Options {
                 Some("--experimental") if !experimental => experimental = true,
                 Some("--trace") if !trace => trace = true,
                 Some("--startup-report") if !startup_report => startup_report = true,
-                Some("--startup-report-worker") if !report_worker => report_worker = true,
+                Some("--startup-report-worker") if report_fd.is_none() => {
+                    report_fd = Some(
+                        args.next()
+                            .and_then(|arg| arg.to_str()?.parse().ok())
+                            .ok_or("invalid startup diagnostic descriptor")?,
+                    );
+                }
                 Some("--metal-hud") if !hud => hud = true,
                 Some("--worker") if !worker => worker = true,
                 Some("--program") if !program => program = true,
@@ -145,7 +156,7 @@ impl Options {
         if program && !worker {
             return Err("unknown or repeated run argument \"--program\"".into());
         }
-        if (worker && startup_report) || (!worker && report_worker) {
+        if (worker && startup_report) || (!worker && report_fd.is_some()) {
             return Err("invalid startup report option for this runner".into());
         }
         Ok(Self {
@@ -156,7 +167,7 @@ impl Options {
             program,
             trace,
             startup_report,
-            report_worker,
+            report_fd,
             hud,
             digest,
             arguments,
@@ -219,8 +230,11 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let reporter = if options.report_worker {
-        match Reporter::from_stdin() {
+    let reporter = if let Some(fd) = options.report_fd {
+        // SAFETY: only the fresh worker process accepts this internal option.
+        // It has not adopted any inherited non-stdio descriptors or started
+        // threads, and from_inherited checks that the descriptor is open.
+        match unsafe { Reporter::from_inherited(fd) } {
             Ok(reporter) => reporter,
             Err(error) => {
                 eprintln!("run failed: cannot open startup diagnostic channel: {error}");
@@ -289,11 +303,10 @@ fn launch_worker(
         command.arg("--max-steps").arg(steps.to_string());
     }
     let collector = if options.startup_report {
-        command.arg("--startup-report-worker");
-        Some(Collector::attach(&mut command)?)
+        let (collector, fd) = Collector::attach(&mut command)?;
+        command.arg("--startup-report-worker").arg(fd.to_string());
+        Some(collector)
     } else {
-        // The worker inherits the supervisor's standard input: it is the
-        // guest's, read there before the program starts.
         None
     };
     command.arg("--pe").arg(&options.path);
@@ -301,9 +314,10 @@ fn launch_worker(
         command.arg("--").args(&options.arguments);
     }
 
-    let stopped = command
-        .spawn()
-        .and_then(|child| wait_for_worker(child, started, limit));
+    let child = command.spawn();
+    // Release the supervisor's copies of the worker endpoint even if spawn failed.
+    drop(command);
+    let stopped = child.and_then(|child| wait_for_worker(child, started, limit));
     // Emit after the worker's output has ended. The leading newline isolates
     // this record even when guest stderr ends with an unterminated line.
     if let Some(collector) = collector {
@@ -497,10 +511,8 @@ fn run_program(
     state.set_program_arguments(&arguments)?;
     // The guest's standard input is the worker's own, read in full before
     // the program starts so that a run stays deterministic. A terminal means
-    // no input, and so does the diagnostic channel, because fd 0 is then the
-    // supervisor's socket rather than the user's pipe. Input past the limit
-    // is refused now, not truncated silently.
-    let input = if options.report_worker || std::io::stdin().is_terminal() {
+    // no input. Oversized input is rejected before guest execution.
+    let input = if std::io::stdin().is_terminal() {
         Vec::new()
     } else {
         let mut bytes = Vec::new();
@@ -519,7 +531,11 @@ fn run_program(
     let mut imports = ImportRegistry::new();
     register_standard_services(&mut imports, Arc::clone(&state));
     let mut entered = false;
-    let startup = run_synthetic_startup_with_observer(
+    // The entry point runs under the deterministic cooperative scheduler,
+    // so a program that creates threads with CreateThread runs them all,
+    // one guest thread at a time. A program that creates none behaves as
+    // before: its main thread takes every turn.
+    let startup = run_synthetic_startup_scheduled(
         &bytes,
         StartupLayout {
             image_base: IMAGE_BASE,
@@ -527,7 +543,9 @@ fn run_program(
             tls_base: 0x300000000,
         },
         imports,
+        Arc::clone(&state),
         steps,
+        DEFAULT_QUANTUM,
         |event| {
             entered |= matches!(event, StartupEvent::Entering { .. });
             reporter.observed(&event);

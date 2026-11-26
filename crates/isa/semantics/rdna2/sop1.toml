@@ -187,6 +187,9 @@ spec = [
 ]
 verify = ["reference", "independent", "metal", "llvm_encoding"]
 
+# The guide prints this name twice in its table, once for the find-last-bit
+# form and once for this sign-bit-run count. This row is the sign-bit
+# run count, which is what opcode 23 does.
 [[form]]
 name = "S_FLBIT_I32"
 family = "SOP1"

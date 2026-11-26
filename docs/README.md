@@ -59,6 +59,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 ## Research and engineering decisions
 
 - [Public sources](research/sources.md), [RDNA 2 notes](research/rdna2.md), and [Xbox GPU evidence](research/xbox-gpu.md) — Specifications, evidence scope, and unknown console behavior.
+- [RDNA 2 guide errata](research/rdna2-errata.md) — The defects, ambiguities and undefined helpers in AMD's RDNA 2 guide, and the reading Xenora adopts for each.
 - [Shader inputs](research/shader-containers.md) and [risk register](risk-register.md) — Input provenance and unresolved engineering risks.
 - [Texture format inventory](research/texture-formats.md) — Formats and layouts by stage (decode, layout, native upload, sampling, guest), their public specifications, unknowns and ranked follow-ups.
 - [Xbox Series X|S executable startup](research/xbox-launch.md) — Experimental manifest preflight, PE32+ startup audit, and console research blockers.

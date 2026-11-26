@@ -70,6 +70,7 @@ remains unsupported.
 
 ### Fixed
 - `scripts/demo.sh` no longer requires GNU `timeout`. It sources the same fallback as `scripts/test-gpu.sh`, which now lives in `scripts/lib/timeout.sh`, and drops the `exec` that could not run a shell function. On a stock macOS host the documented demo stopped at `exec` with `timeout: not found` before running a fixture.
+- Sampling the synthetic runtime task queue clock now makes expired queued operations available on the completion port. A background operation without a cancellation token reports an observed timeout once it exits (#621).
 - The PE loader ignores thread-local storage directory bytes outside the optional header's declared directory count, so padding is not treated as TLS metadata (#573).
 - Sampler validation rejects texture metadata with more mip levels than its dimensions allow, including metadata constructed directly from public fields (#503).
 - Import generation preserves names containing quotes when reading probe CSV and writing its manifest CSV (#538).

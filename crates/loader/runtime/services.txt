@@ -511,6 +511,24 @@ service ucrtbase.dll _dup2(fd: i32, target: i32) -> i32
     fails -1 with errno EBADF for a descriptor that is not open or a target outside the table
     ref io.h _dup2
     test legacy_descriptor_duplication_shares_the_position
+service ucrtbase.dll _creat(name: ptr, mode: i32) -> i32
+    handler _creat
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails the permission argument does not act: the drive carries no permission bits
+    ref io.h _creat
+    test legacy_create_and_temporary_names_run
+
+service ucrtbase.dll _mktemp(template: ptr) -> ptr
+    handler _mktemp
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free
+    ref io.h _mktemp
+    test legacy_create_and_temporary_names_run
+
 
 
 

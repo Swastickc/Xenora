@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 218] = [
+pub static SERVICES: [ServiceMetadata; 220] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -624,6 +624,28 @@ pub static SERVICES: [ServiceMetadata; 218] = [
         failure: "-1 with errno EBADF for a descriptor that is not open or a target outside the table",
         reference: "io.h _dup2",
         tests: &["legacy_descriptor_duplication_shares_the_position"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_creat",
+        parameters: &[Parameter { name: "name", kind: "ptr" }, Parameter { name: "mode", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "the permission argument does not act: the drive carries no permission bits",
+        reference: "io.h _creat",
+        tests: &["legacy_create_and_temporary_names_run"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_mktemp",
+        parameters: &[Parameter { name: "template", kind: "ptr" }],
+        result: "ptr",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free",
+        reference: "io.h _mktemp",
+        tests: &["legacy_create_and_temporary_names_run"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2911,6 +2933,23 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.i32(1)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::_dup2(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_creat", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.i32(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_creat(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_mktemp", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_mktemp(&mut context, a0)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

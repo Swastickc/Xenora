@@ -6626,3 +6626,37 @@ fn legacy_strdup_and_ldexp_run() {
     assert_eq!(scaled(0x3FF0_0000_0000_0000, -1075), 0); // underflows to zero
     assert_eq!(scaled(0x7FF0_0000_0000_0000, -5), 0x7FF0_0000_0000_0000); // inf stays
 }
+
+#[test]
+fn legacy_create_and_temporary_names_run() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    // `_creat` makes a writable file the descriptor table serves, truncating
+    // an existing one.
+    guest.memory.write_bytes(buf, b"cr.bin\0").unwrap();
+    let fd = guest.call("_creat", &[buf, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    assert_eq!(guest.call("_write", &[fd, buf, 4]) & 0xFFFF_FFFF, 4);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    // `_mktemp` rewrites the trailing X run into a free name: the letter
+    // first, then the counter's digits, and a second call differs.
+    guest.memory.write_bytes(buf, b"tmpXXXXXX\0").unwrap();
+    assert_eq!(guest.call("_mktemp", &[buf]), buf);
+    let mut first = [0u8; 10];
+    guest.memory.read_bytes(buf, &mut first).unwrap();
+    assert_eq!(&first[..4], b"tmpa", "{first:?}");
+    // Once the name is taken a fresh template answers the next candidate.
+    let fd = guest.call("_creat", &[buf, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd));
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"tmpXXXXXX\0").unwrap();
+    assert_eq!(guest.call("_mktemp", &[buf]), buf);
+    let mut second = [0u8; 10];
+    guest.memory.read_bytes(buf, &mut second).unwrap();
+    assert_ne!(&first[..9], &second[..9], "the taken name is skipped");
+    // A template without the X run is null with EINVAL.
+    guest.memory.write_bytes(buf, b"plain\0").unwrap();
+    assert_eq!(guest.call("_mktemp", &[buf]), 0);
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.call("_mktemp", &[0]), 0);
+}

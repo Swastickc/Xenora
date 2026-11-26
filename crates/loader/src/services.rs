@@ -1556,6 +1556,25 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _creat(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let _ = mode;
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.create_descriptor(context.memory, &mut drive, name)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _mktemp(context: &mut ServiceContext<'_>, template: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.make_temporary_name(context.memory, &drive, template)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _dup(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<i32> {
         let outcome = {
             let mut streams = context.state.crt_streams();

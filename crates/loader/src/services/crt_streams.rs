@@ -20,7 +20,7 @@
 //! are not modelled and stop the guest with the runtime-limit fault.
 
 use super::ObjectState;
-use super::crt_files::{self, EACCES, EBADF, EINVAL, ENOENT, ERANGE, FileStreams};
+use super::crt_files::{self, EACCES, EBADF, EEXIST, EINVAL, ENOENT, ERANGE, FileStreams};
 use super::crt_format::{self, Floats, FormatError, Source};
 use super::files::DriveEntry;
 use crate::cpu::ExitReason;
@@ -979,6 +979,58 @@ impl StandardStreams {
     /// current one, with the same rejection of the standard descriptors.
     pub(super) fn tell_descriptor64(&mut self, drive: &ObjectState, fd: i32) -> Outcome<i64> {
         self.seek_descriptor64(drive, fd, 0, 1)
+    }
+
+    /// `_creat` is `_open` with exactly `_O_WRONLY | _O_CREAT | _O_TRUNC`, as
+    /// the CRT documents it; the permission argument does not act on a drive
+    /// without permission bits.
+    pub(super) fn create_descriptor(
+        &mut self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+    ) -> Outcome<i32> {
+        self.open_descriptor(memory, drive, name, 1 | 0x100 | 0x200)
+    }
+
+    /// `_mktemp` rewrites the trailing `X` characters of its template into a
+    /// name no file of the drive carries, as the CRT rewrites them: a letter
+    /// then digits of a counter. Null answers null with `EINVAL` when the
+    /// template carries no `X`.
+    pub(super) fn make_temporary_name(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &ObjectState,
+        template: u64,
+    ) -> Outcome<u64> {
+        if template == 0 {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        let bytes = c_string(memory, template, MAX_NAME + 1).map_err(fault)?;
+        let xs = bytes.iter().rev().take_while(|&&b| b == b'X').count();
+        if xs == 0 || bytes.len() as u64 > MAX_NAME {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        let mut name = bytes.clone();
+        let stem = name.len() - xs;
+        let per_letter = 10_u32.pow((xs - 1) as u32);
+        for attempt in 0..26_u32 * per_letter {
+            let letter = b'a' + (attempt / per_letter) as u8;
+            let digits = format!("{:0width$}", attempt % per_letter, width = xs - 1);
+            name.truncate(stem);
+            name.push(letter);
+            name.extend_from_slice(digits.as_bytes());
+            if ObjectState::drive_path(&name)
+                .is_some_and(|path| matches!(drive.drive_entry(&path), DriveEntry::Missing { .. }))
+            {
+                memory
+                    .write_bytes(template, &name)
+                    .and_then(|()| memory.write_u8(template + name.len() as u64, 0))
+                    .map_err(fault)?;
+                return Ok(Ok(template));
+            }
+        }
+        Ok(Err(Failed(0, EEXIST)))
     }
 
     /// `_dup` and `_dup2` (#459). The duplication shares the file position,

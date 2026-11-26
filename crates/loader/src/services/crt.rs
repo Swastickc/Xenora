@@ -737,24 +737,7 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         }
     });
 
-    // _strdup: a heap copy the caller frees.
-    registry.register(UCRT, "_strdup", |args, cpu, memory| {
-        let length = string_length(memory, args.rcx, u64::MAX, StringUnit::Byte)?;
-        let result =
-            memory.map_heap_allocation(crate::memory::PROCESS_HEAP, (length + 1).max(1) as usize);
-        let address = allocation_result(memory, cpu.gs_base, result)?;
-        if address == 0 {
-            return Ok(0);
-        }
-        let mut bytes = transfer_buffer(length + 1, 0)?;
-        memory
-            .read_bytes(args.rcx, &mut bytes)
-            .map_err(ExitReason::MemoryFault)?;
-        memory
-            .write_bytes(address, &bytes)
-            .map_err(ExitReason::MemoryFault)?;
-        Ok(address)
-    });
+    // `_strdup` is served by the typed registry since #655.
 
     // Case conversion and reversal in place, ASCII like the C locale.
     for (symbol, upper) in [("_strlwr", false), ("_strupr", true)] {

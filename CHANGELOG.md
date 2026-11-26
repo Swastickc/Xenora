@@ -94,6 +94,7 @@ remains unsupported.
 - The shader coverage and inspection commands reject unsupported arguments and report usage (#533).
 - Non-canonical 64-bit guest data addresses now raise `#GP` instead of a memory fault in both the interpreter and native DBT, including accesses that cross the canonical-address boundary. The synthetic architectural test is enabled again.
 - Agent sync reports upstream changes on both the old and new paths of a rename (#558).
+- The native audit uses dependency rows to detect Vulkan and MoltenVK linkage (#525).
 - Made the native semantic-review timeout in `scripts/test-gpu.sh` configurable with `XENORA_SEMANTIC_TIMEOUT` and raised its default from 120 to 300 seconds, so cold Apple Silicon runs do not fail while the expanded Metal known-answer suite is still progressing.
 - The CPU depth reference rejects clears outside the finite viewport depth range and caps targets at 4,096 pixels before allocation (#550).
 - Added a Python 3 fallback for `timeout` in `scripts/test-gpu.sh`, so the native Metal suite runs on stock macOS without GNU coreutils while preserving bounded execution and the usual timeout exit status.

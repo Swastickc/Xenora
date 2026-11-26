@@ -24,6 +24,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Instruction coverage](shaders/instruction-coverage.md) — Desktop gfx1030 instruction forms, operand limits, and CPU and GPU results.
 - [Semantic coverage](shaders/semantic-coverage.md) — Generated per-family counts of identified, declared, decoded, lowered and verified gfx1030 forms.
 - [gfx1030 semantic campaign](coordination/rdna2-campaign.md) — P0 family backlog, ownership, and verification checkpoints.
+- [SOP1 EXEC-writing forms](shaders/sop1-saveexec.md) — The twelve Wave32 forms that read, combine and rewrite the execution mask.
 - [SOP2 scalar ALU](shaders/scalar-alu.md) — Supported scalar add, subtract and bitwise forms, their SCC rules and sources.
 - [Semantic registry](shaders/semantic-registry.md) — How to add an instruction form: registry fields, validation, generation and the independence rule.
 - [Scalar buffer loads](shaders/scalar-memory.md) — SMEM loads, their bounds and wait rules, and where a loaded SGPR may be used.

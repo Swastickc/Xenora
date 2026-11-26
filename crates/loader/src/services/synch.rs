@@ -22,6 +22,7 @@ const SYNCH_API: &str = "api-ms-win-core-synch-l1-1-0.dll";
 const SYNCH_API_2: &str = "api-ms-win-core-synch-l1-2-0.dll";
 const SLIST_API: &str = "api-ms-win-core-interlocked-l1-1-0.dll";
 const TLS_API: &str = "api-ms-win-core-processthreads-l1-1-0.dll";
+const TLS_GET_VALUE_2_API: &str = "api-ms-win-core-processthreads-l1-1-8.dll";
 const FLS_API: &str = "api-ms-win-core-fibers-l1-1-0.dll";
 
 const ERROR_GEN_FAILURE: u32 = 31;
@@ -176,6 +177,13 @@ pub(super) struct Synch {
 }
 
 impl Synch {
+    fn tls_value(&self, teb: u64, index: u32) -> Option<u64> {
+        if !self.tls_allocated.contains_key(&index) {
+            return None;
+        }
+        Some(self.tls_values.get(&(teb, index)).copied().unwrap_or(0))
+    }
+
     pub(super) fn has_thread_fls_callbacks(&self, teb: u64) -> bool {
         self.fls_values
             .range((teb, 0)..=(teb, u32::MAX))
@@ -1073,21 +1081,29 @@ fn register_tls(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
 
     let s = Arc::clone(state);
     registry.register(KERNEL32, "TlsGetValue", move |args, cpu, _| {
-        let index = args.rcx as u32;
-        let synch = s.synch.lock().expect("guest synchronization state");
-        if !synch.tls_allocated.contains_key(&index) {
-            drop(synch);
+        let value = s
+            .synch
+            .lock()
+            .expect("guest synchronization state")
+            .tls_value(cpu.gs_base, args.rcx as u32);
+        let Some(value) = value else {
             return s.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
-        }
-        let value = synch
-            .tls_values
-            .get(&(cpu.gs_base, index))
-            .copied()
-            .unwrap_or(0);
-        drop(synch);
+        };
         // A successful call clears the last error, so zero is distinguishable.
         s.set_last_error(cpu.gs_base, 0);
         Ok(value)
+    });
+
+    let s = Arc::clone(state);
+    registry.register(KERNEL32, "TlsGetValue2", move |args, cpu, _| {
+        // A zero return can mean either an empty slot or an invalid index.
+        // This API leaves the thread's last error untouched in both cases.
+        let value = s
+            .synch
+            .lock()
+            .expect("guest synchronization state")
+            .tls_value(cpu.gs_base, args.rcx as u32);
+        Ok(value.unwrap_or(0))
     });
 
     let s = Arc::clone(state);
@@ -1194,6 +1210,9 @@ fn register_tls(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         registry.alias(TLS_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
+    registry.alias(TLS_GET_VALUE_2_API, KERNEL32, "TlsGetValue2");
+    registry.set_status(KERNEL32, "TlsGetValue2", ServiceStatus::Partial);
+
     for symbol in ["FlsAlloc", "FlsFree", "FlsGetValue", "FlsSetValue"] {
         registry.alias(FLS_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

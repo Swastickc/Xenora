@@ -12,12 +12,12 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 791 |
+| Canonical services | 809 |
 | Typed registry services | 251 |
-| Manual code registrations | 540 |
-| Canonical libraries | 19 |
+| Manual code registrations | 558 |
+| Canonical libraries | 20 |
 | Implemented | 216 |
-| Partial | 571 |
+| Partial | 589 |
 | Stub | 4 |
 | Data-import services | 7 |
 | Aliases of every kind | 832 |
@@ -46,9 +46,10 @@ independent acceptance or compatibility claims.
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
 | <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 9 | 0 | 9 | 0 | 0 | 9 | 0 | 0 |
-| <code>xinput1_4.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
-| <code>xinput9_1_0.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
-| <code>xinputuap.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
+| <code>xinput1_3.dll</code> | <code>other</code> | 8 | 0 | 8 | 0 | 0 | 8 | 0 | 0 |
+| <code>xinput1_4.dll</code> | <code>other</code> | 8 | 0 | 8 | 0 | 0 | 8 | 0 | 0 |
+| <code>xinput9_1_0.dll</code> | <code>other</code> | 4 | 0 | 4 | 0 | 0 | 4 | 0 | 0 |
+| <code>xinputuap.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
 | <code>xmem.dll</code> | <code>xbox-gaming</code> | 2 | 0 | 2 | 0 | 0 | 1 | 1 | 0 |
 
 The full canonical rows, including kind, data-import, source and explicit-status

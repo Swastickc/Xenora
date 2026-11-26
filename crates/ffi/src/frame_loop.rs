@@ -82,8 +82,8 @@ impl ControllerInput {
 
 /// A full controller snapshot in XInput units. Unlike the legacy fixture input
 /// above, triggers already use the public XInput range 0 through 255 and both
-/// thumbsticks are represented. `connected` must be 0 or 1 and reserved bytes
-/// must be zero.
+/// thumbsticks are represented. `connected` must be 0 or 1, only defined
+/// feature bits are accepted and reserved bytes must be zero.
 #[derive(Default, Copy, Clone)]
 #[repr(C)]
 pub struct XInputSnapshot {
@@ -95,8 +95,27 @@ pub struct XInputSnapshot {
     pub right_x: i16,
     pub right_y: i16,
     pub connected: u8,
-    pub reserved: [u8; 3],
+    pub features: u8,
+    pub reserved: [u8; 2],
 }
+
+/// Latest vibration command accepted by the guest for one XInput slot. When
+/// `connected` is zero the sequence and motor values are zero. `enabled` is
+/// the XInput reporting state: when zero the host must stop output even though
+/// the stored motor values remain registered for a later re-enable. Reserved
+/// bytes are always zero in output written by this library.
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct XInputVibration {
+    pub sequence: u32,
+    pub left_motor: u16,
+    pub right_motor: u16,
+    pub connected: u8,
+    pub enabled: u8,
+    pub reserved: [u8; 2],
+}
+
+pub const XINPUT_FEATURE_VIBRATION: u8 = 0x01;
 
 impl XInputSnapshot {
     fn controller_state(self) -> Option<XInputControllerState> {
@@ -112,7 +131,9 @@ impl XInputSnapshot {
     }
 
     pub(crate) fn valid_wire_shape(self) -> bool {
-        self.connected <= 1 && self.reserved == [0; 3]
+        self.connected <= 1
+            && self.features & !XINPUT_FEATURE_VIBRATION == 0
+            && self.reserved == [0; 2]
     }
 }
 
@@ -236,10 +257,34 @@ impl FrameLoop {
     /// session's runtime services. Returns false for a malformed wire shape or
     /// a user index outside the documented XInput range.
     pub fn send_xinput(&self, user_index: u32, input: XInputSnapshot) -> bool {
+        let vibration_supported =
+            input.connected != 0 && input.features & XINPUT_FEATURE_VIBRATION != 0;
         input.valid_wire_shape()
-            && self
-                .services
-                .set_xinput_controller(user_index, input.controller_state())
+            && self.services.set_xinput_controller_with_vibration(
+                user_index,
+                input.controller_state(),
+                vibration_supported,
+            )
+    }
+
+    /// Read the latest vibration command without consuming it. Disconnected
+    /// slots report a neutral zeroed command so hosts can stop actuators.
+    pub fn xinput_vibration(&self, user_index: u32) -> Option<XInputVibration> {
+        if user_index >= 4 {
+            return None;
+        }
+        let output = match self.services.xinput_vibration(user_index) {
+            Some((sequence, left_motor, right_motor, enabled)) => XInputVibration {
+                sequence,
+                left_motor,
+                right_motor,
+                connected: 1,
+                enabled: u8::from(enabled),
+                reserved: [0; 2],
+            },
+            None => XInputVibration::default(),
+        };
+        Some(output)
     }
 
     pub fn queue_input(&self, input: InputState) {
@@ -855,7 +900,8 @@ fn xinput_snapshots_reach_the_runtime_state_service() {
         right_x: -1234,
         right_y: 4321,
         connected: 1,
-        reserved: [0; 3],
+        features: XINPUT_FEATURE_VIBRATION,
+        reserved: [0; 2],
     };
     assert_eq!(std::mem::size_of::<XInputSnapshot>(), 16);
     assert!(session.send_xinput(2, snapshot));
@@ -887,6 +933,105 @@ fn xinput_snapshots_reach_the_runtime_state_service() {
         ]
     );
 
+    let mut cpu = xenora_loader::CpuState::default();
+    cpu.set(xenora_loader::Register::Rcx, 2);
+    cpu.set(xenora_loader::Register::Rdx, 0);
+    cpu.set(xenora_loader::Register::R8, 0x1220);
+    let descriptor = registry
+        .resolve(
+            "xinput1_4.dll",
+            &xenora_loader::import_table::ImportName::Name("XInputGetCapabilities".to_owned()),
+        )
+        .unwrap();
+    assert_eq!(
+        (descriptor.handler)(&xenora_loader::Win64Args::new(&cpu), &mut cpu, &mut memory).unwrap(),
+        0
+    );
+    let mut capabilities = [0; 20];
+    memory.read_bytes(0x1220, &mut capabilities).unwrap();
+    assert_eq!(capabilities[2..4], [1, 0]);
+    assert_eq!(capabilities[16..20], [0xff; 4]);
+
+    assert_eq!(
+        session.xinput_vibration(2),
+        Some(XInputVibration {
+            connected: 1,
+            enabled: 1,
+            ..XInputVibration::default()
+        })
+    );
+    memory.write_u32(0x1210, 0x8001_4002).unwrap();
+    let mut cpu = xenora_loader::CpuState::default();
+    cpu.set(xenora_loader::Register::Rcx, 2);
+    cpu.set(xenora_loader::Register::Rdx, 0x1210);
+    let descriptor = registry
+        .resolve(
+            "xinput1_4.dll",
+            &xenora_loader::import_table::ImportName::Name("XInputSetState".to_owned()),
+        )
+        .unwrap();
+    assert_eq!(
+        (descriptor.handler)(&xenora_loader::Win64Args::new(&cpu), &mut cpu, &mut memory).unwrap(),
+        0
+    );
+    assert_eq!(
+        session.xinput_vibration(2),
+        Some(XInputVibration {
+            sequence: 1,
+            left_motor: 0x4002,
+            right_motor: 0x8001,
+            connected: 1,
+            enabled: 1,
+            reserved: [0; 2],
+        })
+    );
+    let mut cpu = xenora_loader::CpuState::default();
+    cpu.set(xenora_loader::Register::Rcx, 0);
+    let descriptor = registry
+        .resolve(
+            "xinput1_4.dll",
+            &xenora_loader::import_table::ImportName::Name("XInputEnable".to_owned()),
+        )
+        .unwrap();
+    assert_eq!(
+        (descriptor.handler)(&xenora_loader::Win64Args::new(&cpu), &mut cpu, &mut memory).unwrap(),
+        0
+    );
+    assert_eq!(
+        session.xinput_vibration(2),
+        Some(XInputVibration {
+            sequence: 1,
+            left_motor: 0x4002,
+            right_motor: 0x8001,
+            connected: 1,
+            enabled: 0,
+            reserved: [0; 2],
+        })
+    );
+    cpu.set(xenora_loader::Register::Rcx, 1);
+    assert_eq!(
+        (descriptor.handler)(&xenora_loader::Win64Args::new(&cpu), &mut cpu, &mut memory).unwrap(),
+        0
+    );
+    assert_eq!(
+        session.xinput_vibration(2).map(|command| command.enabled),
+        Some(1)
+    );
+
+    assert_eq!(std::mem::size_of::<XInputVibration>(), 12);
+    assert!(session.send_xinput(
+        2,
+        XInputSnapshot {
+            connected: 0,
+            ..XInputSnapshot::default()
+        }
+    ));
+    assert_eq!(
+        session.xinput_vibration(2),
+        Some(XInputVibration::default())
+    );
+    assert!(session.xinput_vibration(4).is_none());
+
     assert!(!session.send_xinput(4, snapshot));
     assert!(!session.send_xinput(
         0,
@@ -898,7 +1043,7 @@ fn xinput_snapshots_reach_the_runtime_state_service() {
     assert!(!session.send_xinput(
         0,
         XInputSnapshot {
-            reserved: [1, 0, 0],
+            reserved: [1, 0],
             ..snapshot
         },
     ));

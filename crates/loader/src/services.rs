@@ -289,6 +289,7 @@ pub struct ServicesState {
     crt_startup: Mutex<crt_startup::CrtStartup>,
     winhttp: Mutex<winhttp::WinHttpHandles>,
     xinput: Mutex<xinput::Slots>,
+    xinput_enabled: AtomicBool,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -367,6 +368,7 @@ impl ServicesState {
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
             xinput: Mutex::default(),
+            xinput_enabled: AtomicBool::new(true),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -399,6 +401,14 @@ impl ServicesState {
 
     fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
         self.crt_arguments.lock().expect("program arguments")
+    }
+
+    pub(crate) fn xinput_input_enabled(&self) -> bool {
+        self.xinput_enabled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_xinput_input_enabled(&self, enabled: bool) {
+        self.xinput_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn file_apis_use_ansi(&self) -> bool {

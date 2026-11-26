@@ -16658,11 +16658,131 @@
       "data_import": false,
       "family": "other",
       "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputEnable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetBatteryInformation"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetDSoundAudioDeviceGuids"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetKeystroke"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputSetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "ordinal",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "Ordinal#100"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputEnable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetAudioDeviceIds"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetBatteryInformation"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
       "library": "xinput1_4.dll",
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetKeystroke"
     },
     {
       "data_import": false,
@@ -16687,12 +16807,32 @@
     {
       "data_import": false,
       "family": "other",
+      "kind": "ordinal",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "Ordinal#100"
+    },
+    {
+      "data_import": false,
+      "family": "other",
       "kind": "name",
       "library": "xinput9_1_0.dll",
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput9_1_0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetDSoundAudioDeviceGuids"
     },
     {
       "data_import": false,
@@ -16722,7 +16862,47 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "XInputEnable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetAudioDeviceIds"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetBatteryInformation"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetKeystroke"
     },
     {
       "data_import": false,
@@ -16768,15 +16948,15 @@
   "summary": {
     "aliases": 832,
     "api_set_aliases": 702,
-    "canonical_services": 791,
+    "canonical_services": 809,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 216,
     "implicit_status_services": 74,
-    "libraries": 19,
-    "manual_services": 540,
+    "libraries": 20,
+    "manual_services": 558,
     "ordinal_aliases": 0,
-    "partial": 571,
+    "partial": 589,
     "structural_consistency_findings": 0,
     "stub": 4,
     "typed_registry_entries": 251,

@@ -3,6 +3,7 @@ import Combine
 import CoreGraphics
 import CXenora
 import Foundation
+import GameController
 
 private final class StopGate: Sendable {
     private let release = DispatchSemaphore(value: 0)
@@ -14,7 +15,7 @@ private final class StopGate: Sendable {
 /// Scripted failure paths. This never opens a Metal device.
 private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     enum Operation: String {
-        case create, destroy, standard, interactive, sendInput, sendXInput, pause, resume, stop, status, journalSize
+        case create, destroy, standard, interactive, sendInput, sendXInput, pollXInputVibration, pause, resume, stop, status, journalSize
     }
 
     // Deinitialization can call the API from outside the main actor.
@@ -25,6 +26,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var calls: [Operation] = []
     private var sentInputs: [(handle: xenora_session, input: xenora_controller_input)] = []
     private var sentXInputs: [(handle: xenora_session, userIndex: UInt32, input: xenora_xinput_state)] = []
+    private var vibration = xenora_xinput_vibration()
     private var invalidCalls = 0
     private var nextStopGate: StopGate?
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
@@ -51,6 +53,21 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
 
     var xinputs: [(userIndex: UInt32, input: xenora_xinput_state)] {
         lock.withLock { sentXInputs.map { ($0.userIndex, $0.input) } }
+    }
+
+    func reportVibration(
+        sequence: UInt32, left: UInt16, right: UInt16, connected: Bool, enabled: Bool = true
+    ) {
+        lock.withLock {
+            vibration = xenora_xinput_vibration(
+                sequence: sequence,
+                left_motor: left,
+                right_motor: right,
+                connected: connected ? 1 : 0,
+                enabled: enabled ? 1 : 0,
+                reserved: (0, 0)
+            )
+        }
     }
 
     var lastInputHandle: xenora_session? { lock.withLock { sentInputs.last?.handle } }
@@ -101,6 +118,16 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
         lock.withLock {
             sentXInputs.append((handle, userIndex, input))
             return call(.sendXInput, handle)
+        }
+    }
+
+    func pollXInputVibration(
+        _ handle: xenora_session, _ userIndex: UInt32, _ output: inout xenora_xinput_vibration
+    ) -> Int32 {
+        lock.withLock {
+            let code = call(.pollXInputVibration, handle)
+            if code == XENORA_OK { output = vibration }
+            return code
         }
     }
 
@@ -235,6 +262,7 @@ func checkFrameLoopFailures() async -> [String] {
     return failures + (await checkFramePolling()) + (await checkNonblockingStop())
         + (await checkFailedStopRecovery())
         + checkControllerComposition() + checkControllerHandoffs() + (await checkControllerErrorRecovery())
+        + (await checkVibrationOutput())
 }
 
 @MainActor
@@ -324,6 +352,84 @@ private func checkFailedStopRecovery() async -> [String] {
     await model.stop()?.value
     expect(model.canStart && !model.isStopping,
            "failed-stop recovery did not allow a clean stop")
+    return failures
+}
+
+
+@MainActor
+private final class RecordingVibrationSink: ControllerVibrationSink {
+    private(set) var commands: [XInputVibrationCommand] = []
+    private(set) var resetCount = 0
+    var lastError: String?
+
+    func apply(command: XInputVibrationCommand, haptics: GCDeviceHaptics?) {
+        commands.append(command)
+    }
+
+    func reset() {
+        resetCount += 1
+    }
+}
+
+@MainActor
+private func checkVibrationOutput() async -> [String] {
+    var failures: [String] = []
+    func expect(_ condition: Bool, _ message: String) {
+        if !condition { failures.append(message) }
+    }
+
+    let api = ScriptedFrameLoop()
+    let sink = RecordingVibrationSink()
+    let controller = DetectedController(
+        identity: ObjectIdentifier(api), name: "Rumble controller", supportsHaptics: true,
+        snapshot: ControllerSnapshot(buttons: 0, x: 0, y: 0, leftTrigger: 0, rightTrigger: 0)
+    )
+    let model = FrameLoopModel(
+        api: api,
+        readController: { controller },
+        vibrationSink: sink,
+        sleepBeforePoll: { _ in try await Task.sleep(for: .milliseconds(5)) }
+    )
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
+    api.reportVibration(sequence: 7, left: 32768, right: 65535, connected: true)
+    model.startInteractive()
+    let initialResets = sink.resetCount
+    expect(await waitForLoop { sink.commands.count == 1 },
+           "vibration command did not reach the output sink")
+    expect(sink.commands.last == XInputVibrationCommand(
+        sequence: 7, leftMotor: 32768, rightMotor: 65535, connected: true
+    ), "vibration command bytes were altered")
+
+    try? await Task.sleep(for: .milliseconds(25))
+    expect(sink.commands.count == 1, "unchanged vibration sequence was applied repeatedly")
+    api.reportVibration(sequence: 8, left: 0, right: 1024, connected: true)
+    expect(await waitForLoop { sink.commands.count == 2 },
+           "updated vibration sequence did not reach the output sink")
+    expect(sink.commands.last == XInputVibrationCommand(
+        sequence: 8, leftMotor: 0, rightMotor: 1024, connected: true
+    ), "updated vibration command bytes were altered")
+
+    api.reportVibration(sequence: 8, left: 0, right: 1024, connected: true, enabled: false)
+    expect(await waitForLoop { sink.commands.count == 3 },
+           "disabled XInput reporting did not reach the output sink")
+    expect(sink.commands.last?.enabled == false && sink.commands.last?.rightIntensity == 0,
+           "disabled XInput reporting did not suppress actuation")
+    api.reportVibration(sequence: 8, left: 0, right: 1024, connected: true, enabled: true)
+    expect(await waitForLoop { sink.commands.count == 4 },
+           "re-enabled XInput reporting did not replay the registered vibration")
+    expect(sink.commands.last?.enabled == true && sink.commands.last?.rightIntensity != 0,
+           "re-enabled XInput reporting did not restore the registered intensity")
+
+    api.report(XENORA_LOOP_STOPPED, completed: 2, frame: 0, pixel: 0)
+    await model.stop()?.value
+    expect(sink.resetCount > initialResets, "terminal loop did not reset vibration output")
+    expect(model.controllerVibrationError == nil,
+           "successful scripted vibration polling published an error")
+
+    api.fail(.pollXInputVibration, Int32(XENORA_INTERNAL_ERROR))
+    model.startInteractive()
+    expect(await waitForLoop { model.controllerVibrationError?.contains("poll controller vibration") == true },
+           "vibration polling failure was hidden")
     return failures
 }
 

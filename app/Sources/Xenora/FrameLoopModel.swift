@@ -22,6 +22,9 @@ protocol FrameLoopAPI: Sendable {
     func start(_ handle: xenora_session, mode: FrameLoopMode, frames: UInt32) -> Int32
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32
     func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32
+    func pollXInputVibration(
+        _ handle: xenora_session, _ userIndex: UInt32, _ output: inout xenora_xinput_vibration
+    ) -> Int32
     func pause(_ handle: xenora_session) -> Int32
     func resume(_ handle: xenora_session) -> Int32
     func stop(_ handle: xenora_session) -> Int32
@@ -56,6 +59,12 @@ struct NativeFrameLoopAPI: FrameLoopAPI {
         xenora_session_send_xinput_state(handle, userIndex, &input)
     }
 
+    func pollXInputVibration(
+        _ handle: xenora_session, _ userIndex: UInt32, _ output: inout xenora_xinput_vibration
+    ) -> Int32 {
+        xenora_session_poll_xinput_vibration(handle, userIndex, &output)
+    }
+
     func pause(_ handle: xenora_session) -> Int32 { xenora_session_pause_frame_loop(handle) }
     func resume(_ handle: xenora_session) -> Int32 { xenora_session_resume_frame_loop(handle) }
     func stop(_ handle: xenora_session) -> Int32 { xenora_session_stop_frame_loop(handle) }
@@ -86,8 +95,17 @@ final class FrameLoopModel: ObservableObject {
     @Published private(set) var controller: DetectedController?
     @Published private(set) var isStopping = false
     @Published private(set) var journalRecordCount: UInt64?
+    @Published private(set) var controllerVibrationError: String?
+
+    private struct AppliedVibration: Equatable {
+        var sequence: UInt32
+        var controller: ObjectIdentifier?
+        var connected: Bool
+        var enabled: Bool
+    }
 
     private let api: any FrameLoopAPI
+    private let vibrationSink: any ControllerVibrationSink
     private let readController: @MainActor () -> DetectedController?
     private let sleepBeforePoll: (@MainActor (Duration) async throws -> Void)?
     private static let horizontalButtons = UInt32(XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT)
@@ -96,6 +114,7 @@ final class FrameLoopModel: ObservableObject {
     private var lastSentXInput = XInputSnapshotValues()
     private var lastSentXInputConnected = false
     private var controllerInputError: String?
+    private var lastAppliedVibration: AppliedVibration?
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
     private var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
@@ -104,10 +123,12 @@ final class FrameLoopModel: ObservableObject {
     init(
         api: any FrameLoopAPI = NativeFrameLoopAPI(),
         readController: @escaping @MainActor () -> DetectedController? = pollGameController,
+        vibrationSink: (any ControllerVibrationSink)? = nil,
         sleepBeforePoll: (@MainActor (Duration) async throws -> Void)? = nil
     ) {
         self.api = api
         self.readController = readController
+        self.vibrationSink = vibrationSink ?? GameControllerVibrationSink()
         self.sleepBeforePoll = sleepBeforePoll
     }
 
@@ -166,6 +187,9 @@ final class FrameLoopModel: ObservableObject {
         lastSentXInput = XInputSnapshotValues()
         lastSentXInputConnected = false
         controllerInputError = nil
+        controllerVibrationError = nil
+        lastAppliedVibration = nil
+        vibrationSink.reset()
         completed = 0
         frameId = XENORA_NO_FRAME
         image = nil
@@ -255,7 +279,7 @@ final class FrameLoopModel: ObservableObject {
             }
         }
         let xinputConnected = state.connected != 0
-        var xinput = xinputValues.ffi(connected: xinputConnected)
+        var xinput = xinputValues.ffi(connected: xinputConnected, vibrationSupported: next?.supportsHaptics == true)
         let legacyChanged = state.buttons != lastSentInput.state.buttons
             || state.stick_x != lastSentInput.state.stick_x
             || state.stick_y != lastSentInput.state.stick_y
@@ -289,6 +313,38 @@ final class FrameLoopModel: ObservableObject {
         guard let previous = controllerInputError else { return }
         controllerInputError = nil
         if errorMessage == previous { errorMessage = nil }
+    }
+
+    private func pollVibration() {
+        var raw = xenora_xinput_vibration()
+        let code = api.pollXInputVibration(session, 0, &raw)
+        guard code == XENORA_OK else {
+            let message = "Failed to poll controller vibration (status \(code))."
+            if controllerVibrationError != message { controllerVibrationError = message }
+            return
+        }
+        let command = XInputVibrationCommand(raw)
+        let application = AppliedVibration(
+            sequence: command.sequence,
+            controller: command.connected ? controller?.identity : nil,
+            connected: command.connected,
+            enabled: command.enabled
+        )
+        guard application != lastAppliedVibration else {
+            controllerVibrationError = vibrationSink.lastError
+            return
+        }
+        vibrationSink.apply(
+            command: command,
+            haptics: command.connected ? controller?.haptics : nil
+        )
+        lastAppliedVibration = application
+        controllerVibrationError = vibrationSink.lastError
+    }
+
+    private func resetVibration() {
+        vibrationSink.reset()
+        lastAppliedVibration = nil
     }
 
     func pause() {
@@ -379,6 +435,7 @@ final class FrameLoopModel: ObservableObject {
 
         let active = st == XENORA_LOOP_RUNNING || st == XENORA_LOOP_PAUSED
         if isInteractive && active { updateGameController() }
+        pollVibration()
         if state != st {
             if st == XENORA_LOOP_FINISHED || st == XENORA_LOOP_STOPPED {
                 readJournalSize(completed: comp)
@@ -414,6 +471,7 @@ final class FrameLoopModel: ObservableObject {
         }
 
         if !active {
+            resetVibration()
             if st == XENORA_LOOP_FAILED && errorMessage == nil {
                 errorMessage = "Fixture frame loop entered the failed state."
             }

@@ -4344,7 +4344,8 @@ const LEGACY_DATA_SYMBOLS: [&str; 7] = [
 /// Legacy-linked binaries import these services from `msvcrt.dll`, where the
 /// compatibility mapping resolves them to the same handlers as the modern
 /// runtime.
-const LEGACY_FUNCTION_SYMBOLS: [&str; 17] = [
+const LEGACY_FUNCTION_SYMBOLS: [&str; 18] = [
+    "__iob_func",
     "strlen",
     "memcpy",
     "malloc",
@@ -6788,4 +6789,26 @@ fn legacy_pipes_carry_bytes_between_ends() {
     assert_eq!(guest.call("_close", &[write]) & 0xFFFF_FFFF, 0);
     assert_eq!(guest.call("_read", &[read, buf + 32, 4]) & 0xFFFF_FFFF, 0);
     assert_eq!(guest.call("_close", &[read]) & 0xFFFF_FFFF, 0);
+}
+
+#[test]
+fn legacy_iob_array_carries_the_standard_descriptors() {
+    let mut guest = Guest::new();
+    // `__iob_func` answers the one array on every call, and the three
+    // legacy `FILE` objects carry their descriptor at offset 28 and the
+    // direction flag at 24, 48 bytes apart as the mingw header fixes them.
+    let base = guest.call("__iob_func", &[0]);
+    assert_ne!(base, 0);
+    assert_eq!(guest.call("__iob_func", &[0]), base, "the array is one");
+    assert_eq!(guest.memory.read_u32(base + 24).unwrap(), 1); // stdin reads
+    assert_eq!(guest.memory.read_u32(base + 28).unwrap(), 0);
+    assert_eq!(guest.memory.read_u32(base + 48 + 24).unwrap(), 2); // stdout writes
+    assert_eq!(guest.memory.read_u32(base + 48 + 28).unwrap(), 1);
+    assert_eq!(guest.memory.read_u32(base + 96 + 24).unwrap(), 2); // stderr writes
+    assert_eq!(guest.memory.read_u32(base + 96 + 28).unwrap(), 2);
+    // The buffer fields start empty: a legacy stream is unbuffered, and
+    // every byte goes through `_filbuf`/`_flsbuf`, as on Windows.
+    assert_eq!(guest.memory.read_u64(base).unwrap(), 0);
+    assert_eq!(guest.memory.read_u64(base + 8).unwrap(), 0);
+    assert_eq!(guest.memory.read_u64(base + 16).unwrap(), 0);
 }

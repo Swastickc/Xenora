@@ -1,5 +1,6 @@
 [package]
 name = "xenora"
+default-run = "xenora"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

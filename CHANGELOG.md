@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- The CRT `rand_s` boundary now returns cryptographically secure host entropy through checked guest memory instead of hitting the unsupported-service stub (#853). A null output continues as `EINVAL`; a host entropy read failure zeroes the output and reports Xenora's documented `EIO` choice. The invalid-parameter handler itself is still not dispatched, so the registration remains partial.
 - The CRT spawn family refuses honestly: `_spawnve` and `_wspawnve` answer minus one with ENOSYS in errno across ucrtbase, msvcrt and the process API set, since the machine is one process and cannot host a child. Local in-module tests cover the refusal shape.
 - `GetSecurityInfo` answers the owner and group of any object as the machine's one identity and honestly refuses access-control-list queries (ERROR_NOT_SUPPORTED in the return value), since the machine models no ACLs. Local in-module tests cover both directions.
 - `getservbyname` resolves service names from the standard Internet assignment table (http, https, ssh, ftp, smtp, domain, and others) with ports in network byte order and misses unknown services honestly. Local in-module tests cover the resolution and the miss.

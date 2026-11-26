@@ -55,7 +55,7 @@ pub use startup_info::{ProcessStartupInfo, StartupInfoError};
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
@@ -184,6 +184,10 @@ enum GuestObject {
     },
     FileMapping {
         size: u64,
+    },
+    Pipe {
+        state: Arc<Mutex<files::PipeState>>,
+        write: bool,
     },
 }
 
@@ -661,6 +665,13 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                     },
                 ),
                 Some(GuestObject::File(file)) => (file.access, GuestObject::File(file.clone())),
+                Some(GuestObject::Pipe { state, write }) => (
+                    0,
+                    GuestObject::Pipe {
+                        state: Arc::clone(state),
+                        write: *write,
+                    },
+                ),
                 Some(GuestObject::Search(_) | GuestObject::FileMapping { .. }) => {
                     return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
                 }
@@ -685,6 +696,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                 *rights = access
             }
             GuestObject::File(file) => file.access = access,
+            // A pipe end's rights are positional: its read or write end decides
+            // what the handle can do, not the duplication rights.
+            GuestObject::Pipe { .. } => {}
             GuestObject::Search(_) | GuestObject::FileMapping { .. } => {
                 unreachable!("these handles cannot be duplicated")
             }

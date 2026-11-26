@@ -5732,6 +5732,13 @@ fn memmove_binds_through_the_private_api_set() {
     assert_eq!(moved, b"moved");
 }
 
+#[test]
+fn crt_getpid_matches_the_process_identity() {
+    let mut guest = Guest::new();
+    let win32 = guest.call("GetCurrentProcessId", &[]);
+    assert_eq!(guest.call("_getpid", &[]), win32);
+}
+
 /// Regression checks for three descriptor edge cases: a read past the end
 /// keeps the seeked position, a zero-byte write does not extend the file,
 /// and a full descriptor table refuses before creating or truncating.

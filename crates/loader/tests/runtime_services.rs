@@ -6660,3 +6660,35 @@ fn legacy_create_and_temporary_names_run() {
     assert_eq!(guest.errno(), EINVAL);
     assert_eq!(guest.call("_mktemp", &[0]), 0);
 }
+
+#[test]
+fn legacy_fdopen_wraps_a_descriptor() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    guest.memory.write_bytes(buf, b"fd.bin\0").unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    // `_fdopen` moves the descriptor's state into a stream: writes through
+    // the stream move the position the descriptor reads at, as one file.
+    guest.memory.write_bytes(buf + 16, b"rb\0").unwrap();
+    let file = guest.call("_fdopen", &[fd, buf + 16]);
+    assert_ne!(file, 0);
+    guest.memory.write_bytes(buf + 32, b"abcdefgh").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 32, 8]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_lseeki64", &[fd, 0, 0]), 0);
+    assert_eq!(guest.call("fgets", &[buf + 40, 5, file]), buf + 40);
+    let mut bytes = [0u8; 4];
+    guest.memory.read_bytes(buf + 40, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"abcd");
+    // `fclose` takes the descriptor with it: the fd is no longer open.
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, MINUS_ONE);
+    // A bad mode string and a standard-stream descriptor are null with EINVAL.
+    guest.memory.write_bytes(buf + 16, b"zz\0").unwrap();
+    let fd = guest.call("_open", &[buf, 0, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd));
+    assert_eq!(guest.call("_fdopen", &[fd, buf + 16]), 0);
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_fdopen", &[0, buf + 16]), 0);
+}

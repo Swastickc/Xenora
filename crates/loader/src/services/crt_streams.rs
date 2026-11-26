@@ -1033,6 +1033,28 @@ impl StandardStreams {
         Ok(Err(Failed(0, EEXIST)))
     }
 
+    /// `_fdopen`: the descriptor becomes the stream's, and the mode string
+    /// only has to parse — matching it against the descriptor's access is the
+    /// caller's business, as the CRT leaves it undefined.
+    pub(super) fn fdopen_stream(
+        &mut self,
+        memory: &mut GuestMemory,
+        fd: i32,
+        mode: u64,
+    ) -> Outcome<u64> {
+        if fd < 0 || mode == 0 {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        let bytes = c_string(memory, mode, 16).map_err(fault)?;
+        if crt_files::parse_mode(&bytes).is_none() {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        Ok(self
+            .opened
+            .fdopen_stream(memory, fd as u32)
+            .map_err(|errno| Failed(0, errno)))
+    }
+
     /// `_dup` and `_dup2` (#459). The duplication shares the file position,
     /// as the CRT's does; the standard descriptors duplicate as any other.
     pub(super) fn duplicate_descriptor(&mut self, fd: i32) -> Outcome<i32> {

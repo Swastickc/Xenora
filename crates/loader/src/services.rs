@@ -1556,6 +1556,14 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _fdopen(context: &mut ServiceContext<'_>, fd: i32, mode: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.fdopen_stream(context.memory, fd, mode)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _creat(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let _ = mode;
         let outcome = {

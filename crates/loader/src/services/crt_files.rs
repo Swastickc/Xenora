@@ -62,7 +62,7 @@ pub(super) fn error_text(errno: u32) -> &'static str {
     }
 }
 
-struct Mode {
+pub(super) struct Mode {
     readable: bool,
     writable: bool,
     /// Every write goes to the end of the file.
@@ -77,7 +77,7 @@ struct Mode {
 /// `r`, `w` or `a` first, then `+`, `b` and `t` in any order, each at most
 /// once and not both `b` and `t`. Anything else is not a mode this runtime
 /// opens, including the other characters the page lists.
-fn parse_mode(mode: &[u8]) -> Option<Mode> {
+pub(super) fn parse_mode(mode: &[u8]) -> Option<Mode> {
     let (&kind, rest) = mode.split_first()?;
     let (mut update, mut binary, mut text) = (false, false, false);
     for &byte in rest {
@@ -574,6 +574,32 @@ impl FileStreams {
             },
             Descriptor::Alias(_) => Err(EBADF),
         }
+    }
+
+    /// `_fdopen` wraps a descriptor in a stream: the descriptor's state moves
+    /// to the open-stream table and the descriptor becomes the stream's own,
+    /// exactly the arrangement `_fileno` starts from. Closing the stream then
+    /// takes the descriptor with it, as the CRT's `fclose` does. A descriptor
+    /// of a standard stream cannot move: `EINVAL`, Xenora's choice.
+    pub(super) fn fdopen_stream(&mut self, memory: &mut GuestMemory, fd: u32) -> Result<u64, u32> {
+        let fd = self.descriptor_terminal(fd)?;
+        match self.descriptors.get(&fd) {
+            Some(Descriptor::Owned(_)) => {}
+            _ => return Err(EINVAL),
+        }
+        if self.open.len() >= MAX_OPEN_STREAMS {
+            return Err(EMFILE);
+        }
+        let file = memory
+            .map_heap_allocation(PROCESS_HEAP, 8)
+            .map_err(|_| ENOMEM)?;
+        let Some(Descriptor::Owned(stream)) = self.descriptors.remove(&fd) else {
+            memory.release_heap_allocation(PROCESS_HEAP, file);
+            return Err(EINVAL);
+        };
+        self.open.insert(file, stream);
+        self.descriptors.insert(fd, Descriptor::Shared(file));
+        Ok(file)
     }
 
     /// `_dup`: the lowest free descriptor sharing the file position, as the

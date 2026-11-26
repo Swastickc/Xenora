@@ -528,6 +528,15 @@ service ucrtbase.dll _mktemp(template: ptr) -> ptr
     fails null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free
     ref io.h _mktemp
     test legacy_create_and_temporary_names_run
+service ucrtbase.dll _fdopen(fd: i32, mode: ptr) -> ptr
+    handler _fdopen
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a descriptor of a standard stream or a mode string that does not parse; the mode is not matched against the descriptor's access
+    ref stdio.h _fdopen
+    test legacy_fdopen_wraps_a_descriptor
+
 
 
 

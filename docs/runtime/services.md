@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 220 |
-| Generated adapters | 220 |
-| Unique handler implementations | 211 |
+| Services with a declared ABI | 221 |
+| Generated adapters | 221 |
+| Unique handler implementations | 212 |
 | Implemented | 75 |
-| Partial | 143 |
+| Partial | 144 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 220 |
-| API-set aliases (not services) | 251 |
+| Conformance-tested through guest dispatch | 221 |
+| API-set aliases (not services) | 253 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -76,6 +76,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_dup2` | `(fd: i32, target: i32) -> i32` | implemented | -1 with errno EBADF for a descriptor that is not open or a target outside the table |
 | `ucrtbase.dll!_creat` | `(name: ptr, mode: i32) -> i32` | partial | the permission argument does not act: the drive carries no permission bits |
 | `ucrtbase.dll!_mktemp` | `(template: ptr) -> ptr` | partial | null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free |
+| `ucrtbase.dll!_fdopen` | `(fd: i32, mode: ptr) -> ptr` | partial | null with errno EINVAL for a descriptor of a standard stream or a mode string that does not parse; the mode is not matched against the descriptor's access |
 | `ucrtbase.dll!_access` | `(name: ptr, mode: i32) -> i32` | implemented | -1 with errno ENOENT for a missing or rejected name, EINVAL for a null or empty name or mode bits other than 0, 2, 4 and 6 |
 | `ucrtbase.dll!_unlink` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT missing, EACCES for a directory, EINVAL for a null or empty name; it is remove by another name |
 | `ucrtbase.dll!_gmtime64` | `(time: ptr) -> ptr` | implemented | null with errno EINVAL for a null pointer or a time outside 1970-to-3000 |

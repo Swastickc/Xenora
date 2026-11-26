@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 220] = [
+pub static SERVICES: [ServiceMetadata; 221] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -646,6 +646,17 @@ pub static SERVICES: [ServiceMetadata; 220] = [
         failure: "null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free",
         reference: "io.h _mktemp",
         tests: &["legacy_create_and_temporary_names_run"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_fdopen",
+        parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "mode", kind: "ptr" }],
+        result: "ptr",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "null with errno EINVAL for a descriptor of a standard stream or a mode string that does not parse; the mode is not matched against the descriptor's access",
+        reference: "stdio.h _fdopen",
+        tests: &["legacy_fdopen_wraps_a_descriptor"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2950,6 +2961,15 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.u64(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::_mktemp(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_fdopen", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_fdopen(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

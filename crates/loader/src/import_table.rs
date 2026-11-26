@@ -73,6 +73,10 @@ pub enum ImportTableError {
     OutOfBounds {
         rva: u32,
     },
+    /// A nonempty ordinary descriptor omits its DLL name or address table RVA.
+    IncompleteImportDescriptor {
+        rva: u32,
+    },
     /// A name is empty, unterminated, too long or not printable ASCII.
     MalformedName {
         rva: u32,
@@ -110,6 +114,10 @@ impl fmt::Display for ImportTableError {
             Self::OutOfBounds { rva } => write!(
                 f,
                 "import data at RVA 0x{rva:08x} is truncated or outside the section data"
+            ),
+            Self::IncompleteImportDescriptor { rva } => write!(
+                f,
+                "import descriptor at RVA 0x{rva:08x} is missing a DLL name or import address table RVA"
             ),
             Self::MalformedName { rva } => write!(f, "malformed import name at RVA 0x{rva:08x}"),
             Self::ReservedBits { rva } => {
@@ -211,14 +219,16 @@ fn collect<F: Fn(u32) -> Option<usize>>(
 ) -> Result<(), ImportTableError> {
     let mut descriptor = directory_rva;
     for _ in 0..MAX_DESCRIPTORS {
-        // Reading the whole descriptor also proves its field RVAs do not overflow.
-        reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
-        let lookup_rva = reader.u32(descriptor)?;
-        let name_rva = reader.u32(descriptor + 12)?;
-        let address_rva = reader.u32(descriptor + 16)?;
-        // The table ends with an empty descriptor.
-        if lookup_rva == 0 && name_rva == 0 && address_rva == 0 {
+        let fields = reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
+        // The timestamp and forwarder chain are part of the zero terminator.
+        if fields == [0; DESCRIPTOR_LEN as usize] {
             return Ok(());
+        }
+        let lookup_rva = u32::from_le_bytes(fields[0..4].try_into().unwrap());
+        let name_rva = u32::from_le_bytes(fields[12..16].try_into().unwrap());
+        let address_rva = u32::from_le_bytes(fields[16..20].try_into().unwrap());
+        if name_rva == 0 || address_rva == 0 {
+            return Err(ImportTableError::IncompleteImportDescriptor { rva: descriptor });
         }
         let module = reader.name(name_rva)?;
         collect_symbols(reader, &module, lookup_rva, address_rva, false, entries)?;

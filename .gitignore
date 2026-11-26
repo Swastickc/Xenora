@@ -29,6 +29,9 @@
 .cursor/
 .gemini/
 
+# Coding-agent session transcripts, which must not be committed at the root
+/session-*.md
+
 # Local gate evidence and intermediate fixture objects
 /artifacts/
 /tests/validation/target/

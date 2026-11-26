@@ -75,9 +75,15 @@ OPERATIONS = {
     "absdiff": "AbsoluteDifference", "lshl_add": "ShiftLeftAdd",
     "mul24": "Multiply24", "mul_hi24": "MultiplyHigh24",
     "mov": "Move", "cmov": "ConditionalMove", "swap": "Swap",
+    "trunc": "Truncate", "ceil": "Ceiling", "rndne": "RoundNearestEven", "floor": "Floor",
 }
 # Unary operations read one source; they need an operand rule of the unary kind.
-UNARY = {"not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs"}
+UNARY = {
+    "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs",
+    "trunc", "ceil", "rndne", "floor",
+}
+# Binary32 rounding to an integral value (guide 12.8). They take float operands only.
+FLOAT_ROUNDING = {"trunc", "ceil", "rndne", "floor"}
 # Sign extension reads only the low source_bits of S0 (required for sext only).
 SOURCE_BITS_KEY = "source_bits"
 SOURCE_BITS = {8, 16}
@@ -129,6 +135,7 @@ SOURCE_FORMATS = {
     "signed": {"FMT_NUM_I32"},
     "unsigned": {"FMT_NUM_U32"},
     "bitwise": {"FMT_NUM_U32", "FMT_NUM_B32"},
+    "float": {"FMT_NUM_F32"},
 }
 # Optional keys: required exactly when the condition holds.
 SHIFT_KEY = "shift_count_bits"
@@ -139,7 +146,7 @@ SHIFT_AMOUNTS = {1, 2, 3, 4}
 # declare it; the XML records no operand order.
 SOURCE_ORDER_KEY = "source_order"
 SOURCE_ORDERS = {"reversed"}
-SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise"}
+SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise", "float": "Float"}
 CARRY_IN = {"none": "None", "scc": "Scc", "vcc": "Vcc"}
 SCC = {
     "unchanged": "Unchanged",
@@ -288,6 +295,10 @@ VECTOR_UNARY_PRIMITIVES = {
     ("flbit", "unsigned"): "FindHighUnsigned",
     ("ff1", "bitwise"): "FindLow",
     ("flbit", "signed"): "FindHighSigned",
+    ("trunc", "float"): "TruncateF32",
+    ("ceil", "float"): "CeilingF32",
+    ("rndne", "float"): "RoundNearestEvenF32",
+    ("floor", "float"): "FloorF32",
 }
 
 OPERAND_RULES = {
@@ -325,6 +336,23 @@ OPERAND_RULES = {
         "unsupported": {
             "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_float_inline",
             "src_special",
+        },
+        "kind": "vector_unary",
+    },
+    # Binary32 rounding: the guide does not say how a float operation reads an
+    # integer inline constant, so only VGPR, SGPR, vcc_lo and literal SRC0 are kept.
+    "vop1_f32": {
+        "rust": "Vop1F32",
+        "enum": "VectorUnaryOp",
+        "shape": {
+            "family": "VOP1",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [{"field": "SRC0", "class": "vector_source"}],
+            "max_literals": 1,
+        },
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special",
         },
         "kind": "vector_unary",
     },
@@ -946,8 +974,10 @@ def validate(registry, snapshot):
                 shown = form["variant"] if key == "variant" else value
                 errors.append(f"{label}: duplicate {key} {shown}")
             seen[key].add(value)
-        if (form["operation"] in LOGICAL and form["signedness"] != "bitwise") or (
-            form["operation"] in ARITHMETIC and form["signedness"] == "bitwise"
+        if (
+            (form["operation"] in LOGICAL and form["signedness"] != "bitwise")
+            or (form["operation"] in ARITHMETIC and form["signedness"] == "bitwise")
+            or ((form["operation"] in FLOAT_ROUNDING) != (form["signedness"] == "float"))
         ):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts operation {form['operation']}"

@@ -316,6 +316,14 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
     // AMD RDNA 2 ISA guide 13.3.2: VDST occupies bits 17–24 and SRC0 bits 0–8.
     if let Some(op) = VectorUnaryOp::from_word(first) {
         let dst = (first >> 17) as u8;
+        // The guide does not define how a binary32 rounding form reads an
+        // integer inline constant (selectors 128-208), so they are refused.
+        if op.semantics().operands == OperandRule::Vop1F32 && matches!(first & 0x1ff, 128..=208) {
+            return Err(unsupported(
+                op.assembly_name(),
+                "expected a VGPR, normal SGPR, vcc_lo or literal binary32 source",
+            ));
+        }
         let (src, len) = vector_src0(first, bytes, op.assembly_name())?;
         return Ok((Instruction::VectorUnary { op, dst, src }, len));
     }

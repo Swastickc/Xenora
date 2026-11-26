@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- `CreateFileA` opens the same drive as the wide form with narrow path names, sharing rules and dispositions identical across the widths. Verified through the unit tests of `runtime_file_types.rs`.
 - `MoveFileExA` renames with MOVEFILE_REPLACE_EXISTING and honestly refuses MOVEFILE_DELAY_UNTIL_REBOOT since there is no boot to wait for, and the byte-range locks `LockFileEx`/`UnlockFileEx` accept a valid file handle, there being no other owner to contend with in a single-process machine. Verified through the unit tests of `runtime_file_types.rs`.
 - `SetHandleInformation` validates its handle and accepts the inheritance flags, which are inert without child processes, and `GetFileSize` answers the legacy 32-bit size form with the high word through its pointer. Verified through the unit tests of `runtime_file_types.rs`.
 - The volume queries: `GetLogicalDrives` answers the bitmask of the one disk the machine has, `GetDriveTypeA/W` answer DRIVE_FIXED, and `GetDiskFreeSpaceExA/W` report the memory drive's capacity through their three 64-bit outputs. Verified through the unit tests of `runtime_file_types.rs`.

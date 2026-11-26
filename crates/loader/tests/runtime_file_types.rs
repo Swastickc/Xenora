@@ -34,6 +34,7 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "LockFileEx"),
     (KERNEL32, "UnlockFileEx"),
     (KERNEL32, "ReadFile"),
+    (KERNEL32, "CreateFileA"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -208,4 +209,32 @@ fn move_file_ex_and_the_byte_range_locks() {
     let error = last_error(&mut guest);
     assert_eq!(error, 50, "ERROR_NOT_SUPPORTED, got {error}");
     assert_eq!(guest.call("MoveFileExA", &[NAME_B, NAME_A, 0]), 1);
+}
+
+/// CreateFileA is the narrow form of the same open: the sharing rules, the
+/// dispositions and the content are the drive's, whatever the width.
+#[test]
+fn create_file_of_the_narrow_width_shares_the_drive() {
+    const NAME: u64 = SCRATCH;
+    const OUT3: u64 = SCRATCH + 0x400;
+    const GOT2: u64 = SCRATCH + 0x808;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    narrow_at(&mut guest, NAME, "narrow.bin");
+    let handle = guest.call(
+        "CreateFileA",
+        &[NAME, GENERIC_WRITE, 3, 0, CREATE_ALWAYS, 0, 0],
+    );
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(OUT3, b"narrow width").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT3, 12, GOT2, 0]), 1);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    // The wide form reads back what the narrow wrote: one drive, two widths.
+    let reader = create_file_disposition(&mut guest, "narrow.bin", GENERIC_READ, 3);
+    assert_ne!(reader, INVALID_HANDLE_VALUE);
+    assert_eq!(guest.call("ReadFile", &[reader, OUT3, 64, GOT2, 0]), 1);
+    assert_eq!(guest.u32_at(GOT2), 12);
+    let mut bytes = [0; 12];
+    guest.memory.read_bytes(OUT3, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"narrow width");
+    assert_eq!(guest.call("CloseHandle", &[reader]), 1);
 }

@@ -437,6 +437,81 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(handle)
     });
 
+    let open_a = Arc::clone(state);
+    registry.register(KERNEL32, "CreateFileA", move |args, cpu, memory| {
+        let access = args.rdx as u32;
+        let share = args.r8 as u32;
+        let disposition = args.get(4, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let flags = args.get(5, memory).map_err(ExitReason::MemoryFault)? as u32;
+        let template = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
+        if args.r9 != 0
+            || template != 0
+            || !matches!(flags, 0 | 0x80)
+            || access & !(READ | WRITE) != 0
+            || share & !3 != 0
+        {
+            return open_a.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, INVALID_HANDLE);
+        }
+        if !(1..=5).contains(&disposition) {
+            return open_a.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, INVALID_HANDLE);
+        }
+        if matches!(disposition, 2 | 5) && access & WRITE == 0 {
+            return open_a.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
+        }
+        let Some(path) = guest_path_a(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return open_a.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
+        };
+        let mut objects = open_a.objects.lock().expect("guest object state");
+        let parent = parent(&path);
+        if !parent.is_empty() && !objects.directories.contains(parent) {
+            return open_a.fail(cpu.gs_base, PATH_NOT_FOUND, INVALID_HANDLE);
+        }
+        if objects.directories.contains(&path) {
+            return open_a.fail(cpu.gs_base, ERROR_ACCESS_DENIED, INVALID_HANDLE);
+        }
+        let exists = objects.files.contains_key(&path);
+        if exists && disposition == 1 {
+            return open_a.fail(cpu.gs_base, FILE_EXISTS, INVALID_HANDLE);
+        }
+        if !exists && matches!(disposition, 3 | 5) {
+            return open_a.fail(cpu.gs_base, FILE_NOT_FOUND, INVALID_HANDLE);
+        }
+        for object in objects.handles.values() {
+            if let GuestObject::File(file) = object
+                && file.path == path
+                && (share_mask(access) & !file.share != 0
+                    || share_mask(file.open_access) & !share != 0)
+            {
+                return open_a.fail(cpu.gs_base, SHARING_VIOLATION, INVALID_HANDLE);
+            }
+        }
+        let Some(handle) = objects.next_handle() else {
+            return open_a.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+        };
+        if !exists {
+            if objects.files.len() >= MAX_FILES {
+                return open_a.fail(cpu.gs_base, DISK_FULL, INVALID_HANDLE);
+            }
+            objects.files.insert(path.clone(), Vec::new());
+        } else if matches!(disposition, 2 | 5) {
+            *objects.files.get_mut(&path).expect("existing file") = Vec::new();
+        }
+        if matches!(disposition, 2 | 4) {
+            open_a.fail(cpu.gs_base, if exists { ALREADY_EXISTS } else { 0 }, 0)?;
+        }
+        objects.insert_handle(
+            handle,
+            GuestObject::File(OpenFile {
+                path,
+                position: Arc::new(AtomicU64::new(0)),
+                open_access: access,
+                access,
+                share,
+            }),
+        );
+        Ok(handle)
+    });
+
     let create = Arc::clone(state);
     registry.register(KERNEL32, "CreateDirectoryW", move |args, cpu, memory| {
         if args.rdx != 0 {

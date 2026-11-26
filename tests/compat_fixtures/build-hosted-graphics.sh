@@ -27,7 +27,7 @@ if [ "$(uname -s)" = Darwin ]; then
             *arm64*) ;;
             *) echo "ARM64 tool required: $tool" >&2; exit 1 ;;
         esac
-        lipo -verify_arch arm64 "$tool"
+        lipo "$tool" -verify_arch arm64
         otool -L "$tool"
     done > toolchain-native.txt
 fi

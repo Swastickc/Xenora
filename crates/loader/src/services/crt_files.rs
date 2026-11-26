@@ -1043,7 +1043,10 @@ impl FileStreams {
         drive: &ObjectState,
         handle: u64,
     ) -> Result<u32, u32> {
-        if !matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. })) {
+        if !matches!(
+            drive.handles.get(&handle),
+            Some(GuestObject::Pipe { .. } | GuestObject::File(_))
+        ) {
             return Err(EBADF);
         }
         self.insert_descriptor(Descriptor::Handle(handle))
@@ -1232,42 +1235,86 @@ impl FileStreams {
 /// rules as a `WriteFile` one.
 const PIPE_CAP: usize = 16 * 1024 * 1024;
 
+/// The access bits of a kernel file object, as CreateFile takes them.
+const FILE_READ: u32 = 0x8000_0000;
+const FILE_WRITE: u32 = 0x4000_0000;
+
 /// `_read` of a handle descriptor: the pipe drains, the oldest byte first.
 /// An empty pipe with its write end still open cannot block — the guest is
 /// the only thread that could fill it — so the read answers what is there,
 /// and the end-of-file emptiness is honest only once the write end closes.
 fn handle_read(drive: &super::ObjectState, handle: u64, limit: usize) -> Result<Vec<u8>, u32> {
-    let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle) else {
-        return Err(EBADF);
-    };
-    if *write {
-        return Err(EACCES);
+    match drive.handles.get(&handle) {
+        Some(GuestObject::Pipe { state, write }) => {
+            if *write {
+                return Err(EACCES);
+            }
+            let mut pipe = state.lock().expect("pipe state");
+            let mut bytes = Vec::new();
+            while bytes.len() < limit {
+                let Some(byte) = pipe.buffer.pop_front() else {
+                    break;
+                };
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+        Some(GuestObject::File(file)) => {
+            use std::sync::atomic::Ordering;
+            if file.access & FILE_READ == 0 {
+                return Err(EACCES);
+            }
+            let data = drive.drive_file(file.path()).ok_or(EBADF)?;
+            let position = file.position().load(Ordering::Relaxed);
+            let at = usize::try_from(position).map_or(data.len(), |at| at.min(data.len()));
+            let taken = limit.min(data.len() - at);
+            let bytes = data[at..at + taken].to_vec();
+            file.position()
+                .store(position + taken as u64, Ordering::Relaxed);
+            Ok(bytes)
+        }
+        _ => Err(EBADF),
     }
-    let mut pipe = state.lock().expect("pipe state");
-    let mut bytes = Vec::new();
-    while bytes.len() < limit {
-        let Some(byte) = pipe.buffer.pop_front() else {
-            break;
-        };
-        bytes.push(byte);
-    }
-    Ok(bytes)
 }
 
 /// `_write` of one: the pipe fills, within the same cap the kernel applies.
-fn handle_write(drive: &super::ObjectState, handle: u64, bytes: &[u8]) -> Result<(), u32> {
-    let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle) else {
-        return Err(EBADF);
-    };
-    if !*write {
-        return Err(EACCES);
+fn handle_write(drive: &mut super::ObjectState, handle: u64, bytes: &[u8]) -> Result<(), u32> {
+    match drive.handles.get(&handle) {
+        Some(GuestObject::Pipe { state, write }) => {
+            if !*write {
+                return Err(EACCES);
+            }
+            let mut pipe = state.lock().expect("pipe state");
+            if pipe.buffer.len() + bytes.len() > PIPE_CAP {
+                return Err(ENOSPC);
+            }
+            pipe.buffer.extend(bytes);
+            Ok(())
+        }
+        Some(GuestObject::File(_)) => {
+            use std::sync::atomic::Ordering;
+            // The object lookup ends before the drive write, which borrows
+            // the state again: the path and the position cell are the file's.
+            let Some(GuestObject::File(file)) = drive.handles.get(&handle) else {
+                return Err(EBADF);
+            };
+            if file.access & FILE_WRITE == 0 {
+                return Err(EACCES);
+            }
+            let path = file.path().to_owned();
+            let cell = std::sync::Arc::clone(file.position());
+            let position = cell.load(Ordering::Relaxed);
+            if !bytes.is_empty() {
+                let written = drive.drive_write(&path, position, bytes).ok_or(EBADF)?;
+                if !written {
+                    return Err(ENOSPC);
+                }
+            }
+            cell.store(position + bytes.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+        _ => Err(EBADF),
     }
-    let mut pipe = state.lock().expect("pipe state");
-    if pipe.buffer.len() + bytes.len() > PIPE_CAP {
-        return Err(ENOSPC);
-    }
-    pipe.buffer.extend(bytes);
-    Ok(())
 }
 
 #[cfg(test)]

@@ -43,6 +43,18 @@ pub(super) struct OpenFile {
     share: u32,
 }
 
+impl OpenFile {
+    /// The CRT interop reads and writes the object through these, under the
+    /// same serialization the object table gives the kernel calls.
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(super) fn position(&self) -> &Arc<AtomicU64> {
+        &self.position
+    }
+}
+
 fn read_guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
     if address == 0 {
         return Ok(None);

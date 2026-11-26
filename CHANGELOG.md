@@ -19,6 +19,7 @@ exact revision and known limitations.
 ### Fixed
 - The RDNA 2 errata record named `V_FFBH`/`V_FFBL` as users of the undefined `FindFirst1fromLSB` helper and said its empty-mask result was missing. Its only user is `V_READFIRSTLANE_B32`, whose text gives that result; the row is corrected. `S_BFE_I32` now carries the SCC note its PR described, and the `S_BFE_*` SCC citation names pages 104 and 105 instead of 113.
 - PE inspection and import binding now require the complete two-byte Hint before a named symbol in both ordinary and delayed import tables (#768).
+- Native macOS CI now runs the Swift package tests and the frame-loop and Audio/VFS control smokes in addition to checking the app bundle (#753).
 - Synchronous runtime tasks that unwind now retain their queue slot and deliver a `WorkerPanicked` completion, matching background work (#755).
 - The synthetic registry returns Win32 status codes to guest callers and preserves the identity of predefined root handles, including the Win64 SDK constants (#760).
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).

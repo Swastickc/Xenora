@@ -124,6 +124,6 @@ jobs:
           swift --version
       # Builds the locked C ABI library and the Swift app together, checks the
       # executable is arm64-only and links only system libraries, and runs
-      # `--smoke`. This is an app build and smoke result, not GPU verification.
-      - name: Build Xenora.app and run its smoke check
-        run: scripts/build-app.sh
+      # the Swift test target and GPU-free app smoke checks.
+      - name: Build and test Xenora.app
+        run: scripts/build-app.sh --test

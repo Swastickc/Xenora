@@ -792,12 +792,24 @@ additional-header block. Xenora emits `Connection: close`; there is no
 connection reuse or keep-alive pool. `dwTotalLength` must equal the optional
 body length because `WinHttpWriteData` streaming is not implemented. The
 pre-send copy is bounded at 16 MiB; larger inline bodies fail with
-`ERROR_OUTOFMEMORY`. The
-public default timeout values are applied as an initial 60-second connect
-timeout and 30-second send/receive timeouts. Resolution uses the host system
-resolver, and a request may connect to whatever address that resolver returns;
-loopback tests are evidence of the transport mechanics only, not of general
-Internet reachability.
+`ERROR_OUTOFMEMORY`.
+
+`WinHttpSetTimeouts` accepts session and not-yet-sent request handles. Its
+signed millisecond values follow the public contract: zero or minus one means
+no API-level timeout, positive values are finite timeouts and other negative
+values fail with `ERROR_INVALID_PARAMETER`. Sessions start with the documented
+defaults: infinite resolution, 60-second connect, 30-second send and 30-second
+receive timeouts. A request inherits a snapshot of the session values when it
+is created; later session changes do not rewrite that request, while a request
+override applies only to that request. Connect, send and receive timeouts are
+applied to the blocking TCP operations. Rust's host resolver is blocking and
+cannot be cancelled once entered, so a finite resolution timeout is enforced
+with a detached helper thread: the caller fails with `ERROR_WINHTTP_TIMEOUT`,
+while a late resolver result is discarded. Resolution therefore has the
+documented helper-thread cost and is not true cancellation of the operating
+system resolver. A request may connect to whatever address the resolver
+returns; loopback tests are evidence of the transport mechanics only, not of
+general Internet reachability.
 
 `WinHttpReceiveResponse` parses HTTP/1.0 and HTTP/1.1 status lines and a
 bounded response header block. It preserves the status line and headers for
@@ -843,7 +855,7 @@ not reuse them but does not give a complete parent-close cascade contract.
 Handles are process-local opaque values and are also discarded when the guest
 process exits.
 
-TLS certificate validation, HTTPS, asynchronous callbacks, cancellation,
+TLS certificate validation, HTTPS, asynchronous callbacks, in-flight cancellation,
 redirects, authentication, proxy resolution, request streaming, connection
 reuse, custom/raw response-header queries, duplicate-header enumeration,
 non-chunked or combined transfer codings and libcurl-compatible interfaces

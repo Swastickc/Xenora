@@ -50,6 +50,7 @@ mod task_fixture;
 pub(crate) mod threads;
 mod user32;
 mod winsock;
+mod xnetworking;
 
 use crate::runtime::HResult;
 pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
@@ -638,6 +639,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     static_cxx::register(registry);
     crate::exceptions::register(registry);
     crt_jump::register(registry);
+    xnetworking::register(registry);
 
     // The legacy CRT variables a msvcrt.dll-linked image imports as data
     // (#643). Each cell is the one the modern accessors maintain, so the

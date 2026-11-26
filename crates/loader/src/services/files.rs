@@ -1007,6 +1007,46 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
+    let flush = Arc::clone(state);
+    registry.register(KERNEL32, "FlushFileBuffers", move |args, cpu, _| {
+        let objects = flush.objects.lock().expect("guest object state");
+        let file = match objects.handles.get(&args.rcx) {
+            Some(GuestObject::File(file)) => file,
+            _ => return flush.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+        };
+        if file.access & WRITE == 0 {
+            return flush.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
+        }
+        // The drive is memory: a write has nowhere further to be flushed to.
+        Ok(1)
+    });
+
+    let types = Arc::clone(state);
+    registry.register(KERNEL32, "GetFileType", move |args, cpu, _| {
+        // The console handles answer FILE_TYPE_CHAR whether or not a mode was
+        // ever queried, as a real console does.
+        if matches!(args.rcx, 0x101..=0x103) {
+            return Ok(2); // FILE_TYPE_CHAR
+        }
+        let objects = types.objects.lock().expect("guest object state");
+        match objects.handles.get(&args.rcx) {
+            Some(GuestObject::File(_)) => Ok(1), // FILE_TYPE_DISK
+            Some(_) => {
+                // A handle that is not a file has no type the file API knows.
+                Ok(0) // FILE_TYPE_UNKNOWN
+            }
+            None => types
+                .fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0u32)
+                .map(|_: u32| 0),
+        }
+    });
+
+    registry.register(KERNEL32, "AreFileApisANSI", |_, _, _| {
+        // Every narrow path the hosted drive takes is already ANSI: there is
+        // no OEM translation layer behind it.
+        Ok(1)
+    });
+
     for symbol in [
         "CreateFileW",
         "GetFileSizeEx",
@@ -1035,6 +1075,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "SetFileAttributesW",
         "SetFilePointer",
         "GetTempFileNameA",
+        "FlushFileBuffers",
+        "GetFileType",
+        "AreFileApisANSI",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

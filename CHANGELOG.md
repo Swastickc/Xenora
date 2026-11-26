@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- The file type, flush and ANSI-query forms: `GetFileType` distinguishes disk files, the character devices of the console handles and other objects with the documented FILE_TYPE_UNKNOWN cases, `FlushFileBuffers` accepts a file opened for writing and refuses read-only and unknown handles with their documented errors, and `AreFileApisANSI` answers that the hosted drive is ANSI throughout. Verified through the unit tests of `runtime_file_types.rs`.
 - IsDebuggerPresent answers false and OutputDebugString drops its output, the documented behavior of a machine with no debugger attached.
 - Paging-file-backed memory mappings (`CreateFileMappingA/W`, `MapViewOfFile`, `UnmapViewOfFile`) with zero-filled views tracked in the central handle table, and `CreateProcessA/W` failing honestly with ERROR_NOT_SUPPORTED since the guest is the only process. Verified through the unit tests of `runtime_file_mapping.rs`.
 - `GetModuleFileNameA/W` answer the path the program was started with for its own image, with the documented truncation form, and the registry services of advapi32 (`RegOpenKeyExA/W`, `RegQueryValueExA/W`, `RegCloseKey`) model the machine's registry as honestly empty: the predefined roots open, every subkey and value is absent with ERROR_FILE_NOT_FOUND. Verified through the unit tests; probe binaries using them run end to end through `xenora run`.

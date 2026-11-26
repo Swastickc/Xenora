@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 221] = [
+pub static SERVICES: [ServiceMetadata; 222] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -657,6 +657,17 @@ pub static SERVICES: [ServiceMetadata; 221] = [
         failure: "null with errno EINVAL for a descriptor of a standard stream or a mode string that does not parse; the mode is not matched against the descriptor's access",
         reference: "stdio.h _fdopen",
         tests: &["legacy_fdopen_wraps_a_descriptor"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_fstat64",
+        parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "buffer", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none",
+        reference: "sys/stat.h _fstat64",
+        tests: &["legacy_fstat64_fills_the_legacy_structure"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2970,6 +2981,15 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.u64(1)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::_fdopen(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_fstat64", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_fstat64(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

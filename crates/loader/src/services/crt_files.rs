@@ -576,6 +576,23 @@ impl FileStreams {
         }
     }
 
+    /// The path and length a `_fstat64` reports, of the file a descriptor
+    /// has open. A removed file reports the length it would have had, as the
+    /// descriptor still has it open: zero, the drive carries no content for
+    /// it anymore.
+    pub(super) fn descriptor_stat(&self, drive: &ObjectState, fd: u32) -> Result<u64, u32> {
+        let fd = self.descriptor_terminal(fd)?;
+        let stream = match self.descriptors.get(&fd).ok_or(EBADF)? {
+            Descriptor::Shared(file) => self.open.get(file).ok_or(EBADF)?,
+            Descriptor::Owned(stream) => stream,
+            Descriptor::Alias(_) => return Err(EBADF),
+        };
+        let _ = stream;
+        Ok(drive
+            .drive_file(&stream.path)
+            .map_or(0, |data| data.len() as u64))
+    }
+
     /// `_fdopen` wraps a descriptor in a stream: the descriptor's state moves
     /// to the open-stream table and the descriptor becomes the stream's own,
     /// exactly the arrangement `_fileno` starts from. Closing the stream then

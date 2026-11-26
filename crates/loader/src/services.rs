@@ -1556,6 +1556,15 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _fstat64(context: &mut ServiceContext<'_>, fd: i32, buffer: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.stat_descriptor64(context.memory, &drive, fd, buffer)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _fdopen(context: &mut ServiceContext<'_>, fd: i32, mode: u64) -> Outcome<u64> {
         let outcome = {
             let mut streams = context.state.crt_streams();

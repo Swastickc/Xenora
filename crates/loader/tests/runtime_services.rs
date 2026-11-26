@@ -6692,3 +6692,30 @@ fn legacy_fdopen_wraps_a_descriptor() {
     assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
     assert_eq!(guest.call("_fdopen", &[0, buf + 16]), 0);
 }
+
+#[test]
+fn legacy_fstat64_fills_the_legacy_structure() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    let stat = guest.call("malloc", &[64]);
+    guest.memory.write_bytes(buf, b"st.bin\0").unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    guest.memory.write_bytes(buf + 16, b"12345678").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 16, 8]) & 0xFFFF_FFFF, 8);
+    // The structure answers the mode of a regular file and the length of the
+    // content, at the offsets the cross-compiler fixes.
+    assert_eq!(guest.call("_fstat64", &[fd, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0xF000, 0x8000);
+    assert_eq!(guest.memory.read_u64(stat + 24).unwrap(), 8);
+    assert_eq!(
+        guest.memory.read_u64(stat + 32).unwrap(),
+        0,
+        "no time model"
+    );
+    // A descriptor that is not open is -1 with EBADF; a null buffer EINVAL.
+    assert_eq!(guest.call("_fstat64", &[77, stat]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_fstat64", &[fd, 0]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EINVAL);
+}

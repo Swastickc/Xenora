@@ -1033,6 +1033,34 @@ impl StandardStreams {
         Ok(Err(Failed(0, EEXIST)))
     }
 
+    /// `_fstat64` fills the 56-byte legacy structure the mingw header fixes:
+    /// device, inode and times are zero — the drive carries none — the mode
+    /// is a regular file the CRT reports readable and writable, and the size
+    /// is the file's length. The offsets are the ones the cross-compiler
+    /// confirms: dev 0, ino 4, mode 6, nlink 8, uid 10, gid 12, rdev 16,
+    /// size 24, the three times at 32, 40 and 48.
+    pub(super) fn stat_descriptor64(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &ObjectState,
+        fd: i32,
+        buffer: u64,
+    ) -> Outcome<i32> {
+        if fd < 0 || buffer == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        let length = match self.opened.descriptor_stat(drive, fd as u32) {
+            Ok(length) => length,
+            Err(errno) => return Ok(Err(Failed(-1, errno))),
+        };
+        let mut stat = [0u8; 56];
+        stat[6..8].copy_from_slice(&(0x8000_u16 | 0o666).to_le_bytes()); // _S_IFREG | rw
+        stat[8..10].copy_from_slice(&1_i16.to_le_bytes()); // one link
+        stat[24..32].copy_from_slice(&length.to_le_bytes());
+        memory.write_bytes(buffer, &stat).map_err(fault)?;
+        Ok(Ok(0))
+    }
+
     /// `_fdopen`: the descriptor becomes the stream's, and the mode string
     /// only has to parse — matching it against the descriptor's access is the
     /// caller's business, as the CRT leaves it undefined.

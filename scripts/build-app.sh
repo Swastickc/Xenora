@@ -8,10 +8,12 @@ root=$(pwd)
 
 fail() { echo "build-app: $*" >&2; exit 1; }
 
-case "${1:-}" in
-    "") [ "$#" -eq 0 ] || fail "usage: scripts/build-app.sh [--check]" ;;
-    --check) [ "$#" -eq 1 ] || fail "usage: scripts/build-app.sh [--check]" ;;
-    *) fail "usage: scripts/build-app.sh [--check]" ;;
+usage="usage: scripts/build-app.sh [--check | --test]"
+mode=${1:-}
+case "$mode" in
+    "") [ "$#" -eq 0 ] || fail "$usage" ;;
+    --check|--test) [ "$#" -eq 1 ] || fail "$usage" ;;
+    *) fail "$usage" ;;
 esac
 
 [ "$(uname -s)" = Darwin ] || fail "macOS is required"
@@ -57,7 +59,7 @@ for tool in cargo rustc; do
         fail "the selected $tool must run natively on $target"
 done
 
-if [ "${1:-}" = --check ]; then
+if [ "$mode" = --check ]; then
     echo "build-app: macOS $macos_version, Swift $swift_version, Rust $tool_version, $target"
     echo "build-app: macOS SDK $sdk_path"
     exit 0
@@ -135,4 +137,10 @@ done
 # fixture binds no ordinary import, so it stops after relocation. No GPU needed.
 "$binary" --smoke-run-program "$root/fixtures/pe/delay-imports.exe" 125 relocated \
     "unresolved import dependency: fixture-ordinary.dll!OrdinaryByName"
+if [ "$mode" = --test ]; then
+    swift test --package-path app -c release --arch arm64 --jobs 2 \
+        -Xlinker -L -Xlinker "$rust_release"
+    "$binary" --smoke-loop-lifecycle
+    "$binary" --smoke-audio-vfs-controls
+fi
 echo "build-app: built $bundle"

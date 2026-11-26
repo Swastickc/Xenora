@@ -12,6 +12,11 @@ exact revision and known limitations.
 - `GetModuleFileNameA/W` answer the path the program was started with for its own image, with the documented truncation form, and the registry services of advapi32 (`RegOpenKeyExA/W`, `RegQueryValueExA/W`, `RegCloseKey`) model the machine's registry as honestly empty: the predefined roots open, every subkey and value is absent with ERROR_FILE_NOT_FOUND. Verified through the unit tests; probe binaries using them run end to end through `xenora run`.
 - The small CRT utilities of the survey: narrow string copying and concatenation (`strcpy`, `strncpy`, `strcat`, `strncat`), `strrchr`, `_strdup`, the in-place case conversions `_strlwr`/`_strupr` and reversal `_strrev`, the C-locale collation forms `strcoll`/`strxfrm`, the Annex K copies `memcpy_s`/`memmove_s` with their documented constraint answers, the character classes `isblank`/`isgraph`, the integer formatting family `_itoa`/`_ltoa`/`_i64toa`/`_ultoa`/`_ui64toa`/`_itoa_s` and `getenv_s` answering the documented empty over the empty environment. Verified through the unit tests and the hosted `crt_crtutils` fixture (23/23 checks at -O0 and -O2 through `xenora run`).
 
+- An experimental Series X|S launch preflight reads declared `MicrosoftGame.config` metadata
+  and reports the selected executable's static PE findings. It stops at the unverified console
+  bootstrap boundary. Original PE32+ fixtures exercise large-image rebasing, ordered thread-local
+  storage (TLS) callbacks and startup failure reporting on native macOS (#549).
+
 - Added the gfx1030 semantic campaign roadmap and ledger (#526, #527). It records the starting coverage, family and operand gaps, current owners, and the evidence required for each implementation batch.
 ### Added
 

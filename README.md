@@ -66,6 +66,27 @@ Each run accepts up to 32 directions and uses one instruction budget across
 the application. `--steps` changes that budget, and the supervising process
 stops a worker that exceeds the 15-second wall deadline.
 
+To replay a saved sequence, put the version on the first line of a text file,
+followed by one to 32 directions, one per line. Save the following example to
+`sequence.txt`.
+
+```text
+xenora-session-v1
+right
+left
+left
+right
+```
+
+```sh
+cargo run --locked -p xenora --bin xenora-session -- --backend reference --replay sequence.txt --frame-dir replay-frames
+```
+
+Use a regular file of at most 256 bytes, with LF or CRLF line endings and an
+optional final newline. Choose one source for directions per run, either
+`--replay` or positional arguments. The backend and instruction budget are
+selected on the command line.
+
 The command supports the embedded synthetic application. External PE
 admission and a macOS interface for this session are future work.
 

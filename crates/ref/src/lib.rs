@@ -452,8 +452,8 @@ impl VectorInteger {
     }
 }
 
-/// VOP1 32-bit integer and bit forms with a general SRC0 (AMD RDNA 2 ISA
-/// guide section 12.8). None writes VCC or SCC.
+/// VOP1 32-bit integer and bit forms with a general SRC0, and the binary32
+/// rounding forms (AMD RDNA 2 ISA guide section 12.8). None writes VCC or SCC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VectorUnary {
     /// 55: D = ~S0.
@@ -467,6 +467,14 @@ pub enum VectorUnary {
     /// 59: bits after the sign bit that equal it, from the MSB; -1 if all
     /// 32 bits are equal.
     FindSignChange,
+    /// 33: binary32 integral part, toward zero.
+    Truncate,
+    /// 34: binary32 rounded toward +infinity.
+    Ceiling,
+    /// 35: binary32 rounded to nearest, ties to even.
+    RoundNearestEven,
+    /// 36: binary32 rounded toward -infinity.
+    Floor,
 }
 
 impl VectorUnary {
@@ -478,11 +486,31 @@ impl VectorUnary {
             57 => Self::FindFirstOneFromMsb,
             58 => Self::FindFirstOneFromLsb,
             59 => Self::FindSignChange,
+            33 => Self::Truncate,
+            34 => Self::Ceiling,
+            35 => Self::RoundNearestEven,
+            36 => Self::Floor,
             _ => return None,
         })
     }
 
-    fn apply(self, s0: u32) -> u32 {
+    /// The binary32 rounding forms, which refuse integer inline constants.
+    fn is_float(self) -> bool {
+        matches!(
+            self,
+            Self::Truncate | Self::Ceiling | Self::RoundNearestEven | Self::Floor
+        )
+    }
+
+    /// D for S0, or `None` for an input outside the modeled domain.
+    fn apply(self, s0: u32) -> Option<u32> {
+        if self.is_float() {
+            return round_f32(self, s0);
+        }
+        Some(self.apply_integer(s0))
+    }
+
+    fn apply_integer(self, s0: u32) -> u32 {
         // -1 (all ones) when the scan finds nothing.
         let found = |index: u32| if index == 32 { u32::MAX } else { index };
         match self {
@@ -496,8 +524,58 @@ impl VectorUnary {
                 let positive = if (s0 as i32) < 0 { !s0 } else { s0 };
                 found(positive.leading_zeros())
             }
+            _ => unreachable!("binary32 rounding is handled by round_f32"),
         }
     }
+}
+
+/// Guide 12.8 binary32 rounding of S0 to an integral value.
+///
+/// The value is split into sign, integer significand and power of two, the
+/// integer part and the discarded remainder are compared with half a unit, and
+/// the rounded magnitude is encoded again. Subnormal inputs are read as their
+/// exact values (MODE.FP_DENORM single-precision input denormals allowed, the
+/// pinned ABI mode). Refused (`None`): every NaN, whose result the guide leaves
+/// to MODE.IEEE and MODE.DX10_CLAMP; and for RNDNE a negative input of
+/// magnitude at most 0.5, where the pseudocode's floor(S0 + 0.5) yields +0 but
+/// round-to-nearest-even semantics keep the sign.
+fn round_f32(kind: VectorUnary, s0: u32) -> Option<u32> {
+    let negative = s0 >> 31 == 1;
+    let biased = (s0 >> 23) & 0xff;
+    let fraction = s0 & 0x007f_ffff;
+    if biased == 0xff {
+        // Infinity is integral; NaN is refused.
+        return (fraction == 0).then_some(s0);
+    }
+    if kind == VectorUnary::RoundNearestEven && negative && (s0 & 0x7fff_ffff) <= 0x3f00_0000 {
+        return None;
+    }
+    // |S0| = significand * 2^(power), exactly.
+    let (significand, power) = if biased == 0 {
+        (u64::from(fraction), -149_i32)
+    } else {
+        (u64::from(fraction | 0x0080_0000), biased as i32 - 150)
+    };
+    if power >= 0 {
+        return Some(s0);
+    }
+    let shift = power.unsigned_abs().min(63);
+    let whole = significand >> shift;
+    let remainder = significand - (whole << shift);
+    let half = 1_u64 << (shift - 1);
+    let up = match kind {
+        VectorUnary::Truncate => false,
+        VectorUnary::Ceiling => !negative && remainder != 0,
+        VectorUnary::Floor => negative && remainder != 0,
+        _ => remainder > half || (remainder == half && whole % 2 == 1),
+    };
+    let magnitude = whole + u64::from(up);
+    let sign = s0 & 0x8000_0000;
+    if magnitude == 0 {
+        return Some(sign);
+    }
+    // At most 2^24, so the conversion is exact.
+    Some(sign | (magnitude as f32).to_bits())
 }
 
 /// Execute original little-endian gfx1030 bytes with the synthetic binding ABI.
@@ -921,6 +999,10 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
             {
                 let kind = VectorUnary::from_opcode((packed >> 1) | ((upper & 1) << 7)).unwrap();
                 let dst = (upper >> 1) | ((tag & 1) << 7);
+                let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
+                if kind.is_float() && (128..=208).contains(&selector) {
+                    return Err(error(offset, "integer inline constant as binary32 source"));
+                }
                 let (src0, length) =
                     decode_vector_source(*lo, *packed, tail, offset, "unsupported VOP1 source")?;
                 (Op::VectorUnary(kind, dst, src0), length)
@@ -1342,7 +1424,10 @@ fn execute_wave(
                         CompareSource::Scalar(register) => read_scalar(Source::Register(register))?,
                         CompareSource::Immediate(bits) => bits,
                     };
-                    results[lane] = Some((dst, kind.apply(s0)));
+                    let value = kind
+                        .apply(s0)
+                        .ok_or_else(|| error(offset, "binary32 input outside rounding domain"))?;
+                    results[lane] = Some((dst, value));
                 }
             }
             // Guide 12.8: tmp = D; D = S0; S0 = tmp, in each active lane.

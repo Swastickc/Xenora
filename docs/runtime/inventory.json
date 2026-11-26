@@ -4357,7 +4357,7 @@
       "canonical_symbol": "_access",
       "kind": "name",
       "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
-      "status": "implemented",
+      "status": "partial",
       "symbol": "_access"
     },
     {
@@ -4447,7 +4447,7 @@
       "canonical_symbol": "_unlink",
       "kind": "name",
       "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
-      "status": "implemented",
+      "status": "partial",
       "symbol": "_unlink"
     },
     {
@@ -4459,6 +4459,56 @@
       "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
       "status": "partial",
       "symbol": "_unlock_file"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_waccess",
+      "kind": "name",
+      "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_waccess"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_wchmod",
+      "kind": "name",
+      "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_wchmod"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_wmkdir",
+      "kind": "name",
+      "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_wmkdir"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_wstat64i32",
+      "kind": "name",
+      "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_wstat64i32"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_wunlink",
+      "kind": "name",
+      "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_wunlink"
     },
     {
       "api_set": true,
@@ -5264,6 +5314,26 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_assert",
+      "kind": "name",
+      "library": "api-ms-win-crt-runtime-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_assert"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_beginthreadex",
+      "kind": "name",
+      "library": "api-ms-win-crt-runtime-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_beginthreadex"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_cexit",
       "kind": "name",
       "library": "api-ms-win-crt-runtime-l1-1-0.dll",
@@ -5289,6 +5359,16 @@
       "library": "api-ms-win-crt-runtime-l1-1-0.dll",
       "status": "partial",
       "symbol": "_crt_atexit"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_endthreadex",
+      "kind": "name",
+      "library": "api-ms-win-crt-runtime-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_endthreadex"
     },
     {
       "api_set": true,
@@ -5799,6 +5879,16 @@
       "library": "api-ms-win-crt-stdio-l1-1-0.dll",
       "status": "implemented",
       "symbol": "_telli64"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_wfopen",
+      "kind": "name",
+      "library": "api-ms-win-crt-stdio-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_wfopen"
     },
     {
       "api_set": true,
@@ -7084,16 +7174,6 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
-      "canonical_symbol": "_access",
-      "kind": "name",
-      "library": "msvcrt.dll",
-      "status": "implemented",
-      "symbol": "_access"
-    },
-    {
-      "api_set": false,
-      "canonical_kind": "name",
-      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_cexit",
       "kind": "name",
       "library": "msvcrt.dll",
@@ -7489,16 +7569,6 @@
       "library": "msvcrt.dll",
       "status": "implemented",
       "symbol": "_telli64"
-    },
-    {
-      "api_set": false,
-      "canonical_kind": "name",
-      "canonical_library": "ucrtbase.dll",
-      "canonical_symbol": "_unlink",
-      "kind": "name",
-      "library": "msvcrt.dll",
-      "status": "implemented",
-      "symbol": "_unlink"
     },
     {
       "api_set": false,
@@ -8852,6 +8922,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "GetSecurityInfo"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "advapi32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "GetTokenInformation"
     },
     {
@@ -8973,6 +9053,26 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "SystemFunction036"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "api-ms-win-crt-process-l1-1-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_spawnve"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "api-ms-win-crt-process-l1-1-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wspawnve"
     },
     {
       "data_import": false,
@@ -12480,6 +12580,16 @@
       "kind": "name",
       "library": "msvcrt.dll",
       "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_spawnve"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
       "status": "implemented",
       "status_explicit": false,
       "symbol": "_time64"
@@ -12770,9 +12880,29 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "typed",
-      "status": "implemented",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "_access"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_assert"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_beginthreadex"
     },
     {
       "data_import": false,
@@ -12883,6 +13013,16 @@
       "status": "implemented",
       "status_explicit": true,
       "symbol": "_dup2"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_endthreadex"
     },
     {
       "data_import": false,
@@ -13359,6 +13499,16 @@
       "family": "c-runtime",
       "kind": "name",
       "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_spawnve"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
       "source": "typed",
       "status": "partial",
       "status_explicit": true,
@@ -13470,7 +13620,7 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "typed",
-      "status": "implemented",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "_unlink"
     },
@@ -13483,6 +13633,26 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_unlock_file"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_waccess"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wchmod"
     },
     {
       "data_import": false,
@@ -13530,9 +13700,59 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wfopen"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wmkdir"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
       "status": "implemented",
       "status_explicit": true,
       "symbol": "_write"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wspawnve"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wstat64i32"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wunlink"
     },
     {
       "data_import": false,
@@ -15336,6 +15556,46 @@
     },
     {
       "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpCloseHandle"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpConnect"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpOpen"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpOpenRequest"
+    },
+    {
+      "data_import": false,
       "family": "windows-networking",
       "kind": "name",
       "library": "ws2_32.dll",
@@ -15543,6 +15803,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "getpeername"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "getservbyname"
     },
     {
       "data_import": false,
@@ -16406,21 +16676,21 @@
     }
   ],
   "summary": {
-    "aliases": 825,
-    "api_set_aliases": 693,
-    "canonical_services": 762,
+    "aliases": 832,
+    "api_set_aliases": 702,
+    "canonical_services": 782,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 218,
+    "implemented": 216,
     "implicit_status_services": 74,
-    "libraries": 14,
-    "manual_services": 520,
+    "libraries": 16,
+    "manual_services": 531,
     "ordinal_aliases": 0,
-    "partial": 540,
+    "partial": 562,
     "structural_consistency_findings": 0,
     "stub": 4,
-    "typed_registry_entries": 242,
-    "typed_services": 242,
+    "typed_registry_entries": 251,
+    "typed_services": 251,
     "wanted_imports": null,
     "wanted_missing": null
   },

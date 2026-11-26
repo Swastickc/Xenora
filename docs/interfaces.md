@@ -75,8 +75,8 @@ A guest ends its process through `kernel32.dll!ExitProcess`, also reachable as
 the guest passed. Only the guest stops: the host process is not ended. A
 returning entry point does the same with EAX as the status, which matches
 Windows while the process has one thread. The exit closes every guest handle:
-kernel objects, Winsock sockets and task-queue handles, which
-`ServicesState::open_handle_count` counts together. Files stay on the synthetic `C:` drive, guest memory stays mapped so the host
+kernel objects, WinHTTP objects, Winsock sockets and task-queue handles,
+which `ServicesState::open_handle_count` counts together. Files stay on the synthetic `C:` drive, guest memory stays mapped so the host
 can inspect it, and `atexit` functions are not run: that belongs to the C
 runtime's `exit`, described below. `ServicesState::exit_status`
 reports the status. After an exit the `DbtEngine` that ran the guest executes
@@ -754,6 +754,52 @@ in one package in one group, coherent with the count `GetSystemInfo`
 reports. Numa, cache and group relationships are not modeled yet:
 enumerating them alone answers zero entries. Nothing was compared with
 Windows.
+
+### WinHTTP handle lifecycle
+
+`winhttp.dll` has a partial, synchronous object model for the four public
+handle-lifecycle functions. `WinHttpOpen` copies the optional agent string
+and creates a session handle. The direct and default access modes are
+accepted; because the synthetic machine has no proxy configuration, the
+default mode currently means direct access. Named and automatic proxy modes
+and every nonzero session flag, including asynchronous operation, fail with
+`ERROR_NOT_SUPPORTED`. Proxy strings are not dereferenced in the accepted
+modes because Microsoft's documentation makes them inputs to the named-proxy
+mode.
+
+`WinHttpConnect` requires a live session handle of the correct type, a
+nonempty ASCII host or address string rather than a URL, a zero reserved
+field and a 16-bit `INTERNET_PORT`; only the low sixteen bits of the Win64
+argument register are consumed. The documented constants are values in that
+range, not a separate validation class. It creates a connection object but,
+as on Windows, establishes no network connection. `WinHttpOpenRequest`
+requires a live connection handle of the correct type. Validation and
+insertion happen under the same handle-table lock, so another thread cannot
+close the parent between the two steps. Null verb and version strings default
+to `GET` and `HTTP/1.1`. Microsoft's examples pass a null object name
+successfully but do not specify an expansion, so Xenora records it as an
+absent target rather than inventing wire behavior. The request copies its strings and
+accept types into immutable state; later guest-memory writes cannot mutate
+the object. Only the zero flags and `WINHTTP_FLAG_SECURE` are accepted. The
+secure flag records that HTTPS was requested but does not implement TLS.
+
+`WinHttpCloseHandle` closes exactly one session, connection or request handle
+and makes later use of that value fail. Closing a parent does not rewrite an
+existing child object: children carry immutable snapshots of the state they
+need. This is Xenora's object-lifetime policy for the synchronous subset;
+Microsoft's public documentation requires applications to close handles and
+not reuse them but does not give a complete parent-close cascade contract.
+Handles are process-local opaque values and are also discarded when the guest
+process exits.
+
+This slice implements no transport. It does not send requests, reuse network
+connections, parse responses, validate certificates, perform cancellation or
+timeouts, dispatch asynchronous callbacks, or provide libcurl-compatible
+interfaces. Those interfaces remain unsupported rather than being simulated.
+The unit tests cover positive creation, defaults, wrong and closed handles,
+invalid names and flags, immutable guest-memory snapshots, close/reuse and
+concurrent creation on independent and shared parents. They are synthetic
+local evidence only and have not been compared with Windows.
 
 ### Encoding conversions and code pages
 

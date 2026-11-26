@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- The first WinHTTP object layer: `WinHttpOpen`, `WinHttpConnect`, `WinHttpOpenRequest` and `WinHttpCloseHandle` validate and own session, connection and request handles, copy bounded UTF-16 inputs out of guest memory, enforce parent handle types atomically, reject unsupported async/proxy/transport flags honestly, support concurrent creation on shared parents, and clean the table at guest process exit. No HTTP transport, TLS, response parsing, cancellation or callback dispatch is implied. Verified through the in-module `winhttp.rs` unit tests on Apple Silicon only; not compared with Windows and not independently reviewed.
 - The CRT spawn family refuses honestly: `_spawnve` and `_wspawnve` answer minus one with ENOSYS in errno across ucrtbase, msvcrt and the process API set, since the machine is one process and cannot host a child. Local in-module tests cover the refusal shape.
 - `GetSecurityInfo` answers the owner and group of any object as the machine's one identity and honestly refuses access-control-list queries (ERROR_NOT_SUPPORTED in the return value), since the machine models no ACLs. Local in-module tests cover both directions.
 - `getservbyname` resolves service names from the standard Internet assignment table (http, https, ssh, ftp, smtp, domain, and others) with ports in network byte order and misses unknown services honestly. Local in-module tests cover the resolution and the miss.

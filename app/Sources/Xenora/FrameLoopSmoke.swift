@@ -208,6 +208,7 @@ func checkFrameLoopFailures() async -> [String] {
     try? await Task.sleep(for: .milliseconds(35))
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
     return failures + (await checkFramePolling()) + (await checkNonblockingStop())
+        + (await checkFailedStopRecovery())
         + checkControllerComposition() + checkControllerHandoffs() + (await checkControllerErrorRecovery())
 }
 
@@ -226,6 +227,8 @@ private func checkNonblockingStop() async -> [String] {
     model.startInteractive()
     api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0x22)
     model.pause()
+    let pausedImage = model.image
+    expect(pausedImage != nil, "paused loop did not publish its frame")
     let priorPolls = api.count(.status)
     let gate = api.blockNextStop()
     defer { gate.open() }
@@ -243,7 +246,8 @@ private func checkNonblockingStop() async -> [String] {
     model.sendInput(buttons: UInt32(XENORA_INPUT_RIGHT))
     // A heartbeat has time to run here if the stop forgot to cancel it.
     try? await Task.sleep(for: .milliseconds(25))
-    expect(model.isStopping && model.completed == 1 && model.frameId == 0,
+    expect(model.isStopping && model.completed == 1 && model.frameId == 0
+           && model.image === pausedImage,
            "main actor could not observe the last frame with the stop still blocked")
     expect(api.count(.status) == priorPolls && api.count(.stop) == 1 && api.count(.destroy) == 0
            && api.count(.create) == 1 && api.count(.standard) == 0 && api.count(.interactive) == 1
@@ -265,6 +269,36 @@ private func checkNonblockingStop() async -> [String] {
     expect(model.isRunning && !model.isInteractive && model.image == nil
            && api.count(.create) == 2 && api.count(.destroy) == 1 && api.count(.standard) == 1,
            "completed stop did not allow a clean restart")
+    return failures
+}
+
+@MainActor
+private func checkFailedStopRecovery() async -> [String] {
+    var failures: [String] = []
+    func expect(_ condition: Bool, _ message: String) {
+        if !condition { failures.append(message) }
+    }
+
+    let api = ScriptedFrameLoop()
+    let model = FrameLoopModel(
+        api: api, readController: { nil },
+        sleepBeforePoll: { _ in try await Task.sleep(for: .milliseconds(5)) }
+    )
+    model.startInteractive()
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0x33)
+    let priorPolls = api.count(.status)
+    api.fail(.stop, Int32(XENORA_INTERNAL_ERROR))
+    await model.stop()?.value
+    expect(model.errorMessage?.contains("stop frame loop (status \(Int(XENORA_INTERNAL_ERROR)))") == true,
+           "failed stop did not publish its error")
+    expect(!model.isStopping, "failed stop left controls disabled")
+    expect(await waitForLoop { api.count(.status) > priorPolls },
+           "failed stop did not restart polling")
+
+    api.report(XENORA_LOOP_STOPPED, completed: 2, frame: 1, pixel: 0x44)
+    await model.stop()?.value
+    expect(model.canStart && !model.isStopping,
+           "failed-stop recovery did not allow a clean stop")
     return failures
 }
 

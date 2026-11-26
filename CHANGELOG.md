@@ -22,6 +22,7 @@ exact revision and known limitations.
 - Native macOS CI now runs the Swift package tests and the frame-loop and Audio/VFS control smokes in addition to checking the app bundle (#753).
 - Synchronous runtime tasks that unwind now retain their queue slot and deliver a `WorkerPanicked` completion, matching background work (#755).
 - The synthetic registry returns Win32 status codes to guest callers and preserves the identity of predefined root handles, including the Win64 SDK constants (#760).
+- `xenora shaders inspect` checks the opened file before decoding and enforces a 1 MiB read limit. It rejects special files and oversized streams before printing rows (#743).
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).
 - The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).
 - The native CI semantics test now distinguishes an unknown signedness from a valid category used on the wrong operation. This restores the check after binary32 rounding added the float category (#728).

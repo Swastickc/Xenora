@@ -2,6 +2,11 @@
 
 For counts of every gfx1030 form in AMD's metadata against forms Xenora can execute, run `xenora shaders coverage`. Its "discovered" column is metadata coverage, not execution support.
 
+`xenora shaders inspect <gfx1030.bin>` lists the instructions in a raw
+little-endian gfx1030 stream and distinguishes identification failures from
+unsupported semantics. It accepts regular files of up to 1 MiB, including
+symlinks to regular files.
+
 The decoder accepts an explicitly tagged, little-endian gfx1030 Wave32
 stream with 32 lanes per wave under the [synthetic memory ABI](../adr/0003-demo-memory-model.md).
 Recognition means that the opcode mask matches. Decode additionally checks

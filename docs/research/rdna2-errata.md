@@ -78,7 +78,7 @@ decided explicitly rather than inferred.
 | `Round(x)` | 15 places | Which rounding mode; nearest-even is implied by the round-mode table but not stated. |
 | `Mantissa(x)`, `Exponent(x)`, `TwosComplement(x)` | `V_FREXP_*`, `V_LDEXP_*` | The exact splitting and rounding of the mantissa. |
 | `sat8(x)` | `V_SAT_PK_U8_I16` | Saturation behaviour. |
-| `FindFirst1fromLSB(exec)` | `V_FFBH`, `V_FFBL` | The search order and the result when nothing is found. |
+| `FindFirst1fromLSB(exec)` | `V_READFIRSTLANE_B32`, p137 | Only the definition. The name gives the search order and the text gives the empty-mask result ("Lane# = 0 if exec is zero"), so no reading is open. `V_FFBH_*` and `V_FFBL_B32` do not use it; they carry their own loops and return -1 when no bit is set (p143). |
 | `isNaN(x)` | the VOPC float comparisons | Whether a signalling NaN and a quiet NaN are distinguished. |
 
 `IEEE_MODE` is a fourth kind of gap: it is used in the pseudocode but never
@@ -114,7 +114,7 @@ implemented wrongly.
 - **MODE holds two round-mode fields and two denormal fields.** Page 47:
   `FP_ROUND[1:0]` is the single-precision mode and `[3:2]` the double and half
   mode; `FP_DENORM[5:4]` is single and `[7:6]` double and half.
-- **`S_BFE_U32` and `S_BFE_I32` write SCC.** Page 113 gives `SCC = (D.u != 0)`.
+- **`S_BFE_U32` and `S_BFE_I32` write SCC.** Pages 104 and 105 give `SCC = (D.u != 0)` and `SCC = (D.i != 0)`.
   Older guides omit the SCC line, which is why the errata list mentions them.
 
 ## Second sources
@@ -125,7 +125,7 @@ re-derive from the guide, and are never a substitute for it.
 - Mesa's `src/amd/compiler/README-ISA.md`, an unofficial GCN and RDNA errata
   list. It covers several of the rows above and adds the hardware hazard notes
   below. Two of its items do not apply to this guide: it says `s_bfe_*` omit
-  the SCC write, which document 70648 states on page 113, and it reports a
+  the SCC write, which document 70648 states on pages 104 and 105, and it reports a
   conflict between guide sections 9.3 and 13.8.1 over the FLAT `SADDR` field,
   where page 86 already accepts both "NULL or 0x7f".
 - An independent audit of this guide by another RDNA2 project, whose findings

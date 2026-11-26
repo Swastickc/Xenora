@@ -2340,6 +2340,7 @@ fn captured_output_is_bounded() {
 }
 
 const ENOENT: u32 = 2;
+const EEXIST: u32 = 17;
 const EBADF: u32 = 9;
 const EMFILE: u32 = 24;
 const ENOSPC: u32 = 28;
@@ -6718,4 +6719,37 @@ fn legacy_fstat64_fills_the_legacy_structure() {
     assert_eq!(guest.errno(), EBADF);
     assert_eq!(guest.call("_fstat64", &[fd, 0]) & 0xFFFF_FFFF, MINUS_ONE);
     assert_eq!(guest.errno(), EINVAL);
+}
+
+#[test]
+fn legacy_directories_are_made_and_removed() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    // `_mkdir` makes the directory a file can be written into, nested or not.
+    guest.memory.write_bytes(buf, b"adir\0").unwrap();
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EEXIST);
+    guest.memory.write_bytes(buf, b"adir\\inner\0").unwrap();
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, 0);
+    // A file inside the directory blocks its removal until it goes.
+    guest
+        .memory
+        .write_bytes(buf, b"adir\\inner\\f.bin\0")
+        .unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"adir\0").unwrap();
+    assert_eq!(guest.call("_rmdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    // Missing parents and missing directories are ENOENT.
+    guest.memory.write_bytes(buf, b"nope\\deep\0").unwrap();
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), ENOENT);
+    guest.memory.write_bytes(buf, b"nope\0").unwrap();
+    assert_eq!(guest.call("_rmdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), ENOENT);
+    // An empty directory is removed: the inner one first, then the parent
+    // once the file is gone.
+    assert_eq!(guest.call("remove", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
 }

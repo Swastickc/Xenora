@@ -544,6 +544,24 @@ service ucrtbase.dll _fstat64(fd: i32, buffer: ptr) -> i32
     fails -1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none
     ref sys/stat.h _fstat64
     test legacy_fstat64_fills_the_legacy_structure
+service ucrtbase.dll _mkdir(name: ptr) -> i32
+    handler _mkdir
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT when the parent does not exist, EEXIST when the name is taken, ENOSPC at 256 directories
+    ref direct.h _mkdir
+    test legacy_directories_are_made_and_removed
+
+service ucrtbase.dll _rmdir(name: ptr) -> i32
+    handler _rmdir
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories
+    ref direct.h _rmdir
+    test legacy_directories_are_made_and_removed
+
 
 
 

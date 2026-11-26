@@ -1556,6 +1556,40 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    /// `_mkdir` and `_rmdir` are drive operations the descriptor layer is no
+    /// part of: the narrow path resolves as every drive path does.
+    pub fn _mkdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let bytes =
+            crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            match ObjectState::drive_path(&bytes) {
+                Some(path) => drive
+                    .drive_mkdir(&path)
+                    .map(|()| 0)
+                    .map_err(|errno| crt_streams::Failed(-1, errno)),
+                None => Err(crt_streams::Failed(-1, crt::EINVAL)),
+            }
+        };
+        or_errno(context, Ok(outcome))
+    }
+
+    pub fn _rmdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let bytes =
+            crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            match ObjectState::drive_path(&bytes) {
+                Some(path) => drive
+                    .drive_rmdir(&path)
+                    .map(|()| 0)
+                    .map_err(|errno| crt_streams::Failed(-1, errno)),
+                None => Err(crt_streams::Failed(-1, crt::EINVAL)),
+            }
+        };
+        or_errno(context, Ok(outcome))
+    }
+
     pub fn _fstat64(context: &mut ServiceContext<'_>, fd: i32, buffer: u64) -> Outcome<i32> {
         let outcome = {
             let mut streams = context.state.crt_streams();

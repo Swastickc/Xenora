@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 222 |
-| Generated adapters | 222 |
-| Unique handler implementations | 213 |
-| Implemented | 75 |
+| Services with a declared ABI | 224 |
+| Generated adapters | 224 |
+| Unique handler implementations | 215 |
+| Implemented | 77 |
 | Partial | 145 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 222 |
-| API-set aliases (not services) | 255 |
+| Conformance-tested through guest dispatch | 224 |
+| API-set aliases (not services) | 259 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -78,6 +78,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_mktemp` | `(template: ptr) -> ptr` | partial | null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free |
 | `ucrtbase.dll!_fdopen` | `(fd: i32, mode: ptr) -> ptr` | partial | null with errno EINVAL for a descriptor of a standard stream or a mode string that does not parse; the mode is not matched against the descriptor's access |
 | `ucrtbase.dll!_fstat64` | `(fd: i32, buffer: ptr) -> i32` | partial | -1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none |
+| `ucrtbase.dll!_mkdir` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT when the parent does not exist, EEXIST when the name is taken, ENOSPC at 256 directories |
+| `ucrtbase.dll!_rmdir` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories |
 | `ucrtbase.dll!_access` | `(name: ptr, mode: i32) -> i32` | implemented | -1 with errno ENOENT for a missing or rejected name, EINVAL for a null or empty name or mode bits other than 0, 2, 4 and 6 |
 | `ucrtbase.dll!_unlink` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT missing, EACCES for a directory, EINVAL for a null or empty name; it is remove by another name |
 | `ucrtbase.dll!_gmtime64` | `(time: ptr) -> ptr` | implemented | null with errno EINVAL for a null pointer or a time outside 1970-to-3000 |

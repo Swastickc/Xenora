@@ -2,6 +2,7 @@
 
 //! Bounded synthetic C: drive with no host filesystem mapping.
 
+use super::crt_files::{EEXIST, ENOENT, ENOSPC};
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
     ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32, ServicesState,
@@ -1080,6 +1081,39 @@ impl super::ObjectState {
                 parent: parent.is_empty() || self.directories.contains(parent),
             }
         }
+    }
+
+    /// Create a directory, as `_mkdir` does: the parent has to exist, the
+    /// name has to be free, and the drive holds at most its many. The errno
+    /// is the caller's mapping of the false.
+    pub(super) fn drive_mkdir(&mut self, path: &str) -> Result<(), u32> {
+        let parent = parent(path);
+        if !parent.is_empty() && !self.directories.contains(parent) {
+            return Err(ENOENT);
+        }
+        if self.directories.contains(path) || self.files.contains_key(path) {
+            return Err(EEXIST);
+        }
+        if self.directories.len() >= MAX_DIRECTORIES {
+            return Err(ENOSPC);
+        }
+        self.directories.insert(path.to_owned());
+        Ok(())
+    }
+
+    /// Remove an empty directory, as `_rmdir` does: nothing it holds may
+    /// remain, file or directory.
+    pub(super) fn drive_rmdir(&mut self, path: &str) -> Result<(), u32> {
+        if !self.directories.contains(path) {
+            return Err(ENOENT);
+        }
+        if self.directories.iter().any(|key| parent(key) == path)
+            || self.files.keys().any(|key| parent(key) == path)
+        {
+            return Err(EEXIST);
+        }
+        self.directories.remove(path);
+        Ok(())
     }
 
     /// Create an empty file. False when the drive already holds as many files

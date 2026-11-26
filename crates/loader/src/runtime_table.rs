@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 222] = [
+pub static SERVICES: [ServiceMetadata; 224] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -668,6 +668,28 @@ pub static SERVICES: [ServiceMetadata; 222] = [
         failure: "-1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none",
         reference: "sys/stat.h _fstat64",
         tests: &["legacy_fstat64_fills_the_legacy_structure"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_mkdir",
+        parameters: &[Parameter { name: "name", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-filesystem-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno ENOENT when the parent does not exist, EEXIST when the name is taken, ENOSPC at 256 directories",
+        reference: "direct.h _mkdir",
+        tests: &["legacy_directories_are_made_and_removed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_rmdir",
+        parameters: &[Parameter { name: "name", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-filesystem-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories",
+        reference: "direct.h _rmdir",
+        tests: &["legacy_directories_are_made_and_removed"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2990,6 +3012,22 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.u64(1)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::_fstat64(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_mkdir", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_mkdir(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_rmdir", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_rmdir(&mut context, a0)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

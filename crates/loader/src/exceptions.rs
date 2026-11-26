@@ -649,9 +649,6 @@ pub(crate) struct Dispatch {
     /// Guest address of the CONTEXT, DISPATCHER_CONTEXT and EXCEPTION_RECORD.
     scratch: u64,
     frames: u32,
-    /// The CPU fault this search started from. A search that no frame
-    /// accepts ends the guest with it, at the faulting instruction.
-    fault: Option<ExitReason>,
     /// The search started from an instruction-fetch fault, whose address can
     /// be outside every image: that first frame is unwound as a leaf.
     fetch_fault: bool,
@@ -659,15 +656,12 @@ pub(crate) struct Dispatch {
     leaf: bool,
     /// The search is waiting for the unhandled-exception filter.
     filter: bool,
+    /// The search started from `RaiseException`, not from a CPU fault.
+    raised: bool,
 }
 
 impl Dispatch {
-    fn search(
-        origin: CpuState,
-        scratch: u64,
-        fault: Option<ExitReason>,
-        fetch_fault: bool,
-    ) -> Self {
+    fn search(origin: CpuState, scratch: u64, fetch_fault: bool) -> Self {
         Self {
             unwind: None,
             next: origin.clone(),
@@ -675,10 +669,10 @@ impl Dispatch {
             establisher: 0,
             scratch,
             frames: 0,
-            fault,
             fetch_fault,
             leaf: fetch_fault,
             filter: false,
+            raised: false,
         }
     }
 }
@@ -708,12 +702,15 @@ fn scratch_below(rsp: u64, memory: &GuestMemory) -> Result<u64, ExitReason> {
 }
 
 /// Whether `rip` is where a guest stack ends: the return address of the
-/// entry point, of a thread's start routine, or of a guest callback a host
-/// service made. No guest frame lies beyond it to search.
+/// entry point, of a thread's start routine, of a TLS callback, or of a
+/// guest callback a host service made. No guest frame lies beyond it.
 fn end_of_stack(rip: u64) -> bool {
     matches!(
         rip,
-        0 | ENTRY_RETURN | CALLBACK_RETURN | crate::services::threads::THREAD_RETURN
+        0 | ENTRY_RETURN
+            | CALLBACK_RETURN
+            | crate::services::threads::THREAD_RETURN
+            | crate::tls::TLS_CALLBACK_RETURN
     )
 }
 
@@ -960,7 +957,13 @@ fn default_action(
     let code = memory
         .read_u32(dispatch.scratch + RECORD_AT)
         .map_err(fault)?;
-    *cpu = dispatch.origin.clone();
+    let mut stop = dispatch.origin.clone();
+    if dispatch.raised {
+        // As at the call into RaiseException: RSP on its return address, so
+        // the nonvolatile registers are those the caller had.
+        stop.set(Register::Rsp, stop.get(Register::Rsp) - 8);
+    }
+    *cpu = stop;
     Err(ExitReason::ProcessExit(code))
 }
 
@@ -1078,7 +1081,9 @@ fn raise_exception(
             .map_err(fault)?;
     }
     write_context(memory, scratch + EXCEPTION_CONTEXT_AT, &origin)?;
-    walk(Dispatch::search(origin, scratch, None, false), cpu, memory)
+    let mut dispatch = Dispatch::search(origin, scratch, false);
+    dispatch.raised = true;
+    walk(dispatch, cpu, memory)
 }
 
 /// `RtlUnwindEx(target_frame, target_ip, record, return_value, context, history)`.
@@ -1127,7 +1132,7 @@ fn unwind(
     }
     let dispatch = Dispatch {
         unwind: Some(target),
-        ..Dispatch::search(origin, scratch, None, false)
+        ..Dispatch::search(origin, scratch, false)
     };
     walk(dispatch, cpu, memory)
 }

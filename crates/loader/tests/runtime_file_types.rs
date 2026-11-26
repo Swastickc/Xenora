@@ -35,6 +35,8 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "UnlockFileEx"),
     (KERNEL32, "ReadFile"),
     (KERNEL32, "CreateFileA"),
+    (KERNEL32, "GetFileAttributesA"),
+    (KERNEL32, "SetFileAttributesA"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -237,4 +239,33 @@ fn create_file_of_the_narrow_width_shares_the_drive() {
     guest.memory.read_bytes(OUT3, &mut bytes).unwrap();
     assert_eq!(&bytes, b"narrow width");
     assert_eq!(guest.call("CloseHandle", &[reader]), 1);
+}
+
+/// The narrow attribute forms answer and set the same bits as the wide ones.
+#[test]
+fn narrow_attributes_round_trip() {
+    const NAME4: u64 = SCRATCH;
+    const OUT4: u64 = SCRATCH + 0x400;
+    const GOT4: u64 = SCRATCH + 0x808;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "attr.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(OUT4, b"a").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT4, 1, GOT4, 0]), 1);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    narrow_at(&mut guest, NAME4, "attr.bin");
+    let attributes = guest.call("GetFileAttributesA", &[NAME4]) & 0xFFFF_FFFF;
+    assert_ne!(attributes, 0xFFFF_FFFF, "the file exists");
+    // The drive does not track attribute bits: the set accepts only the
+    // normal and archive forms, as the wide width documents, and refuses
+    // the rest honestly.
+    assert_eq!(guest.call("SetFileAttributesA", &[NAME4, 0x80]), 1);
+    assert_eq!(guest.call("SetFileAttributesA", &[NAME4, 1]), 0);
+    assert_eq!(last_error(&mut guest), 50, "ERROR_NOT_SUPPORTED");
+    // A missing file answers the documented invalid attributes.
+    narrow_at(&mut guest, NAME4, "absent.bin");
+    assert_eq!(
+        guest.call("GetFileAttributesA", &[NAME4]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
 }

@@ -614,6 +614,28 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         attributes.fail(cpu.gs_base, error, INVALID_ATTRIBUTES)
     });
 
+    let attributes_a = Arc::clone(state);
+    registry.register(KERNEL32, "GetFileAttributesA", move |args, cpu, memory| {
+        const INVALID_ATTRIBUTES: u64 = u32::MAX as u64;
+        let Some(path) = guest_path_a(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return attributes_a.fail(cpu.gs_base, INVALID_NAME, INVALID_ATTRIBUTES);
+        };
+        let objects = attributes_a.objects.lock().expect("guest object state");
+        if objects.directories.contains(&path) {
+            return Ok(0x10); // FILE_ATTRIBUTE_DIRECTORY
+        }
+        if objects.files.contains_key(&path) {
+            return Ok(0x80); // FILE_ATTRIBUTE_NORMAL
+        }
+        let parent = parent(&path);
+        let error = if parent.is_empty() || objects.directories.contains(parent) {
+            FILE_NOT_FOUND
+        } else {
+            PATH_NOT_FOUND
+        };
+        attributes_a.fail(cpu.gs_base, error, INVALID_ATTRIBUTES)
+    });
+
     let rename = Arc::clone(state);
     registry.register(KERNEL32, "MoveFileW", move |args, cpu, memory| {
         let Some(source) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
@@ -948,6 +970,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let objects = set_attributes.objects.lock().expect("guest object state");
         if !objects.files.contains_key(&path) && !objects.directories.contains(&path) {
             return set_attributes.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
+        }
+        Ok(1)
+    });
+
+    let set_attributes_a = Arc::clone(state);
+    registry.register(KERNEL32, "SetFileAttributesA", move |args, cpu, memory| {
+        let Some(path) = guest_path_a(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return set_attributes_a.fail(cpu.gs_base, INVALID_NAME, 0);
+        };
+        if args.rdx != 0x80 && args.rdx != 0x20 {
+            return set_attributes_a.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+        }
+        let objects = set_attributes_a.objects.lock().expect("guest object state");
+        if !objects.files.contains_key(&path) && !objects.directories.contains(&path) {
+            return set_attributes_a.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
         }
         Ok(1)
     });

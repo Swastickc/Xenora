@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- The narrow attribute forms `GetFileAttributesA`/`SetFileAttributesA` share the wide forms' answers and their documented subset: the drive does not track attribute bits, so the set accepts only the normal and archive forms and refuses the rest with ERROR_NOT_SUPPORTED. Verified through the unit tests of `runtime_file_types.rs`.
 - `CreateFileA` opens the same drive as the wide form with narrow path names, sharing rules and dispositions identical across the widths. Verified through the unit tests of `runtime_file_types.rs`.
 - `MoveFileExA` renames with MOVEFILE_REPLACE_EXISTING and honestly refuses MOVEFILE_DELAY_UNTIL_REBOOT since there is no boot to wait for, and the byte-range locks `LockFileEx`/`UnlockFileEx` accept a valid file handle, there being no other owner to contend with in a single-process machine. Verified through the unit tests of `runtime_file_types.rs`.
 - `SetHandleInformation` validates its handle and accepts the inheritance flags, which are inert without child processes, and `GetFileSize` answers the legacy 32-bit size form with the high word through its pointer. Verified through the unit tests of `runtime_file_types.rs`.

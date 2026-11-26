@@ -552,6 +552,22 @@ fn vop1_integer_fixture_lowers_unary_and_masked_swap() {
     );
 }
 
+#[test]
+fn vop1_float_rounding_fixture_lowers_to_integer_bit_operations() {
+    let code = include_bytes!("../../../fixtures/rdna2/vector-round.bin");
+    let compiled = compile(Architecture::Gfx1030, code).unwrap();
+    assert_eq!(
+        compiled.ir,
+        include_str!("../../../fixtures/golden/vector-round.ir")
+    );
+    assert_eq!(
+        compiled.msl,
+        include_str!("../../../fixtures/golden/vector-round.metal")
+    );
+    // No Metal float operation or reinterpretation: fast math cannot apply.
+    assert!(!compiled.msl.contains("as_type") && !compiled.msl.contains("float"));
+}
+
 // --- Opt-in constant folding: hand-computed known-answer fixtures -------------
 // Instruction words are built by hand to match the existing RDNA2 fixture shape
 // (load, wait, mov literals, op, store). Expected constants are derived from the
@@ -1361,6 +1377,7 @@ fn cse_leaves_every_golden_fixture_unchanged() {
     golden!("vector-compare-ft");
     golden!("vector-integer");
     golden!("vector-unary");
+    golden!("vector-round");
 }
 
 /// 1 + 2 = 3, and the same add twice, then and the load with each sum.

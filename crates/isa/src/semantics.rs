@@ -108,9 +108,18 @@ pub enum Operation {
     WaitLoad,
     /// Swap the two old per-lane VGPR values (guide 12.8).
     Swap,
+    /// Binary32 integral part, rounding toward zero (guide 12.8).
+    Truncate,
+    /// Binary32 rounding up to an integral value (guide 12.8).
+    Ceiling,
+    /// Binary32 rounding to the nearest integral value, ties to even (guide 12.8).
+    RoundNearestEven,
+    /// Binary32 rounding down to an integral value (guide 12.8).
+    Floor,
 }
 
-/// Per-lane integer operation with one input and one result.
+/// Per-lane operation with one input and one result: integer and bit forms,
+/// and binary32 rounding to an integral value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VectorUnary {
     /// Bitwise complement.
@@ -123,6 +132,14 @@ pub enum VectorUnary {
     FindLow,
     /// Count leading sign bits, or return all ones if every bit matches.
     FindHighSigned,
+    /// Binary32 rounding toward zero.
+    TruncateF32,
+    /// Binary32 rounding toward +infinity.
+    CeilingF32,
+    /// Binary32 rounding to nearest, ties to even.
+    RoundNearestEvenF32,
+    /// Binary32 rounding toward -infinity.
+    FloorF32,
 }
 
 /// The per-lane integer operation a vector form lowers to. One reusable MSL
@@ -175,6 +192,8 @@ pub enum Signedness {
     Signed,
     /// Untyped bits.
     Bitwise,
+    /// IEEE 754 binary32 values.
+    Float,
 }
 
 /// Per-lane VOP2 operation selected by the semantic registry.
@@ -304,6 +323,8 @@ pub enum OperandRule {
     Vop2Vgpr2,
     /// VOP1 unary: VGPR VDST and the same SRC0 domain as VOP2.
     Vop1Vgpr,
+    /// VOP1 binary32 rounding: as `Vop1Vgpr` without integer inline constants.
+    Vop1F32,
     /// VOP1 swap: VDST and SRC0 each read and write a VGPR.
     Vop1Swap,
 }

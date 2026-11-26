@@ -2128,6 +2128,54 @@ decoded = true
 llvm = "three-way passed"
 
 [[instruction]]
+form = "v_trunc_f32_e32"
+encoding = "VOP1, Wave32; VGPR VDST with VGPR, normal SGPR, vcc_lo or literal SRC0 (no integer inline constant); binary32 round toward zero to an integral value; MODE pinned to input denormals allowed; NaN inputs refused by the reference"
+representation = "`7E044301`"
+lowering = "per-thread unary integer operation on the binary32 bits with a lane merge under partial EXEC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_ceil_f32_e32"
+encoding = "VOP1, Wave32; VGPR VDST with VGPR, normal SGPR, vcc_lo or literal SRC0 (no integer inline constant); binary32 round toward +infinity to an integral value; MODE pinned to input denormals allowed; NaN inputs refused by the reference"
+representation = "`7E064501`"
+lowering = "per-thread unary integer operation on the binary32 bits with a lane merge under partial EXEC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_rndne_f32_e32"
+encoding = "VOP1, Wave32; VGPR VDST with VGPR, normal SGPR, vcc_lo or literal SRC0 (no integer inline constant); binary32 round to nearest, ties to even to an integral value; MODE pinned to input denormals allowed; NaN inputs and negative inputs of magnitude at most 0.5 refused by the reference"
+representation = "`7E084701`"
+lowering = "per-thread unary integer operation on the binary32 bits with a lane merge under partial EXEC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "v_floor_f32_e32"
+encoding = "VOP1, Wave32; VGPR VDST with VGPR, normal SGPR, vcc_lo or literal SRC0 (no integer inline constant); binary32 round toward -infinity to an integral value; MODE pinned to input denormals allowed; NaN inputs refused by the reference"
+representation = "`7E084901`"
+lowering = "per-thread unary integer operation on the binary32 bits with a lane merge under partial EXEC"
+reference = "implemented"
+cpu = "local known-answer test passed"
+gpu = "acceptance pending"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
 form = "v_mul_i32_i24_e32"
 encoding = "VOP2, Wave32; VGPR, normal SGPR (known during translation), vcc_lo, inline integer or literal SRC0; VGPR VSRC1 and VDST; inactive lanes keep VDST; D = low 32 bits of sext(S0[23:0]) * sext(S1[23:0])"
 representation = "`120402C3`"

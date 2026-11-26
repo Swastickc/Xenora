@@ -1,4 +1,4 @@
-# Wave32 VOP1 integer forms, AMD RDNA 2 ISA guide 12.8.
+# Wave32 VOP1 integer and binary32 rounding forms, AMD RDNA 2 ISA guide 12.8.
 
 [operand_rules.vop1_vgpr]
 family = "VOP1"
@@ -120,4 +120,85 @@ exec = "unchanged"
 wave = "wave32"
 operands = "vop1_swap"
 spec = [{ document = "guide", section = "12.8", page = 149 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+# Binary32 rounding to an integral value (AMD RDNA 2 ISA guide 12.8, page 140).
+# The guide does not define how these read an integer inline constant, so
+# SRC0 is a VGPR, normal SGPR, vcc_lo or literal (docs/shaders/vector-unary.md).
+[operand_rules.vop1_f32]
+family = "VOP1"
+dst = { field = "VDST", class = "vgpr", min = 0, max = 255 }
+src = [{ field = "SRC0", class = "vector_source" }]
+max_literals = 1
+unsupported = [
+  "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline", "src_float_inline",
+  "src_special",
+]
+
+[[form]]
+name = "V_TRUNC_F32"
+family = "VOP1"
+opcode = 33
+variant = "TruncF32"
+operation = "trunc"
+signedness = "float"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "wave32"
+operands = "vop1_f32"
+spec = [{ document = "guide", section = "12.8", page = 140 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "V_CEIL_F32"
+family = "VOP1"
+opcode = 34
+variant = "CeilF32"
+operation = "ceil"
+signedness = "float"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "wave32"
+operands = "vop1_f32"
+spec = [{ document = "guide", section = "12.8", page = 140 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "V_RNDNE_F32"
+family = "VOP1"
+opcode = 35
+variant = "RndneF32"
+operation = "rndne"
+signedness = "float"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "wave32"
+operands = "vop1_f32"
+spec = [{ document = "guide", section = "12.8", page = 140 }]
+verify = ["reference", "independent", "metal", "llvm_encoding"]
+
+[[form]]
+name = "V_FLOOR_F32"
+family = "VOP1"
+opcode = 36
+variant = "FloorF32"
+operation = "floor"
+signedness = "float"
+carry_in = "none"
+width = 32
+scc = "unchanged"
+vcc = "unchanged"
+exec = "unchanged"
+wave = "wave32"
+operands = "vop1_f32"
+spec = [{ document = "guide", section = "12.8", page = 140 }]
 verify = ["reference", "independent", "metal", "llvm_encoding"]

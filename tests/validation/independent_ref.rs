@@ -17,7 +17,10 @@
 //! MUL_I32, BFE (U32, I32), ABSDIFF, LSHL1-4_ADD and MUL_HI (U32, I32), VOP1 move
 //! (including from an SGPR), the VOP1 integer forms NOT, BFREV, FFBH_U32,
 //! FFBL_B32 and FFBH_I32 (any SRC0 a VOPC compare takes; bit scans as the
-//! guide's loops over bits from integer division) and SWAP_B32 (VGPR SRC0),
+//! guide's loops over bits from integer division), the binary32 rounding
+//! forms TRUNC, CEIL, RNDNE and FLOOR (host binary64 rounding of the exactly
+//! widened input; NaN, integer inline constants and the RNDNE inputs whose
+//! zero sign the guide leaves open are refused) and SWAP_B32 (VGPR SRC0),
 //! VOP2 bitwise, shift, arithmetic-shift and float, the VOP2 integer forms
 //! MUL_I32_I24, MUL_HI_I32_I24, MUL_U32_U24, MUL_HI_U32_U24, MIN/MAX (I32,
 //! U32), XNOR and ADD/SUB/SUBREV_NC_U32 (any SRC0 a VOPC compare takes; a
@@ -102,7 +105,7 @@ enum Insn {
     /// VOP2 integer opcode 9-12, 17-20, 30 or 37-39: VDST, SRC0, VSRC1.
     VInt(u32, u8, CmpSrc, u8),
     VIntVcc(u32, u8, CmpSrc, u8),
-    /// VOP1 integer opcode 55-59: VDST, SRC0.
+    /// VOP1 integer opcode 55-59 or binary32 rounding opcode 33-36: VDST, SRC0.
     VUnary(u32, u8, CmpSrc),
     /// `v_swap_b32 vD, vS` (VOP1 opcode 101).
     VSwap(u8, u8),
@@ -1035,7 +1038,12 @@ fn lane_step(
                 CmpSrc::Imm(value) => value,
                 CmpSrc::Vgpr(reg) => read_v(reg)?,
             };
-            (dst, vector_unary(opcode, a))
+            let d = if (33..=36).contains(&opcode) {
+                vector_round(opcode, a, offset)?
+            } else {
+                vector_unary(opcode, a)
+            };
+            (dst, d)
         }
         // Guide 12.8: tmp = D; D = S0; S0 = tmp. Both are VGPR writes.
         Insn::VSwap(dst, src0) => {
@@ -1058,6 +1066,31 @@ fn lane_step(
     };
     lane.vgpr[value.0 as usize] = Some(value.1);
     Ok(())
+}
+
+/// D of VOP1 binary32 rounding opcode 33-36 (guide 12.8) for S0 = `bits`.
+///
+/// Widening to binary64 is exact, subnormals included (input denormals
+/// allowed), and the binary64 integral result converts back exactly.
+fn vector_round(opcode: u32, bits: u32, offset: usize) -> Result<u32, String> {
+    let x = f64::from(f32::from_bits(bits));
+    if x.is_nan() {
+        return Err(format!(
+            "{offset:#x}: NaN rounding input is outside the domain"
+        ));
+    }
+    if opcode == 35 && x.is_sign_negative() && x >= -0.5 {
+        return Err(format!(
+            "{offset:#x}: RNDNE zero sign is not defined by the guide"
+        ));
+    }
+    let rounded = match opcode {
+        33 => x.trunc(),
+        34 => x.ceil(),
+        35 => x.round_ties_even(),
+        _ => x.floor(),
+    };
+    Ok((rounded as f32).to_bits())
 }
 
 /// D of VOP1 integer opcode `opcode` (guide 12.8 pseudocode) for S0 = `value`.
@@ -1282,7 +1315,10 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     if first >> 25 == 0b011_1111 {
         let dst = (first >> 17) as u8;
         match (first >> 9) & 0xff {
-            opcode @ 55..=59 => {
+            opcode @ (33..=36 | 55..=59) => {
+                if opcode <= 36 && (128..=208).contains(&(first & 0x1ff)) {
+                    return Err(fail("integer inline constant as a binary32 source"));
+                }
                 let (src0, len) = vector_src0(code, offset, first, "VOP1")?;
                 return Ok((Insn::VUnary(opcode, dst, src0), len));
             }

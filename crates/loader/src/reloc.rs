@@ -479,6 +479,7 @@ mod tests {
             machine: 0x8664,
             number_of_sections: 1,
             time_date_stamp: 0,
+            characteristics: crate::pe::IMAGE_FILE_DLL,
             image_base: PREFERRED,
             section_alignment: 4096,
             file_alignment: 512,

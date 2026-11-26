@@ -355,6 +355,13 @@ fn build_request_wire(
         request.push_str("\r\n");
     }
     if !snapshot.accept_types.is_empty() {
+        if snapshot
+            .accept_types
+            .iter()
+            .any(|accept| !valid_header_value(accept))
+        {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
         request.push_str("Accept: ");
         request.push_str(&snapshot.accept_types.join(", "));
         request.push_str("\r\n");
@@ -1185,9 +1192,12 @@ mod tests {
         assert_ne!(session, 0);
         assert_ne!(connection, 0);
         assert_ne!(session, connection);
+        write_wide(&mut fixture.memory, 0x2500, "text/plain");
+        fixture.memory.write_u64(0x2580, 0x2500).unwrap();
+        fixture.memory.write_u64(0x2588, 0).unwrap();
         let request = fixture.call(
             "WinHttpOpenRequest",
-            &[connection, 0x2200, 0x2300, 0x2400, 0, 0, 0],
+            &[connection, 0x2200, 0x2300, 0x2400, 0, 0x2580, 0],
         );
         assert_ne!(request, 0);
         assert_eq!(fixture.state.open_handle_count(), 3);
@@ -1374,9 +1384,12 @@ mod tests {
         let session = fixture.open_session();
         let connection = fixture.call("WinHttpConnect", &[session, 0x2100, port as u64, 0]);
         assert_ne!(connection, 0);
+        write_wide(&mut fixture.memory, 0x2500, "text/plain");
+        fixture.memory.write_u64(0x2580, 0x2500).unwrap();
+        fixture.memory.write_u64(0x2588, 0).unwrap();
         let request = fixture.call(
             "WinHttpOpenRequest",
-            &[connection, 0x2200, 0x2300, 0x2400, 0, 0, 0],
+            &[connection, 0x2200, 0x2300, 0x2400, 0, 0x2580, 0],
         );
         assert_ne!(request, 0);
         request
@@ -1464,6 +1477,7 @@ mod tests {
         assert!(wire.starts_with("GET /fixture HTTP/1.1\r\n"));
         assert!(wire.contains(&format!("Host: 127.0.0.1:{port}\r\n")));
         assert!(wire.contains("User-Agent: XenoraTest/1.0\r\n"));
+        assert!(wire.contains("Accept: text/plain\r\n"));
         assert!(wire.contains("X-Fixture: yes\r\n"));
         assert!(wire.contains("Connection: close\r\n\r\n"));
     }

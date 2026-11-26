@@ -10,8 +10,8 @@ use super::{
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 const FILE_API: &str = "api-ms-win-core-file-l1-1-0.dll";
 const INVALID_HANDLE: u64 = u64::MAX;
@@ -938,6 +938,61 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             if count > MAX_TRANSFER {
                 return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
+            let pipe_end = {
+                let objects = state.objects.lock().expect("guest object state");
+                match objects.handles.get(&args.rcx) {
+                    Some(GuestObject::Pipe {
+                        state: pipe_state,
+                        write,
+                    }) => Some((Arc::clone(pipe_state), *write)),
+                    _ => None,
+                }
+            };
+            if let Some((pipe_state, is_write_end)) = pipe_end {
+                if writing != is_write_end {
+                    return state.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
+                }
+                if args.r9 == 0 || memory.check_write(args.r9, 4).is_err() {
+                    return state.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+                }
+                let mut pipe = pipe_state.lock().expect("pipe state");
+                let transferred = if writing {
+                    if count == 0 {
+                        0
+                    } else {
+                        if pipe.buffer.len() + count > MAX_BYTES {
+                            return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+                        }
+                        let mut input = vec![0; count];
+                        if args.rdx == 0 || memory.read_bytes(args.rdx, &mut input).is_err() {
+                            return state.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+                        }
+                        pipe.buffer.extend(input);
+                        count
+                    }
+                } else if pipe.buffer.is_empty() {
+                    if pipe.write_open {
+                        // A blocking read cannot be served: the guest would have
+                        // to run for the pipe to fill, and it is the one waiting.
+                        return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+                    }
+                    0
+                } else {
+                    let transferred = count.min(pipe.buffer.len());
+                    let mut output = vec![0; transferred];
+                    for byte in output.iter_mut() {
+                        *byte = pipe.buffer.pop_front().expect("bounded length");
+                    }
+                    if args.rdx == 0 || memory.write_bytes(args.rdx, &output).is_err() {
+                        return state.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+                    }
+                    transferred
+                };
+                memory
+                    .write_u32(args.r9, transferred as u32)
+                    .map_err(ExitReason::MemoryFault)?;
+                return Ok(1);
+            }
             let mut objects = state.objects.lock().expect("guest object state");
             let super::ObjectState { handles, files, .. } = &mut *objects;
             let Some(GuestObject::File(file)) = handles.get_mut(&args.rcx) else {
@@ -1046,8 +1101,62 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 write: true,
             },
         );
-        memory.write_u64(args.rcx, read_end).map_err(ExitReason::MemoryFault)?;
-        memory.write_u64(args.rdx, write_end).map_err(ExitReason::MemoryFault)?;
+        memory
+            .write_u64(args.rcx, read_end)
+            .map_err(ExitReason::MemoryFault)?;
+        memory
+            .write_u64(args.rdx, write_end)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(1)
+    });
+
+    let peek = Arc::clone(state);
+    registry.register(KERNEL32, "PeekNamedPipe", move |args, cpu, memory| {
+        // The pipe is never copied out through the data argument here: the
+        // hosted caller peeks to know how much there is, not to take it early.
+        let pipe_end = {
+            let objects = peek.objects.lock().expect("guest object state");
+            match objects.handles.get(&args.rcx) {
+                Some(GuestObject::Pipe { state, write }) => Some((Arc::clone(state), *write)),
+                Some(_) => None,
+                None => return peek.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+            }
+        };
+        let Some((pipe_state, is_write_end)) = pipe_end else {
+            return peek.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        };
+        if is_write_end {
+            return peek.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
+        }
+        let pipe = pipe_state.lock().expect("pipe state");
+        let available = pipe.buffer.len() as u32;
+        // lpBytesRead is the number of bytes copied into the caller's buffer:
+        // nothing leaves the pipe, the copy is a look at the front bytes.
+        let copied = if args.rdx != 0 && args.r8 != 0 {
+            let take = (args.r8 as u32).min(available) as usize;
+            let bytes: Vec<u8> = pipe.buffer.iter().take(take).copied().collect();
+            if memory.write_bytes(args.rdx, &bytes).is_err() {
+                return peek.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            take as u32
+        } else {
+            0
+        };
+        if args.r9 != 0 {
+            memory
+                .write_u32(args.r9, copied)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        let total = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+        if total != 0 {
+            memory
+                .write_u32(total, available)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        let left = args.get(5, memory).map_err(ExitReason::MemoryFault)?;
+        if left != 0 {
+            memory.write_u32(left, 0).map_err(ExitReason::MemoryFault)?;
+        }
         Ok(1)
     });
 

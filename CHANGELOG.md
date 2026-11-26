@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Anonymous pipes: `CreatePipe` creates the two positional ends of a bounded in-memory stream, `ReadFile`/`WriteFile` stream bytes through them in order, closing the write end is the end of the stream, `PeekNamedPipe` reports without taking, and a read of an empty pipe whose write end is open fails honestly with ERROR_NOT_SUPPORTED since blocking would deadlock the only executor. Verified through the unit tests of `runtime_pipes.rs`.
 - The file type, flush and ANSI-query forms: `GetFileType` distinguishes disk files, the character devices of the console handles and other objects with the documented FILE_TYPE_UNKNOWN cases, `FlushFileBuffers` accepts a file opened for writing and refuses read-only and unknown handles with their documented errors, and `AreFileApisANSI` answers that the hosted drive is ANSI throughout. Verified through the unit tests of `runtime_file_types.rs`.
 - IsDebuggerPresent answers false and OutputDebugString drops its output, the documented behavior of a machine with no debugger attached.
 - Paging-file-backed memory mappings (`CreateFileMappingA/W`, `MapViewOfFile`, `UnmapViewOfFile`) with zero-filled views tracked in the central handle table, and `CreateProcessA/W` failing honestly with ERROR_NOT_SUPPORTED since the guest is the only process. Verified through the unit tests of `runtime_file_mapping.rs`.

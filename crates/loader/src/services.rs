@@ -55,7 +55,7 @@ pub use startup_info::{ProcessStartupInfo, StartupInfoError};
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
@@ -1105,6 +1105,13 @@ pub(crate) mod handlers {
         let mut objects = context.state.objects.lock().expect("guest object state");
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
             return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
+        }
+        if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
+            && *write
+        {
+            // The end-of-stream marker of an anonymous pipe is its write end
+            // closing: reads then drain what remains and answer empty.
+            state.lock().expect("pipe state").write_open = false;
         }
         let closed = matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
             || objects.handles.remove(&handle).is_some();

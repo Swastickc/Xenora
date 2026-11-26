@@ -136,8 +136,8 @@ struct FileStream {
     /// The end-of-file indicator, set when a read meets the end (or the
     /// CTRL+Z of a text stream) and cleared by `clearerr` or a seek.
     eof: bool,
-    /// The error indicator. Nothing sets it yet, as a write that fails
-    /// reports its `errno` at once; `clearerr` clears it all the same.
+    /// The error indicator, set when a write through the stream fails and
+    /// cleared by `clearerr` — the write reports its `errno` at once too.
     error: bool,
     /// The C orientation: 0 unoriented, 1 byte, 2 wide. The first io
     /// operation sets it; the other kind of operation then fails.
@@ -320,9 +320,11 @@ impl FileStreams {
     ) -> Result<(), u32> {
         let stream = self.open.get_mut(&file).ok_or(EBADF)?;
         if !stream.writable {
+            stream.error = true;
             return Err(EBADF);
         }
         if !orient(stream, false) {
+            stream.error = true;
             return Err(EBADF);
         }
         self.write_bytes(drive, file, bytes)
@@ -347,7 +349,7 @@ impl FileStreams {
         if stream.append {
             stream.position = drive.drive_file(&stream.path).ok_or(EBADF)?.len() as u64;
         }
-        match drive.drive_write(&stream.path, stream.position, &stored) {
+        let outcome = match drive.drive_write(&stream.path, stream.position, &stored) {
             Some(true) => {
                 stream.position += stored.len() as u64;
                 Ok(())
@@ -355,7 +357,11 @@ impl FileStreams {
             Some(false) => Err(ENOSPC),
             // The file was deleted or moved while the stream was open.
             None => Err(EBADF),
+        };
+        if outcome.is_err() {
+            stream.error = true;
         }
+        outcome
     }
 
     /// `fgets`: up to `limit` characters, ending after a newline. `None` is
@@ -1058,6 +1064,11 @@ impl FileStreams {
     /// The end-of-file indicator of a stream.
     pub(super) fn end_of_file(&self, file: u64) -> bool {
         self.open.get(&file).is_some_and(|stream| stream.eof)
+    }
+
+    /// The error indicator of a stream, set when a write through it fails.
+    pub(super) fn error_flag(&self, file: u64) -> bool {
+        self.open.get(&file).is_some_and(|stream| stream.error)
     }
 
     /// `clearerr`: both indicators off. False when `file` is not open.

@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 225 |
-| Generated adapters | 225 |
-| Unique handler implementations | 216 |
+| Services with a declared ABI | 227 |
+| Generated adapters | 227 |
+| Unique handler implementations | 217 |
 | Implemented | 77 |
-| Partial | 146 |
+| Partial | 148 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 225 |
-| API-set aliases (not services) | 262 |
+| Conformance-tested through guest dispatch | 227 |
+| API-set aliases (not services) | 266 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -51,6 +51,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fputwc` | `(unit: u32, stream: ptr) -> u32` | partial | WEOF for a wide character above 255 (C locale), on a byte-oriented stream, or with errno EINVAL or EBADF |
 | `ucrtbase.dll!getwchar` | `() -> u32` | partial | WEOF at end of input or once stdin is byte-oriented |
 | `ucrtbase.dll!getchar` | `() -> i32` | implemented | EOF at end of input; the input is what the host supplied, never interactive |
+| `ucrtbase.dll!ferror` | `(stream: ptr) -> i32` | partial | the indicator of file streams, set when a write through the stream fails; the standard streams report 0 as their writes have no failure mode; -1 with errno EINVAL for a null stream |
 | `ucrtbase.dll!feof` | `(stream: ptr) -> i32` | partial | the indicator of the standard input and of file streams; the output streams report 0; -1 with errno EINVAL for a null stream |
 | `ucrtbase.dll!fopen_s` | `(file: ptr, name: ptr, mode: ptr) -> i32` | partial | the error number as its result and in errno, with the output pointer null; EINVAL for a null or empty argument, or a name or mode it cannot read; stops the guest for an output pointer it cannot write; the invalid parameter handler is not modelled |
 | `ucrtbase.dll!clearerr` | `(stream: ptr) -> void` | implemented | never; errno EINVAL for a null stream; stops the guest for a pointer that is no stream |
@@ -120,6 +121,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_wcsdup` | `(text: ptr) -> ptr` | implemented | null when the copy cannot be allocated |
 | `ucrtbase.dll!_strdup` | `(text: ptr) -> ptr` | partial | a string longer than 65536 bytes or an allocation failure answers null; errno is not set |
 | `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |
+| `ucrtbase.dll!putc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fputc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!strerror` | `(code: i32) -> ptr` | partial | never; the message is valid until the next call |
 | `ucrtbase.dll!localeconv` | `() -> ptr` | partial | stops the guest when the block cannot be allocated |

@@ -1308,6 +1308,19 @@ impl StandardStreams {
         }
     }
 
+    /// `ferror`: the error indicator of the stream. The captured streams
+    /// report 0, as their writes have no failure mode; a file stream's
+    /// indicator is the one its failed writes set.
+    pub(super) fn error_indicator(&mut self, file: u64) -> Outcome<i32> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::File(file) => Ok(Ok(i32::from(self.opened.error_flag(file)))),
+            Stream::Input | Stream::Output | Stream::Error => Ok(Ok(0)),
+        }
+    }
+
     /// `clearerr`: the end-of-file and error indicators off. Nothing is
     /// returned; a null stream only sets `errno` to `EINVAL`, which the
     /// handler does. The captured output streams have no indicators.

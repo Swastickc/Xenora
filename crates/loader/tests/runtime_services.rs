@@ -6849,3 +6849,40 @@ fn legacy_fprintf_writes_through_the_iob_streams() {
     assert_eq!(guest.errno(), EINVAL);
     assert_eq!(guest.state.standard_output(), b"42-fin42-fin");
 }
+
+#[test]
+fn ferror_reports_the_failed_write_of_a_file_stream() {
+    let mut guest = Guest::new();
+    // A stream opened read-only refuses the write: the byte is EOF and the
+    // error indicator is set, as the CRT sets it for any failed write.
+    guest.memory.write_bytes(SCRATCH, b"data.bin\0").unwrap();
+    guest.memory.write_bytes(SCRATCH + 0x20, b"r\0").unwrap();
+    guest.memory.write_bytes(SCRATCH + 0x28, b"w\0").unwrap();
+    // The file exists: create it first with a write-mode open.
+    let made = guest.call("fopen", &[SCRATCH, SCRATCH + 0x28]);
+    assert_ne!(made, 0);
+    guest.call("fclose", &[made]);
+    let file = guest.call("fopen", &[SCRATCH, SCRATCH + 0x20]);
+    assert_ne!(file, 0);
+    assert_eq!(guest.call("ferror", &[file]), 0);
+    assert_eq!(guest.call("fputc", &[u64::from(b'x'), file]), MINUS_ONE);
+    assert_ne!(guest.call("ferror", &[file]), 0);
+    // `clearerr` resets the indicator.
+    guest.call("clearerr", &[file]);
+    assert_eq!(guest.call("ferror", &[file]), 0);
+    guest.call("fclose", &[file]);
+}
+
+#[test]
+fn putc_writes_one_character_like_fputc() {
+    let (mut guest, [_, out, _]) = stdio_guest();
+    // `putc` is `fputc` exactly, as Microsoft's documentation states.
+    for character in [u64::from(b'A'), u64::from(b'B')] {
+        assert_eq!(guest.call("putc", &[character, out]), character);
+    }
+    assert_eq!(guest.state.standard_output(), b"AB");
+    // A null stream is EOF with EINVAL, as for `fputc`.
+    guest.set_errno(0);
+    assert_eq!(guest.call("putc", &[u64::from(b'C'), 0]), MINUS_ONE);
+    assert_eq!(guest.errno(), EINVAL);
+}

@@ -309,6 +309,15 @@ service ucrtbase.dll getchar() -> i32
     ref stdio.h getchar
     test stdin_lines_follow_iso_c_at_the_edges
 
+service ucrtbase.dll ferror(stream: ptr) -> i32
+    handler ferror
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails the indicator of file streams, set when a write through the stream fails; the standard streams report 0 as their writes have no failure mode; -1 with errno EINVAL for a null stream
+    ref stdio.h ferror
+    test ferror_reports_the_failed_write_of_a_file_stream
+
 service ucrtbase.dll feof(stream: ptr) -> i32
     handler feof
     status partial
@@ -905,6 +914,17 @@ service ucrtbase.dll perror(message: ptr) -> void
 # The Universal C runtime services that a C++ guest's runtime imports. Only
 # the C locale is modelled: its characters are the basic character set, its
 # decimal point is "." and its thousands separator and grouping are empty.
+
+# `putc` is `fputc` exactly, as Microsoft's documentation states; the
+# handler is the same one.
+service ucrtbase.dll putc(character: i32, stream: ptr) -> i32
+    handler fputc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h putc; Microsoft Learn documents putc as identical to fputc
+    test putc_writes_one_character_like_fputc
 
 service ucrtbase.dll fputc(character: i32, stream: ptr) -> i32
     handler fputc

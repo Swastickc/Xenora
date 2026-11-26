@@ -1289,6 +1289,11 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn ferror(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().error_indicator(stream);
+        or_errno(context, outcome)
+    }
+
     pub fn fflush(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
         context.state.crt_streams().flush(stream)
     }

@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 225] = [
+pub static SERVICES: [ServiceMetadata; 227] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -371,6 +371,17 @@ pub static SERVICES: [ServiceMetadata; 225] = [
         failure: "EOF at end of input; the input is what the host supplied, never interactive",
         reference: "stdio.h getchar",
         tests: &["stdin_lines_follow_iso_c_at_the_edges"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "ferror",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "the indicator of file streams, set when a write through the stream fails; the standard streams report 0 as their writes have no failure mode; -1 with errno EINVAL for a null stream",
+        reference: "stdio.h ferror",
+        tests: &["ferror_reports_the_failed_write_of_a_file_stream"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -1130,6 +1141,17 @@ pub static SERVICES: [ServiceMetadata; 225] = [
         failure: "never",
         reference: "stdio.h perror",
         tests: &["perror_writes_the_message_and_the_error_text_to_stderr"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "putc",
+        parameters: &[Parameter { name: "character", kind: "i32" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream",
+        reference: "stdio.h putc; Microsoft Learn documents putc as identical to fputc",
+        tests: &["putc_writes_one_character_like_fputc"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2789,6 +2811,14 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         Ok(result.place(cpu))
     });
     let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "ferror", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::ferror(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
     registry.register_with_status("ucrtbase.dll", "feof", ServiceStatus::Partial, move |args, cpu, memory| {
         let call = Call::new(args, cpu, memory);
         let a0 = call.u64(0)?;
@@ -3391,6 +3421,15 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let () = handlers::perror(&mut context, a0)?;
         Ok(0)
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "putc", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::fputc(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
     });
     let s = state.clone();
     registry.register_with_status("ucrtbase.dll", "fputc", ServiceStatus::Partial, move |args, cpu, memory| {

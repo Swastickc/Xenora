@@ -32,8 +32,13 @@ const ERROR_WINHTTP_CANNOT_CONNECT: u32 = 12029;
 const ERROR_WINHTTP_CONNECTION_ERROR: u32 = 12030;
 const ERROR_WINHTTP_INVALID_SERVER_RESPONSE: u32 = 12152;
 const ERROR_WINHTTP_HEADER_SIZE_OVERFLOW: u32 = 12182;
+const WINHTTP_QUERY_CONTENT_TYPE: u32 = 1;
+const WINHTTP_QUERY_CONTENT_LENGTH: u32 = 5;
 const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
+const WINHTTP_QUERY_STATUS_TEXT: u32 = 20;
+const WINHTTP_QUERY_SERVER: u32 = 37;
 const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
+const ERROR_WINHTTP_HEADER_NOT_FOUND: u32 = 12150;
 const MAX_ADDITIONAL_HEADER_UNITS: usize = 4096;
 const MAX_HEADER_LINE_BYTES: usize = 8192;
 const MAX_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
@@ -99,6 +104,7 @@ enum BodyKind {
 
 struct ResponseHead {
     status: u32,
+    status_text: String,
     headers: Vec<(String, String)>,
 }
 
@@ -516,6 +522,7 @@ fn parse_one_response_head(reader: &mut BufReader<TcpStream>) -> Result<Response
     let mut parts = status_text.splitn(3, ' ');
     let version = parts.next().ok_or(ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
     let status = parts.next().ok_or(ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
+    let status_text = parts.next().unwrap_or("").to_owned();
     if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
         || status.len() != 3
         || !status.bytes().all(|byte| byte.is_ascii_digit())
@@ -545,7 +552,11 @@ fn parse_one_response_head(reader: &mut BufReader<TcpStream>) -> Result<Response
         }
         headers.push((name.to_owned(), value.to_owned()));
     }
-    Ok(ResponseHead { status, headers })
+    Ok(ResponseHead {
+        status,
+        status_text,
+        headers,
+    })
 }
 
 fn parse_response(
@@ -1045,9 +1056,23 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             if index_ptr != 0 {
                 return query_headers.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
-            let numeric = info_level == (WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER);
-            let textual = info_level == WINHTTP_QUERY_STATUS_CODE;
-            if !numeric && !textual {
+            let numeric_status =
+                info_level == (WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER);
+            let numeric_length =
+                info_level == (WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER);
+            let textual_status = info_level == WINHTTP_QUERY_STATUS_CODE;
+            let textual_status_text = info_level == WINHTTP_QUERY_STATUS_TEXT;
+            let textual_content_type = info_level == WINHTTP_QUERY_CONTENT_TYPE;
+            let textual_content_length = info_level == WINHTTP_QUERY_CONTENT_LENGTH;
+            let textual_server = info_level == WINHTTP_QUERY_SERVER;
+            if !(numeric_status
+                || numeric_length
+                || textual_status
+                || textual_status_text
+                || textual_content_type
+                || textual_content_length
+                || textual_server)
+            {
                 return query_headers.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
             let transport = {
@@ -1064,20 +1089,56 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Some(response) = &transport_guard.response else {
                 return query_headers.fail(cpu.gs_base, ERROR_WINHTTP_INCORRECT_HANDLE_STATE, 0);
             };
-            let (contents, success_length) = if numeric {
-                (response.status.to_le_bytes().to_vec(), 4_u32)
+            let named_header = if textual_content_type {
+                Some("content-type")
+            } else if textual_content_length || numeric_length {
+                Some("content-length")
+            } else if textual_server {
+                Some("server")
             } else {
-                let mut units = response
-                    .status
-                    .to_string()
-                    .encode_utf16()
-                    .chain([0])
-                    .collect::<Vec<_>>();
-                let mut bytes = Vec::new();
-                for unit in units.drain(..) {
+                None
+            };
+            let header_value = named_header.map(|wanted| {
+                response
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+                    .map(|(_, value)| value.as_str())
+            });
+            if matches!(header_value, Some(None)) {
+                return query_headers.fail(cpu.gs_base, ERROR_WINHTTP_HEADER_NOT_FOUND, 0);
+            }
+            let (contents, success_length) = if numeric_status {
+                (response.status.to_le_bytes().to_vec(), 4_u32)
+            } else if numeric_length {
+                let value = header_value
+                    .and_then(|value| value)
+                    .expect("content-length");
+                let Ok(value) = value.parse::<u32>() else {
+                    return query_headers.fail(
+                        cpu.gs_base,
+                        ERROR_WINHTTP_INVALID_SERVER_RESPONSE,
+                        0,
+                    );
+                };
+                (value.to_le_bytes().to_vec(), 4_u32)
+            } else {
+                let text = if textual_status {
+                    response.status.to_string()
+                } else if textual_status_text {
+                    response.status_text.clone()
+                } else {
+                    header_value
+                        .and_then(|value| value)
+                        .expect("named header")
+                        .to_owned()
+                };
+                let unit_count = text.encode_utf16().count();
+                let mut bytes = Vec::with_capacity((unit_count + 1) * 2);
+                for unit in text.encode_utf16().chain([0]) {
                     bytes.extend(unit.to_le_bytes());
                 }
-                (bytes, 6_u32)
+                (bytes, (unit_count * 2) as u32)
             };
             let required = contents.len() as u32;
             let capacity = memory.read_u32(length_ptr).map_err(memory_fault)?;
@@ -1128,6 +1189,13 @@ mod tests {
         for (index, unit) in text.encode_utf16().chain([0]).enumerate() {
             memory.write_u16(address + 2 * index as u64, unit).unwrap();
         }
+    }
+
+    fn read_test_wide(memory: &GuestMemory, address: u64, byte_len: u32) -> String {
+        let units = (0..byte_len / 2)
+            .map(|index| memory.read_u16(address + 2 * u64::from(index)).unwrap())
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).unwrap()
     }
 
     struct Fixture {
@@ -1402,7 +1470,7 @@ mod tests {
     #[test]
     fn synchronous_plaintext_get_reads_status_and_response_body() {
         let (port, captured, server) = serve_once(
-            b"HTTP/1.1 203 Non-Authoritative\r\nContent-Length: 11\r\nX-Server: fixture\r\n\r\nhello WORLD",
+            b"HTTP/1.1 203 Non-Authoritative\r\nContent-Length: 11\r\nContent-Type: text/plain\r\nX-Server: fixture\r\n\r\nhello WORLD",
         );
         let mut fixture = Fixture::new();
         let request = open_loopback_request(&mut fixture, port);
@@ -1448,6 +1516,72 @@ mod tests {
             1
         );
         assert_eq!(fixture.memory.read_u32(0x2900).unwrap(), 203);
+
+        fixture.memory.write_u32(0x2928, 256).unwrap();
+        assert_eq!(
+            fixture.call(
+                "WinHttpQueryHeaders",
+                &[
+                    request,
+                    WINHTTP_QUERY_STATUS_TEXT as u64,
+                    0,
+                    0x3000,
+                    0x2928,
+                    0
+                ]
+            ),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x2928).unwrap(), 34);
+        assert_eq!(
+            read_test_wide(&fixture.memory, 0x3000, 34),
+            "Non-Authoritative"
+        );
+
+        fixture.memory.write_u32(0x2938, 4).unwrap();
+        assert_eq!(
+            fixture.call(
+                "WinHttpQueryHeaders",
+                &[
+                    request,
+                    (WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER) as u64,
+                    0,
+                    0x3020,
+                    0x2938,
+                    0,
+                ]
+            ),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x3020).unwrap(), 11);
+
+        fixture.memory.write_u32(0x2948, 256).unwrap();
+        assert_eq!(
+            fixture.call(
+                "WinHttpQueryHeaders",
+                &[
+                    request,
+                    WINHTTP_QUERY_CONTENT_TYPE as u64,
+                    0,
+                    0x3040,
+                    0x2948,
+                    0
+                ]
+            ),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x2948).unwrap(), 20);
+        assert_eq!(read_test_wide(&fixture.memory, 0x3040, 20), "text/plain");
+
+        fixture.memory.write_u32(0x2958, 256).unwrap();
+        assert_eq!(
+            fixture.call(
+                "WinHttpQueryHeaders",
+                &[request, WINHTTP_QUERY_SERVER as u64, 0, 0x3080, 0x2958, 0]
+            ),
+            0
+        );
+        assert_eq!(fixture.state.last_error(0), ERROR_WINHTTP_HEADER_NOT_FOUND);
         assert_eq!(
             fixture.call("WinHttpQueryDataAvailable", &[request, 0x2910]),
             1

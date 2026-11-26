@@ -800,12 +800,19 @@ loopback tests are evidence of the transport mechanics only, not of general
 Internet reachability.
 
 `WinHttpReceiveResponse` parses HTTP/1.0 and HTTP/1.1 status lines and a
-bounded response header block. It preserves the status for the supported
-`WinHttpQueryHeaders` forms: `WINHTTP_QUERY_STATUS_CODE` as a UTF-16 string
-or combined with `WINHTTP_QUERY_FLAG_NUMBER` as a 32-bit number. Both forms
-implement the documented required-size and `ERROR_INSUFFICIENT_BUFFER`
-contract. Request-header queries, raw-header queries, indexes and all other
-info levels remain unsupported. Bodies with `Content-Length` are bounded by
+bounded response header block. It preserves the status line and headers for
+the supported `WinHttpQueryHeaders` forms: `WINHTTP_QUERY_STATUS_CODE` as a
+UTF-16 string or combined with `WINHTTP_QUERY_FLAG_NUMBER` as a 32-bit number,
+`WINHTTP_QUERY_STATUS_TEXT` as a UTF-16 string, `WINHTTP_QUERY_CONTENT_TYPE`,
+`WINHTTP_QUERY_CONTENT_LENGTH` as a UTF-16 string or 32-bit number, and
+`WINHTTP_QUERY_SERVER`. Named response-header lookup is case-insensitive and
+returns the first matching parsed header; duplicate enumeration through
+`lpdwIndex` remains unsupported. A missing supported header fails with
+`ERROR_WINHTTP_HEADER_NOT_FOUND`. String forms implement the documented
+required-size contract and report the successful byte length without the
+terminating null. Request-header queries, custom names, raw-header queries,
+indexes and all other info levels remain unsupported. Bodies with
+`Content-Length` are bounded by
 that length; responses without one are read until close. `HEAD`, informational,
 204 and 304 responses have no body. Chunked transfer coding is rejected rather
 than decoded incorrectly.

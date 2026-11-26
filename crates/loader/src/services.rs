@@ -1236,6 +1236,77 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn fread(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u64,
+        count: u64,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.read_items(context.memory, &drive, buffer, size, count, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fgetc(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.read_character_file(&drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `fseek`: the 32-bit form, as `long` is 32 bits on Win64. It is the
+    /// 64-bit one with the offset narrowed, which loses nothing a 32-bit
+    /// guest argument could have held.
+    pub fn fseek(
+        context: &mut ServiceContext<'_>,
+        stream: u64,
+        offset: i32,
+        origin: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            if origin < 0 {
+                Ok(Err(crt_streams::Failed(-1, crt::EINVAL)))
+            } else {
+                streams.seek(&drive, stream, i64::from(offset), origin as u32)
+            }
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `ftell`: the 32-bit form. A position past what `long` holds is
+    /// `EINVAL`, as the documentation of `_ftelli64` gives no other answer
+    /// for the narrow form there.
+    pub fn ftell(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            match streams.tell(stream)? {
+                Ok(at) => match i32::try_from(at) {
+                    Ok(at) => Ok(Ok(at)),
+                    Err(_) => Ok(Err(crt_streams::Failed(-1_i32, crt::EINVAL))),
+                },
+                Err(crt_streams::Failed(_, errno)) => Ok(Err(crt_streams::Failed(-1_i32, errno))),
+            }
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn rewind(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<()> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.rewind_file(&drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
     // The buffer forms of printf, and the secure forms (#466). They share the
     // formatter through `crt_streams`; the stream state only serves `putchar`
     // and `vfprintf_s`.

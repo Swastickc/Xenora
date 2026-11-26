@@ -2060,25 +2060,26 @@ service msvcrt.dll _amsg_exit(code: i32) -> void
     test legacy_amsg_exit_ends_the_process
 
 # Queries about the hosted process environment and the console identity.
-# The process environment is empty: no host variable passes through, so a
-# query never finds its variable, which is the exact behavior of an empty
-# environment rather than a stub.
+# The process environment starts empty: no host variable passes through.
+# SetEnvironmentVariable adds to it, and a query answers with the documented
+# size semantics, or misses with ERROR_ENVVAR_NOT_FOUND when the variable is
+# undefined - the exact behavior of an unset variable rather than a stub.
 
 service kernel32.dll GetEnvironmentVariableA(name: ptr, buffer: ptr, size: u32) -> u32
-    handler environment_variable
+    handler environment_variable_narrow
     status implemented
     alias api-ms-win-core-processenvironment-l1-1-0.dll
-    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    fails 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty
     ref Microsoft Learn, GetEnvironmentVariable
-    test environment_variables_are_never_found_in_the_empty_environment
+    test environment_variables_round_trip_and_miss_the_undefined_ones
 
 service kernel32.dll GetEnvironmentVariableW(name: ptr, buffer: ptr, size: u32) -> u32
-    handler environment_variable
+    handler environment_variable_wide
     status implemented
     alias api-ms-win-core-processenvironment-l1-1-0.dll
-    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    fails 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty
     ref Microsoft Learn, GetEnvironmentVariable
-    test environment_variables_are_never_found_in_the_empty_environment
+    test environment_variables_round_trip_and_miss_the_undefined_ones
 
 service kernel32.dll GetConsoleWindow() -> handle
     handler console_window

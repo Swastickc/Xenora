@@ -59,6 +59,7 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "LoadLibraryExA"),
     (KERNEL32, "SetEnvironmentVariableA"),
     (KERNEL32, "SetEnvironmentVariableW"),
+    (KERNEL32, "GetEnvironmentVariableA"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -571,10 +572,17 @@ fn device_control_library_ex_and_the_fixed_environment() {
     narrow_at(&mut guest, MODNAME, "kernel32.dll");
     let module = guest.call("LoadLibraryExA", &[MODNAME, 0, 0]);
     assert_ne!(module, 0);
-    // The fixed environment refuses mutation honestly.
+    // The process environment store accepts mutation and reads it back.
     narrow_at(&mut guest, VAR, "PATH");
     narrow_at(&mut guest, VALUE, "C:\\x");
-    assert_eq!(guest.call("SetEnvironmentVariableA", &[VAR, VALUE]), 0);
-    assert_eq!(guest.call("SetEnvironmentVariableW", &[VAR, VALUE]), 0);
-    assert_eq!(guest.call("GetLastError", &[]) & 0xFFFF_FFFF, 50);
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[VAR, VALUE]), 1);
+    let needed = guest.call("GetEnvironmentVariableA", &[VAR, SCRATCH + 0x300, 64]);
+    assert_eq!(needed, 4, "the value length without the terminator");
+    assert_eq!(guest.call("SetEnvironmentVariableW", &[VAR, VALUE]), 1);
+    // A null value deletes the variable; the query then misses it.
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[VAR, 0]), 1);
+    assert_eq!(
+        guest.call("GetEnvironmentVariableA", &[VAR, SCRATCH + 0x300, 64]),
+        0
+    );
 }

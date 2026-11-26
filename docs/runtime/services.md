@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 236 |
-| Generated adapters | 236 |
-| Unique handler implementations | 226 |
-| Implemented | 85 |
-| Partial | 149 |
+| Services with a declared ABI | 242 |
+| Generated adapters | 242 |
+| Unique handler implementations | 233 |
+| Implemented | 86 |
+| Partial | 154 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 236 |
-| API-set aliases (not services) | 281 |
+| Conformance-tested through guest dispatch | 242 |
+| API-set aliases (not services) | 292 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -44,6 +44,11 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fputs` | `(text: ptr, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fflush` | `(stream: ptr) -> i32` | partial | stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!setvbuf` | `(stream: ptr, buffer: ptr, mode: i32, size: u64) -> i32` | partial | -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream |
+| `ucrtbase.dll!fread` | `(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64` | partial | 0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once |
+| `ucrtbase.dll!fgetc` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream or EBADF for one open for writing |
+| `ucrtbase.dll!fseek` | `(stream: ptr, offset: i32, origin: i32) -> i32` | partial | -1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream |
+| `ucrtbase.dll!ftell` | `(stream: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or a position past what long holds; stops the guest for a standard stream |
+| `ucrtbase.dll!rewind` | `(stream: ptr) -> void` | partial | errno EINVAL for a null stream; stops the guest for a standard stream |
 | `ucrtbase.dll!fopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM |
 | `ucrtbase.dll!fclose` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream |
 | `ucrtbase.dll!fgets` | `(buffer: ptr, count: i32, stream: ptr) -> ptr` | partial | null at end of file; null with errno EINVAL or EBADF; stops the guest for a pointer that is no stream |
@@ -247,10 +252,11 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `msvcrt.dll!__getmainargs` | `(argc: ptr, argv: ptr, envp: ptr, dowildcard: i32, start_info: ptr) -> i32` | partial | -1 with errno EINVAL when any of the three output pointers is null; the start-up information is not written |
 | `msvcrt.dll!___mb_cur_max_func` | `() -> u32` | partial | never |
 | `msvcrt.dll!_amsg_exit` | `(code: i32) -> void` | partial | never returns; the runtime-error message of the CRT is not written |
-| `kernel32.dll!GetEnvironmentVariableA` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty |
-| `kernel32.dll!GetEnvironmentVariableW` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty |
+| `kernel32.dll!GetEnvironmentVariableA` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty |
+| `kernel32.dll!GetEnvironmentVariableW` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty |
 | `kernel32.dll!GetConsoleWindow` | `() -> handle` | implemented | never; the answer is null, the hosted runtime has no console window |
 | `kernel32.dll!SetConsoleTitleW` | `(title: ptr) -> bool32` | partial | FALSE with ERROR_INVALID_PARAMETER for a null title |
 | `kernel32.dll!GetConsoleTitleW` | `(buffer: ptr, size: u32) -> u32` | partial | 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size; the answer is the title length even when the buffer holds less, Xenora's documented choice |
 | `kernel32.dll!SetConsoleTitleA` | `(title: ptr) -> bool32` | partial | FALSE with ERROR_INVALID_PARAMETER for a null title |
 | `kernel32.dll!GetConsoleTitleA` | `(buffer: ptr, size: u32) -> u32` | partial | 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size, the same documented length answer as the wide form |
+| `ucrtbase.dll!_getpid` | `() -> i32` | implemented | never |

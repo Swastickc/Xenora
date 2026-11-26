@@ -31,6 +31,9 @@ exact revision and known limitations.
 - Synthetic guest applications can query a saved slot's exact byte length before reading it, including after reopening the platform service (#765).
 - Hosted guests can import `TlsGetValue2` to read a thread-local slot without changing the calling thread's last-error value (#763).
 - The native Metal test gate now checks the persistent CLI framebuffer and the supervised program startup trace through their shipped worker processes (#759).
+
+- Process environment store: `SetEnvironmentVariableA`/`W` add and delete variables, `GetEnvironmentVariableA`/`W` answer them case-insensitively with the documented size semantics, `ExpandEnvironmentStringsA`/`W` resolve `%name%` against them with unresolved names copied verbatim, and `GetEnvironmentStringsW` hands the sorted `NAME=value` block. The C runtime's `_environ` does not follow, which is the behaviour Windows programs observe.
+
 - The legacy `_onexit` spelling registers an exit function in the same shared list `atexit` feeds, answering the function pointer itself on success and zero on failure as the legacy contract documents, under both the `msvcrt.dll` and Universal CRT spellings.
 
 - A record of the defects, ambiguities and undefined helpers in AMD's RDNA 2 guide (#741): 33 defects and 8 undefined helpers, one row per item with the guide page, the defect, the reading Xenora adopts and any second source, plus the hardware hazards that apply to EXEC-writing forms ([errata record](docs/research/rdna2-errata.md)). The registry rows that depend on a defect now say so, so a resolved decision is not silently reverted to the guide's literal text. The guide PDF is not stored in the repository.

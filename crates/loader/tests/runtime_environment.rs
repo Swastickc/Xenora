@@ -19,6 +19,9 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "GetEnvironmentStringsW"),
     (KERNEL32, "FreeEnvironmentStringsW"),
     (KERNEL32, "GetLastError"),
+    (KERNEL32, "SetEnvironmentVariableA"),
+    (KERNEL32, "SetEnvironmentVariableW"),
+    (KERNEL32, "GetEnvironmentVariableA"),
 ];
 
 const BUFFER: u64 = SCRATCH + 0x200;
@@ -89,4 +92,84 @@ fn the_environment_block_is_empty_owned_and_freeable() {
     // Freeing a non-allocation fails the documented way.
     assert_eq!(guest.call("FreeEnvironmentStringsW", &[SCRATCH]), 0);
     assert_eq!(guest.call("GetLastError", &[]), 87);
+}
+
+#[test]
+fn set_variables_expand_and_fill_the_block() {
+    let mut guest = Guest::new(IMPORTS, &[]);
+
+    // Invalid names are refused: null, empty, and the ones holding '='.
+    narrow(&mut guest, SCRATCH, "BAD=NAME");
+    narrow(&mut guest, BUFFER, "value");
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[SCRATCH, BUFFER]), 0);
+    assert_eq!(guest.call("GetLastError", &[]), 87);
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[0, BUFFER]), 0);
+    assert_eq!(guest.call("GetLastError", &[]), 87);
+
+    // A set round-trips case-insensitively through the query.
+    narrow(&mut guest, SCRATCH, "ProbeVar");
+    narrow(&mut guest, BUFFER, "leaf");
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[SCRATCH, BUFFER]), 1);
+    narrow(&mut guest, SCRATCH, "probevar");
+    let got = guest.call("GetEnvironmentVariableA", &[SCRATCH, BUFFER, 32]);
+    assert_eq!(got, 4);
+    assert_eq!(narrow_string(&guest, BUFFER), "leaf");
+
+    // Expansion resolves it, the unknown names copying verbatim.
+    narrow(&mut guest, SCRATCH, "%ProbeVar%/%missing%");
+    let written = guest.call("ExpandEnvironmentStringsA", &[SCRATCH, BUFFER, 64]);
+    assert_eq!(written, "leaf/%missing%".len() as u64 + 1);
+    assert_eq!(narrow_string(&guest, BUFFER), "leaf/%missing%");
+
+    // The wide set form stores the same table.
+    let wide_name: Vec<u16> = "WideVar".encode_utf16().chain([0]).collect();
+    for (i, unit) in wide_name.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 2 * i as u64, *unit)
+            .unwrap();
+    }
+    let wide_value: Vec<u16> = "wval".encode_utf16().chain([0]).collect();
+    for (i, unit) in wide_value.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(BUFFER + 2 * i as u64, *unit)
+            .unwrap();
+    }
+    assert_eq!(guest.call("SetEnvironmentVariableW", &[SCRATCH, BUFFER]), 1);
+
+    // The block lists both variables as NAME=value, upper-case sorted.
+    let block = guest.call("GetEnvironmentStringsW", &[]);
+    assert_ne!(block, 0);
+    // Entries end at single nulls, the block at two in a row.
+    let mut text = String::new();
+    let mut at = block;
+    loop {
+        let unit = guest.u16_at(at);
+        if unit == 0 {
+            if guest.u16_at(at + 2) == 0 {
+                break;
+            }
+            text.push('\n');
+            at += 2;
+            continue;
+        }
+        text.push(char::from_u32(u32::from(unit)).unwrap_or('\u{fffd}'));
+        at += 2;
+    }
+    assert!(
+        text.starts_with("ProbeVar=leaf"),
+        "sorted case-insensitively, original casing kept: {text}"
+    );
+    assert!(text.contains("WideVar=wval"), "{text}");
+    assert_eq!(guest.call("FreeEnvironmentStringsW", &[block]), 1);
+
+    // A null value deletes; the variable then misses and no longer expands.
+    narrow(&mut guest, SCRATCH, "ProbeVar");
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[SCRATCH, 0]), 1);
+    assert_eq!(
+        guest.call("GetEnvironmentVariableA", &[SCRATCH, BUFFER, 32]),
+        0
+    );
+    assert_eq!(guest.call("GetLastError", &[]), 203);
 }

@@ -266,6 +266,13 @@ pub struct ServicesState {
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
     atexit: Mutex<Vec<u64>>,
+    /// The process environment the kernel32 services maintain, insertion
+    /// ordered with the original name casing preserved. Lookups are
+    /// case-insensitive, as the Windows environment is. Starts empty: no
+    /// host variable passes through. The C runtime's `_environ` does not
+    /// follow it, which is the real Windows behaviour: the CRT keeps its own
+    /// copy, and only `_putenv` would update that one.
+    pub(crate) environment: Mutex<Vec<(String, String)>>,
     /// Emulated thread-local storage: the block each guest thread owns for
     /// each thread-local variable, keyed by the guest thread and then by the
     /// address of the variable's descriptor.
@@ -345,6 +352,7 @@ impl ServicesState {
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
+            environment: Mutex::default(),
             emutls: Mutex::default(),
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
@@ -553,6 +561,42 @@ impl ServicesState {
     /// is never called.
     pub fn crt_user_math_error(&self) -> u64 {
         self.crt_startup().user_math_error()
+    }
+
+    /// The value of an environment variable, resolved case-insensitively.
+    pub fn environment_variable_value(&self, name: &str) -> Option<String> {
+        self.environment
+            .lock()
+            .expect("guest environment")
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
+
+    /// Set or delete one environment variable, keeping the insertion order
+    /// and the original casing of a first insertion.
+    pub fn set_environment_variable(&self, name: &str, value: Option<&str>) {
+        let mut environment = self.environment.lock().expect("guest environment");
+        match value {
+            Some(value) => {
+                if let Some(entry) = environment
+                    .iter_mut()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                {
+                    entry.1 = value.to_owned();
+                } else {
+                    environment.push((name.to_owned(), value.to_owned()));
+                }
+            }
+            None => environment.retain(|(key, _)| !key.eq_ignore_ascii_case(name)),
+        }
+    }
+
+    /// The variables of the environment block, sorted upper-case first.
+    pub fn environment_block_entries(&self) -> Vec<(String, String)> {
+        let mut entries = self.environment.lock().expect("guest environment").clone();
+        entries.sort_by_key(|entry| entry.0.to_uppercase());
+        entries
     }
 
     /// Record a guest error and return the documented failure value.
@@ -2845,13 +2889,86 @@ pub(crate) mod handlers {
     // every query misses, which is what an empty environment answers on
     // Windows rather than a stub.
 
-    pub fn environment_variable(
+    pub fn environment_variable_narrow(
         context: &mut ServiceContext<'_>,
-        _name: u64,
-        _buffer: u64,
-        _size: u32,
+        name: u64,
+        buffer: u64,
+        size: u32,
     ) -> Outcome<u32> {
-        context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0)
+        environment_variable_impl(context, name, buffer, size, false)
+    }
+
+    pub fn environment_variable_wide(
+        context: &mut ServiceContext<'_>,
+        name: u64,
+        buffer: u64,
+        size: u32,
+    ) -> Outcome<u32> {
+        environment_variable_impl(context, name, buffer, size, true)
+    }
+
+    /// The shared body of the narrow and wide environment queries: the answer
+    /// is the value length without the terminator when it fits, the size it
+    /// needs with the terminator when it does not.
+    fn environment_variable_impl(
+        context: &mut ServiceContext<'_>,
+        name: u64,
+        buffer: u64,
+        size: u32,
+        wide: bool,
+    ) -> Outcome<u32> {
+        let fault = crate::cpu::ExitReason::MemoryFault;
+        let text = if wide {
+            let mut units = Vec::new();
+            loop {
+                let unit = context
+                    .memory
+                    .read_u16(name + 2 * units.len() as u64)
+                    .map_err(fault)?;
+                if unit == 0 {
+                    break;
+                }
+                units.push(unit);
+                if units.len() > 32768 {
+                    return context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0);
+                }
+            }
+            String::from_utf16_lossy(&units)
+        } else {
+            read_narrow_string(context.memory, name)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?
+        };
+        let value = match context.state.environment_variable_value(&text) {
+            Some(value) if !value.is_empty() => value,
+            _ => return context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0),
+        };
+        let units: Vec<u16> = value.encode_utf16().collect();
+        let length = units.len() as u32;
+        if length + 1 > size {
+            return Ok(length + 1);
+        }
+        if wide {
+            for (index, unit) in units.iter().enumerate() {
+                context
+                    .memory
+                    .write_u16(buffer + 2 * index as u64, *unit)
+                    .map_err(fault)?;
+            }
+            context
+                .memory
+                .write_u16(buffer + 2 * u64::from(length), 0)
+                .map_err(fault)?;
+        } else {
+            context
+                .memory
+                .write_bytes(buffer, value.as_bytes())
+                .map_err(fault)?;
+            context
+                .memory
+                .write_u8(buffer + u64::from(length), 0)
+                .map_err(fault)?;
+        }
+        Ok(length)
     }
 
     /// The hosted runtime has no console window: the answer is a null handle.

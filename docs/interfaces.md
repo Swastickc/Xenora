@@ -258,6 +258,23 @@ zero size. The guest memory map tracks allocation ownership and bounds live
 virtual allocations to 64 MiB. Decommit, executable pages, and console-specific
 allocation lifecycle remain unsupported.
 
+`xmem.dll!XMemAlloc` uses the same bounded backing store for its narrow
+data-only allocation subset, while `XMemFree` releases only the exact base of
+a live XMem-owned allocation. XMem and VirtualAlloc ownership are distinct in
+the memory map, so one API cannot release the other's allocation. Because the
+public free routine returns void, a null, interior, foreign or already-freed
+address stops with Xenora's explicit runtime-limit fault instead of inventing
+an error channel or silently accepting ownership corruption. Allocator IDs,
+graphics memory types, page-size selection, alignment attributes and physical
+Xbox memory behavior remain unsupported; attribute bits are currently not
+interpreted.
+
+References include Microsoft's public
+[XMemAlloc](https://docs.xbox.com/reference/system/xmem/functions/xmemalloc_routine)
+and [XMemFree](https://docs.xbox.com/reference/system/xmem/functions/xmemfree_routine)
+routine signatures. The behavior above is Xenora's bounded ownership model,
+not GDK or Xbox-hardware comparison evidence.
+
 References include Microsoft's
 [thread handle](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthread),
 [thread ID](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid),

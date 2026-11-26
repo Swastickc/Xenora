@@ -16940,7 +16940,7 @@
       "kind": "name",
       "library": "xmem.dll",
       "source": "manual",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "XMemFree"
     }
@@ -16956,9 +16956,9 @@
     "libraries": 20,
     "manual_services": 558,
     "ordinal_aliases": 0,
-    "partial": 589,
+    "partial": 590,
     "structural_consistency_findings": 0,
-    "stub": 4,
+    "stub": 3,
     "typed_registry_entries": 251,
     "typed_services": 251,
     "wanted_imports": null,

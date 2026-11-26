@@ -66,6 +66,23 @@ typedef struct {
     uint16_t right_trigger;
 } xenora_controller_input;
 
+/* Controller snapshot in public XInput units for guest runtime services.
+ * Trigger values span 0 to 255. `connected` must be 0 or 1 and reserved bytes
+ * must be zero. Unlike xenora_controller_input, this carries both thumbsticks
+ * and uses the public XInput button bit assignments directly.
+ */
+typedef struct {
+    uint16_t buttons;
+    uint8_t left_trigger;
+    uint8_t right_trigger;
+    int16_t left_x;
+    int16_t left_y;
+    int16_t right_x;
+    int16_t right_y;
+    uint8_t connected;
+    uint8_t reserved[3];
+} xenora_xinput_state;
+
 #define XENORA_INPUT_NONE     0u
 #define XENORA_INPUT_RIGHT    (1u << 0)
 #define XENORA_INPUT_LEFT     (1u << 1)
@@ -73,6 +90,22 @@ typedef struct {
 #define XENORA_INPUT_DOWN     (1u << 3)
 #define XENORA_INPUT_ACTION_A (1u << 4)
 #define XENORA_INPUT_ACTION_B (1u << 5)
+
+/* Public XInput button bit assignments carried by xenora_xinput_state. */
+#define XENORA_XINPUT_GAMEPAD_DPAD_UP 0x0001u
+#define XENORA_XINPUT_GAMEPAD_DPAD_DOWN 0x0002u
+#define XENORA_XINPUT_GAMEPAD_DPAD_LEFT 0x0004u
+#define XENORA_XINPUT_GAMEPAD_DPAD_RIGHT 0x0008u
+#define XENORA_XINPUT_GAMEPAD_START 0x0010u
+#define XENORA_XINPUT_GAMEPAD_BACK 0x0020u
+#define XENORA_XINPUT_GAMEPAD_LEFT_THUMB 0x0040u
+#define XENORA_XINPUT_GAMEPAD_RIGHT_THUMB 0x0080u
+#define XENORA_XINPUT_GAMEPAD_LEFT_SHOULDER 0x0100u
+#define XENORA_XINPUT_GAMEPAD_RIGHT_SHOULDER 0x0200u
+#define XENORA_XINPUT_GAMEPAD_A 0x1000u
+#define XENORA_XINPUT_GAMEPAD_B 0x2000u
+#define XENORA_XINPUT_GAMEPAD_X 0x4000u
+#define XENORA_XINPUT_GAMEPAD_Y 0x8000u
 
 /* Size of the frame drawn by the trusted fixture: RGBA8, rows top to bottom. */
 #define XENORA_FIXTURE_FRAME_WIDTH 4u
@@ -124,6 +157,12 @@ xenora_status xenora_session_start_frame_loop(xenora_session session, uint32_t f
 xenora_status xenora_session_start_interactive_loop(xenora_session session, uint32_t frame_count);
 xenora_status xenora_session_send_input(xenora_session session, const xenora_input_state *input);
 xenora_status xenora_session_send_controller_input(xenora_session session, const xenora_controller_input *input);
+/* Install or remove a full XInput-unit controller snapshot for user_index 0-3
+ * in the running frame loop's guest runtime services. The legacy fixture input
+ * above is not changed. Returns XENORA_INVALID_ARGUMENT for an invalid index,
+ * connected value or reserved bytes, and XENORA_INVALID_STATE when no loop runs.
+ */
+xenora_status xenora_session_send_xinput_state(xenora_session session, uint32_t user_index, const xenora_xinput_state *input);
 xenora_status xenora_session_queue_input(xenora_session session, const xenora_input_state *input);
 xenora_status xenora_session_pause_frame_loop(xenora_session session);
 xenora_status xenora_session_resume_frame_loop(xenora_session session);

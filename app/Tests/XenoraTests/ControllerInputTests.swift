@@ -15,20 +15,21 @@ struct ControllerInputTests {
 
         let detected = try #require(pollGameController(current: controller, controllers: []))
         #expect(detected.identity == ObjectIdentifier(controller))
-        #expect(detected.snapshot == ControllerSnapshot(
-            buttons: UInt32(XENORA_INPUT_LEFT) | UInt32(XENORA_INPUT_ACTION_A),
-            x: 0, y: 0, leftTrigger: 0, rightTrigger: 0
-        ))
+        #expect(detected.snapshot.buttons == UInt32(XENORA_INPUT_LEFT) | UInt32(XENORA_INPUT_ACTION_A))
+        #expect(detected.snapshot.xinput.buttons == XInputButtonBits.dpadLeft | XInputButtonBits.a)
 
         pad.dpad.setValueForXAxis(0, yAxis: -1)
         pad.buttonA.setValue(0)
         pad.buttonX.setValue(1)
         let down = try #require(pollGameController(current: controller, controllers: []))
         #expect(down.snapshot.buttons == UInt32(XENORA_INPUT_DOWN))
+        #expect(down.snapshot.xinput.buttons == XInputButtonBits.dpadDown | XInputButtonBits.x)
 
         pad.dpad.setValueForXAxis(0, yAxis: 0)
+        pad.buttonX.setValue(0)
         let released = try #require(pollGameController(current: controller, controllers: []))
         #expect(released.snapshot.buttons == 0)
+        #expect(released.snapshot.xinput.buttons == 0)
     }
 
     @Test func pollPrefersExtendedControllersThenTheCurrentMicroController() {
@@ -54,8 +55,12 @@ struct ControllerInputTests {
         pad.dpad.setValueForXAxis(1, yAxis: 0)
         pad.buttonB.setValue(1)
         pad.leftThumbstick.setValueForXAxis(-1, yAxis: 1)
+        pad.rightThumbstick.setValueForXAxis(0.5, yAxis: -1)
         pad.leftTrigger.setValue(0.25)
         pad.rightTrigger.setValue(0.75)
+        pad.buttonMenu.setValue(1)
+        pad.leftShoulder.setValue(1)
+        pad.buttonY.setValue(1)
 
         let detected = try #require(pollGameController(current: controller, controllers: []))
         #expect(detected.snapshot.buttons == UInt32(XENORA_INPUT_RIGHT) | UInt32(XENORA_INPUT_ACTION_B))
@@ -63,5 +68,15 @@ struct ControllerInputTests {
         #expect(detected.snapshot.y == 32767)
         #expect(detected.snapshot.leftTrigger == 0.25)
         #expect(detected.snapshot.rightTrigger == 0.75)
+        #expect(detected.snapshot.xinput == XInputSnapshotValues(
+            buttons: XInputButtonBits.dpadRight | XInputButtonBits.b | XInputButtonBits.y
+                | XInputButtonBits.start | XInputButtonBits.leftShoulder,
+            leftTrigger: 64,
+            rightTrigger: 191,
+            leftX: -32768,
+            leftY: 32767,
+            rightX: 16384,
+            rightY: -32768
+        ))
     }
 }

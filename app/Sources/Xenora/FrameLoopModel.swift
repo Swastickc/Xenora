@@ -21,6 +21,7 @@ protocol FrameLoopAPI: Sendable {
     func destroy(_ handle: xenora_session) -> Int32
     func start(_ handle: xenora_session, mode: FrameLoopMode, frames: UInt32) -> Int32
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32
+    func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32
     func pause(_ handle: xenora_session) -> Int32
     func resume(_ handle: xenora_session) -> Int32
     func stop(_ handle: xenora_session) -> Int32
@@ -49,6 +50,10 @@ struct NativeFrameLoopAPI: FrameLoopAPI {
 
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32 {
         xenora_session_send_controller_input(handle, &input)
+    }
+
+    func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32 {
+        xenora_session_send_xinput_state(handle, userIndex, &input)
     }
 
     func pause(_ handle: xenora_session) -> Int32 { xenora_session_pause_frame_loop(handle) }
@@ -88,6 +93,8 @@ final class FrameLoopModel: ObservableObject {
     private static let horizontalButtons = UInt32(XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT)
     private var screenDirection: UInt32 = 0
     private var lastSentInput = xenora_controller_input()
+    private var lastSentXInput = XInputSnapshotValues()
+    private var lastSentXInputConnected = false
     private var controllerInputError: String?
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
@@ -156,6 +163,8 @@ final class FrameLoopModel: ObservableObject {
         controller = nil
         screenDirection = 0
         lastSentInput = xenora_controller_input()
+        lastSentXInput = XInputSnapshotValues()
+        lastSentXInputConnected = false
         controllerInputError = nil
         completed = 0
         frameId = XENORA_NO_FRAME
@@ -235,23 +244,41 @@ final class FrameLoopModel: ObservableObject {
             left_trigger: UInt16(((snapshot?.leftTrigger ?? 0) * 65535).rounded()),
             right_trigger: UInt16(((snapshot?.rightTrigger ?? 0) * 65535).rounded())
         )
-        guard state.buttons != lastSentInput.state.buttons
+        var xinputValues = snapshot?.xinput ?? XInputSnapshotValues()
+        if screenDirection != 0 {
+            xinputValues.buttons &= ~(XInputButtonBits.dpadLeft | XInputButtonBits.dpadRight)
+            if screenDirection & UInt32(XENORA_INPUT_LEFT) != 0 {
+                xinputValues.buttons |= XInputButtonBits.dpadLeft
+            }
+            if screenDirection & UInt32(XENORA_INPUT_RIGHT) != 0 {
+                xinputValues.buttons |= XInputButtonBits.dpadRight
+            }
+        }
+        let xinputConnected = state.connected != 0
+        var xinput = xinputValues.ffi(connected: xinputConnected)
+        let legacyChanged = state.buttons != lastSentInput.state.buttons
             || state.stick_x != lastSentInput.state.stick_x
             || state.stick_y != lastSentInput.state.stick_y
             || state.connected != lastSentInput.state.connected
             || input.left_trigger != lastSentInput.left_trigger
-            || input.right_trigger != lastSentInput.right_trigger else {
+            || input.right_trigger != lastSentInput.right_trigger
+        let xinputChanged = xinputValues != lastSentXInput || xinputConnected != lastSentXInputConnected
+        guard legacyChanged || xinputChanged else {
             clearControllerInputError()
             return
         }
 
         let code = api.sendInput(session, &input)
-        if code == XENORA_OK {
+        let xinputCode = api.sendXInput(session, 0, &xinput)
+        if code == XENORA_OK && xinputCode == XENORA_OK {
             lastSentInput = input
+            lastSentXInput = xinputValues
+            lastSentXInputConnected = xinputConnected
             clearControllerInputError()
             return
         }
-        let message = "Failed to send controller input (status \(code))."
+        let failed = code == XENORA_OK ? xinputCode : code
+        let message = "Failed to send controller input (status \(failed))."
         // A retry must not replace a later command error or republish the same message.
         let canShow = controllerInputError == nil || errorMessage == controllerInputError
         controllerInputError = message

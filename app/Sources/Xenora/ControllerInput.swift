@@ -131,13 +131,32 @@ func pollGameController() -> DetectedController? {
 }
 
 @MainActor
-func pollGameController(current: GCController?, controllers: [GCController]) -> DetectedController? {
-    let extended = current.flatMap { $0.extendedGamepad == nil ? nil : $0 }
-        ?? controllers.first { $0.extendedGamepad != nil }
-    let controller = extended ?? current.flatMap { $0.microGamepad == nil ? nil : $0 }
-        ?? controllers.first { $0.microGamepad != nil }
-    guard let controller else { return nil }
+func pollGameControllers() -> [DetectedController] {
+    pollGameControllers(current: GCController.current, controllers: GCController.controllers())
+}
 
+@MainActor
+func pollGameController(current: GCController?, controllers: [GCController]) -> DetectedController? {
+    pollGameControllers(current: current, controllers: controllers).first
+}
+
+@MainActor
+func pollGameControllers(current: GCController?, controllers: [GCController]) -> [DetectedController] {
+    var ordered: [GCController] = []
+    func appendPlayable(_ controller: GCController) {
+        guard controller.extendedGamepad != nil || controller.microGamepad != nil,
+              !ordered.contains(where: { $0 === controller }) else { return }
+        ordered.append(controller)
+    }
+    if let current, current.extendedGamepad != nil { appendPlayable(current) }
+    for controller in controllers where controller.extendedGamepad != nil { appendPlayable(controller) }
+    if let current, current.microGamepad != nil { appendPlayable(current) }
+    for controller in controllers where controller.microGamepad != nil { appendPlayable(controller) }
+    return ordered.prefix(4).compactMap(detectController)
+}
+
+@MainActor
+private func detectController(_ controller: GCController) -> DetectedController? {
     let captured = controller.capture()
     let snapshot: ControllerSnapshot
     if let pad = captured.extendedGamepad {

@@ -477,10 +477,24 @@ available; the documented face, shoulder, thumbstick-button and directional-pad
 bits map directly; an extended gamepad's home button maps to the ordinal-100
 guide bit even though named `XInputGetState` masks it. Thumbsticks are scaled
 without applying the legacy fixture deadzone, with -1 reaching -32768 and +1 reaching 32767. Triggers scale to 0
-through 255. The app currently submits the selected controller as user slot
-zero only. Its on-screen directional control can act as a virtual host input
-and replace only the horizontal directional bits, mirroring the legacy fixture
-control.
+through 255.
+
+The app discovers up to four playable GameController devices for the XInput
+bridge. Discovery orders extended gamepads before micro gamepads, preferring
+the current controller within each class and otherwise following the order
+returned by GameController. The frame loop then keeps session-local slot
+assignments by controller object identity: an assigned controller keeps its
+slot while it remains present, a disconnected controller vacates its slot, and
+a newly discovered controller uses the lowest empty slot. This stable
+session-local policy is Xenora host behavior, not Windows or Xbox assignment
+evidence.
+Slot zero remains the primary controller for the legacy fixture input, the
+on-screen virtual input and vibration output. If slot zero is empty, the
+lowest occupied slot supplies legacy input, but vibration remains tied to the
+controller actually assigned to slot zero. The on-screen directional control
+can act as a virtual host input on slot zero and replace only the horizontal
+directional bits, mirroring the legacy fixture control. No physical
+multiplayer hardware verification has been performed.
 
 `XInputSetState` accepts the exact four-byte public vibration layout for a
 connected virtual slot and records the latest motor command with a sequence
@@ -585,8 +599,8 @@ flags or output ranges return `ERROR_BAD_ARGUMENTS` before mutation.
 Hardware-verified vibration output, keystroke event capture, physical battery
 metadata, actual headset/audio endpoints and audio render/capture,
 physical-controller hotplug policy beyond the app's existing
-polling, ordinal 101/102/103 guide-wait/poweroff functions, multiplayer assignment, arbitrary game execution and real-game
-compatibility remain unsupported. This chain proves conversion and delivery
+polling, ordinal 101/102/103 guide-wait/poweroff functions, vibration output for slots one through three,
+arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery
 into runtime services; it does not prove physical Xbox controller behavior and
 was not compared with Windows or Xbox hardware.
 

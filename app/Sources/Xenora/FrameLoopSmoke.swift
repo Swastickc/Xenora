@@ -261,8 +261,8 @@ func checkFrameLoopFailures() async -> [String] {
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
     return failures + (await checkFramePolling()) + (await checkNonblockingStop())
         + (await checkFailedStopRecovery())
-        + checkControllerComposition() + checkControllerHandoffs() + (await checkControllerErrorRecovery())
-        + (await checkVibrationOutput())
+        + checkControllerComposition() + checkMultiplayerSlots() + checkControllerHandoffs()
+        + (await checkControllerErrorRecovery()) + (await checkVibrationOutput())
 }
 
 @MainActor
@@ -569,6 +569,80 @@ private func checkControllerComposition() -> [String] {
     }) {
         failures.append("screen direction or release replaced the connected controller's XInput analog state")
     }
+    return failures
+}
+
+@MainActor
+private func checkMultiplayerSlots() -> [String] {
+    var failures: [String] = []
+    func expect(_ condition: Bool, _ message: String) {
+        if !condition { failures.append(message) }
+    }
+
+    final class Token: NSObject {}
+    let firstToken = Token()
+    let secondToken = Token()
+    let thirdToken = Token()
+    func controller(
+        _ token: NSObject, _ buttons: UInt16, supportsHaptics: Bool = false
+    ) -> DetectedController {
+        DetectedController(
+            identity: ObjectIdentifier(token),
+            name: "Controller \(buttons)",
+            supportsHaptics: supportsHaptics,
+            snapshot: ControllerSnapshot(
+                buttons: 0, x: 0, y: 0, leftTrigger: 0, rightTrigger: 0,
+                xinput: XInputSnapshotValues(buttons: buttons)
+            )
+        )
+    }
+
+    let first = controller(firstToken, XInputButtonBits.a)
+    let second = controller(secondToken, XInputButtonBits.b, supportsHaptics: true)
+    let third = controller(thirdToken, XInputButtonBits.x)
+    var detected: [DetectedController] = []
+    let api = ScriptedFrameLoop()
+    let model = FrameLoopModel(api: api, readControllers: { detected })
+    model.startInteractive()
+
+    detected = [first, second]
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    var xinputs = api.xinputs
+    if xinputs.count == 2 {
+        expect(xinputs[0].userIndex == 0 && xinputs[0].input.buttons == XInputButtonBits.a
+               && xinputs[0].input.connected == 1 && xinputs[0].input.features == 0,
+               "first controller did not occupy XInput slot zero without haptics")
+        expect(xinputs[1].userIndex == 1 && xinputs[1].input.buttons == XInputButtonBits.b
+               && xinputs[1].input.connected == 1
+               && xinputs[1].input.features == UInt8(XENORA_XINPUT_FEATURE_VIBRATION),
+               "second controller did not occupy XInput slot one with its haptics capability")
+    } else {
+        failures.append("two connected controllers produced \(xinputs.count) XInput submissions, expected 2")
+    }
+    expect(model.controller == first && model.controllers == [first, second],
+           "multiplayer publication did not expose slot order with the first controller as primary")
+
+    detected = [second]
+    model.pause()
+    xinputs = api.xinputs
+    expect(xinputs.count == 3 && xinputs.last?.userIndex == 0
+           && xinputs.last?.input.connected == 0 && xinputs.last?.input.buttons == 0,
+           "removing the slot-zero controller did not send exactly one neutral disconnect")
+    expect(model.controller == second && model.controllers == [second],
+           "the remaining slot-one controller did not become the legacy primary controller")
+
+    detected = [second, third]
+    model.pause()
+    xinputs = api.xinputs
+    expect(xinputs.count == 4 && xinputs.last?.userIndex == 0
+           && xinputs.last?.input.buttons == XInputButtonBits.x && xinputs.last?.input.connected == 1,
+           "a newly connected controller did not reuse the first empty XInput slot")
+    expect(model.controller == third && model.controllers == [third, second],
+           "slot-order publication did not place the replacement slot-zero controller first")
+
+    model.pause()
+    expect(api.xinputs.count == 4, "unchanged multiplayer snapshots were resent")
     return failures
 }
 

@@ -93,6 +93,7 @@ final class FrameLoopModel: ObservableObject {
     /// Completed frames per second over the last half second, measured on the host.
     @Published var hostFps: Double?
     @Published private(set) var controller: DetectedController?
+    @Published private(set) var controllers: [DetectedController] = []
     @Published private(set) var isStopping = false
     @Published private(set) var journalRecordCount: UInt64?
     @Published private(set) var controllerVibrationError: String?
@@ -104,15 +105,21 @@ final class FrameLoopModel: ObservableObject {
         var enabled: Bool
     }
 
+    private struct SentXInput: Equatable {
+        var values = XInputSnapshotValues()
+        var connected = false
+        var vibrationSupported = false
+    }
+
     private let api: any FrameLoopAPI
     private let vibrationSink: any ControllerVibrationSink
-    private let readController: @MainActor () -> DetectedController?
+    private let readControllers: @MainActor () -> [DetectedController]
     private let sleepBeforePoll: (@MainActor (Duration) async throws -> Void)?
     private static let horizontalButtons = UInt32(XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT)
     private var screenDirection: UInt32 = 0
     private var lastSentInput = xenora_controller_input()
-    private var lastSentXInput = XInputSnapshotValues()
-    private var lastSentXInputConnected = false
+    private var lastSentXInputs = [SentXInput](repeating: SentXInput(), count: 4)
+    private var xinputAssignments = [ObjectIdentifier?](repeating: nil, count: 4)
     private var controllerInputError: String?
     private var lastAppliedVibration: AppliedVibration?
     private var session: xenora_session = 0
@@ -122,12 +129,19 @@ final class FrameLoopModel: ObservableObject {
 
     init(
         api: any FrameLoopAPI = NativeFrameLoopAPI(),
-        readController: @escaping @MainActor () -> DetectedController? = pollGameController,
+        readController: (@MainActor () -> DetectedController?)? = nil,
+        readControllers: (@MainActor () -> [DetectedController])? = nil,
         vibrationSink: (any ControllerVibrationSink)? = nil,
         sleepBeforePoll: (@MainActor (Duration) async throws -> Void)? = nil
     ) {
         self.api = api
-        self.readController = readController
+        if let readControllers {
+            self.readControllers = readControllers
+        } else if let readController {
+            self.readControllers = { readController().map { [$0] } ?? [] }
+        } else {
+            self.readControllers = pollGameControllers
+        }
         self.vibrationSink = vibrationSink ?? GameControllerVibrationSink()
         self.sleepBeforePoll = sleepBeforePoll
     }
@@ -182,10 +196,11 @@ final class FrameLoopModel: ObservableObject {
         state = UInt32(XENORA_LOOP_FAILED)
         isInteractive = false
         controller = nil
+        controllers = []
+        xinputAssignments = [ObjectIdentifier?](repeating: nil, count: 4)
         screenDirection = 0
         lastSentInput = xenora_controller_input()
-        lastSentXInput = XInputSnapshotValues()
-        lastSentXInputConnected = false
+        lastSentXInputs = [SentXInput](repeating: SentXInput(), count: 4)
         controllerInputError = nil
         controllerVibrationError = nil
         lastAppliedVibration = nil
@@ -245,10 +260,32 @@ final class FrameLoopModel: ObservableObject {
         updateGameController()
     }
 
+    private func assignControllers(_ detected: [DetectedController]) -> [DetectedController] {
+        var byIdentity: [ObjectIdentifier: DetectedController] = [:]
+        for item in detected.prefix(4) where byIdentity[item.identity] == nil {
+            byIdentity[item.identity] = item
+        }
+        for slot in xinputAssignments.indices {
+            if let identity = xinputAssignments[slot], byIdentity[identity] == nil {
+                xinputAssignments[slot] = nil
+            }
+        }
+        for item in detected.prefix(4) {
+            guard !xinputAssignments.contains(item.identity),
+                  let empty = xinputAssignments.firstIndex(of: nil) else { continue }
+            xinputAssignments[empty] = item.identity
+        }
+        return xinputAssignments.compactMap { identity in
+            identity.flatMap { byIdentity[$0] }
+        }
+    }
+
     private func updateGameController() {
-        let next = readController()
-        if next != controller { controller = next }
-        let snapshot = next?.snapshot
+        let detected = assignControllers(readControllers())
+        if detected != controllers { controllers = detected }
+        let primary = detected.first
+        if primary != controller { controller = primary }
+        let snapshot = primary?.snapshot
         let physicalButtons = snapshot?.buttons ?? 0
         // The screen replaces only Left and Right until Release.
         let buttons = screenDirection == 0
@@ -260,7 +297,7 @@ final class FrameLoopModel: ObservableObject {
             mouse_dx: 0,
             mouse_dy: 0,
             mouse_buttons: 0,
-            connected: next != nil || screenDirection != 0 ? 1 : 0,
+            connected: primary != nil || screenDirection != 0 ? 1 : 0,
             reserved: 0
         )
         var input = xenora_controller_input(
@@ -268,40 +305,68 @@ final class FrameLoopModel: ObservableObject {
             left_trigger: UInt16(((snapshot?.leftTrigger ?? 0) * 65535).rounded()),
             right_trigger: UInt16(((snapshot?.rightTrigger ?? 0) * 65535).rounded())
         )
-        var xinputValues = snapshot?.xinput ?? XInputSnapshotValues()
-        if screenDirection != 0 {
-            xinputValues.buttons &= ~(XInputButtonBits.dpadLeft | XInputButtonBits.dpadRight)
-            if screenDirection & UInt32(XENORA_INPUT_LEFT) != 0 {
-                xinputValues.buttons |= XInputButtonBits.dpadLeft
-            }
-            if screenDirection & UInt32(XENORA_INPUT_RIGHT) != 0 {
-                xinputValues.buttons |= XInputButtonBits.dpadRight
-            }
-        }
-        let xinputConnected = state.connected != 0
-        var xinput = xinputValues.ffi(connected: xinputConnected, vibrationSupported: next?.supportsHaptics == true)
         let legacyChanged = state.buttons != lastSentInput.state.buttons
             || state.stick_x != lastSentInput.state.stick_x
             || state.stick_y != lastSentInput.state.stick_y
             || state.connected != lastSentInput.state.connected
             || input.left_trigger != lastSentInput.left_trigger
             || input.right_trigger != lastSentInput.right_trigger
-        let xinputChanged = xinputValues != lastSentXInput || xinputConnected != lastSentXInputConnected
-        guard legacyChanged || xinputChanged else {
+
+        let byIdentity = Dictionary(uniqueKeysWithValues: detected.map { ($0.identity, $0) })
+        var desiredXInputs: [(slot: Int, input: SentXInput, wire: xenora_xinput_state)] = []
+        for slot in 0..<4 {
+            let physical = xinputAssignments[slot].flatMap { byIdentity[$0] }
+            var xinputValues = physical?.snapshot.xinput ?? XInputSnapshotValues()
+            if slot == 0 && screenDirection != 0 {
+                xinputValues.buttons &= ~(XInputButtonBits.dpadLeft | XInputButtonBits.dpadRight)
+                if screenDirection & UInt32(XENORA_INPUT_LEFT) != 0 {
+                    xinputValues.buttons |= XInputButtonBits.dpadLeft
+                }
+                if screenDirection & UInt32(XENORA_INPUT_RIGHT) != 0 {
+                    xinputValues.buttons |= XInputButtonBits.dpadRight
+                }
+            }
+            let connected = physical != nil || (slot == 0 && screenDirection != 0)
+            let vibrationSupported = physical?.supportsHaptics == true
+            let desired = SentXInput(
+                values: xinputValues,
+                connected: connected,
+                vibrationSupported: vibrationSupported
+            )
+            guard desired != lastSentXInputs[slot] else { continue }
+            var wire = xinputValues.ffi(
+                connected: connected,
+                vibrationSupported: connected && vibrationSupported
+            )
+            desiredXInputs.append((slot, desired, wire))
+        }
+
+        guard legacyChanged || !desiredXInputs.isEmpty else {
             clearControllerInputError()
             return
         }
 
-        let code = api.sendInput(session, &input)
-        let xinputCode = api.sendXInput(session, 0, &xinput)
-        if code == XENORA_OK && xinputCode == XENORA_OK {
-            lastSentInput = input
-            lastSentXInput = xinputValues
-            lastSentXInputConnected = xinputConnected
+        var firstFailure: Int32?
+        if legacyChanged {
+            let code = api.sendInput(session, &input)
+            if code == XENORA_OK {
+                lastSentInput = input
+            } else if firstFailure == nil {
+                firstFailure = code
+            }
+        }
+        for var item in desiredXInputs {
+            let code = api.sendXInput(session, UInt32(item.slot), &item.wire)
+            if code == XENORA_OK {
+                lastSentXInputs[item.slot] = item.input
+            } else if firstFailure == nil {
+                firstFailure = code
+            }
+        }
+        guard let failed = firstFailure else {
             clearControllerInputError()
             return
         }
-        let failed = code == XENORA_OK ? xinputCode : code
         let message = "Failed to send controller input (status \(failed))."
         // A retry must not replace a later command error or republish the same message.
         let canShow = controllerInputError == nil || errorMessage == controllerInputError
@@ -315,6 +380,11 @@ final class FrameLoopModel: ObservableObject {
         if errorMessage == previous { errorMessage = nil }
     }
 
+    private func controllerForXInputSlot(_ slot: Int) -> DetectedController? {
+        guard xinputAssignments.indices.contains(slot), let identity = xinputAssignments[slot] else { return nil }
+        return controllers.first { $0.identity == identity }
+    }
+
     private func pollVibration() {
         var raw = xenora_xinput_vibration()
         let code = api.pollXInputVibration(session, 0, &raw)
@@ -326,7 +396,7 @@ final class FrameLoopModel: ObservableObject {
         let command = XInputVibrationCommand(raw)
         let application = AppliedVibration(
             sequence: command.sequence,
-            controller: command.connected ? controller?.identity : nil,
+            controller: command.connected ? controllerForXInputSlot(0)?.identity : nil,
             connected: command.connected,
             enabled: command.enabled
         )
@@ -336,7 +406,7 @@ final class FrameLoopModel: ObservableObject {
         }
         vibrationSink.apply(
             command: command,
-            haptics: command.connected ? controller?.haptics : nil
+            haptics: command.connected ? controllerForXInputSlot(0)?.haptics : nil
         )
         lastAppliedVibration = application
         controllerVibrationError = vibrationSink.lastError

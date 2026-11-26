@@ -47,6 +47,21 @@ struct ControllerInputTests {
                 ObjectIdentifier(extended))
         #expect(pollGameController(current: otherExtended, controllers: [extended, otherExtended])?.identity ==
                 ObjectIdentifier(otherExtended))
+
+        let multiplayer = pollGameControllers(
+            current: micro,
+            controllers: [micro, otherMicro, extended, otherExtended]
+        )
+        #expect(multiplayer.map(\.identity) == [
+            ObjectIdentifier(extended),
+            ObjectIdentifier(otherExtended),
+            ObjectIdentifier(micro),
+            ObjectIdentifier(otherMicro),
+        ])
+        #expect(pollGameControllers(
+            current: nil,
+            controllers: [micro, otherMicro, extended, otherExtended, GCController.withExtendedGamepad()]
+        ).count == 4)
     }
 
     @Test func extendedControllerStillForwardsButtonsThumbstickAndTriggers() throws {

@@ -39,23 +39,49 @@ struct DetectedController: Equatable {
 
 @MainActor
 func pollGameController() -> DetectedController? {
-    let controller = GCController.current.flatMap { $0.extendedGamepad == nil ? nil : $0 }
-        ?? GCController.controllers().first { $0.extendedGamepad != nil }
-    guard let controller, let pad = controller.capture().extendedGamepad else { return nil }
-    var buttons: UInt32 = 0
-    if pad.dpad.right.isPressed { buttons |= UInt32(XENORA_INPUT_RIGHT) }
-    if pad.dpad.left.isPressed { buttons |= UInt32(XENORA_INPUT_LEFT) }
-    if pad.dpad.up.isPressed { buttons |= UInt32(XENORA_INPUT_UP) }
-    if pad.dpad.down.isPressed { buttons |= UInt32(XENORA_INPUT_DOWN) }
-    if pad.buttonA.isPressed { buttons |= UInt32(XENORA_INPUT_ACTION_A) }
-    if pad.buttonB.isPressed { buttons |= UInt32(XENORA_INPUT_ACTION_B) }
+    pollGameController(current: GCController.current, controllers: GCController.controllers())
+}
+
+@MainActor
+func pollGameController(current: GCController?, controllers: [GCController]) -> DetectedController? {
+    let extended = current.flatMap { $0.extendedGamepad == nil ? nil : $0 }
+        ?? controllers.first { $0.extendedGamepad != nil }
+    let controller = extended ?? current.flatMap { $0.microGamepad == nil ? nil : $0 }
+        ?? controllers.first { $0.microGamepad != nil }
+    guard let controller else { return nil }
+
+    let captured = controller.capture()
+    let snapshot: ControllerSnapshot
+    if let pad = captured.extendedGamepad {
+        var buttons = directionalButtons(pad.dpad)
+        if pad.buttonA.isPressed { buttons |= UInt32(XENORA_INPUT_ACTION_A) }
+        if pad.buttonB.isPressed { buttons |= UInt32(XENORA_INPUT_ACTION_B) }
+        snapshot = ControllerSnapshot(
+            buttons: buttons, x: pad.leftThumbstick.xAxis.value, y: pad.leftThumbstick.yAxis.value,
+            leftTrigger: pad.leftTrigger.value, rightTrigger: pad.rightTrigger.value
+        )
+    } else if let pad = captured.microGamepad {
+        var buttons = directionalButtons(pad.dpad)
+        if pad.buttonA.isPressed { buttons |= UInt32(XENORA_INPUT_ACTION_A) }
+        snapshot = ControllerSnapshot(buttons: buttons, x: 0, y: 0, leftTrigger: 0, rightTrigger: 0)
+    } else {
+        return nil
+    }
+
     return DetectedController(
         identity: ObjectIdentifier(controller),
         name: controller.vendorName ?? controller.productCategory,
         supportsHaptics: controller.haptics != nil,
-        snapshot: ControllerSnapshot(
-            buttons: buttons, x: pad.leftThumbstick.xAxis.value, y: pad.leftThumbstick.yAxis.value,
-            leftTrigger: pad.leftTrigger.value, rightTrigger: pad.rightTrigger.value
-        )
+        snapshot: snapshot
     )
+}
+
+@MainActor
+private func directionalButtons(_ pad: GCControllerDirectionPad) -> UInt32 {
+    var buttons: UInt32 = 0
+    if pad.right.isPressed { buttons |= UInt32(XENORA_INPUT_RIGHT) }
+    if pad.left.isPressed { buttons |= UInt32(XENORA_INPUT_LEFT) }
+    if pad.up.isPressed { buttons |= UInt32(XENORA_INPUT_UP) }
+    if pad.down.isPressed { buttons |= UInt32(XENORA_INPUT_DOWN) }
+    return buttons
 }

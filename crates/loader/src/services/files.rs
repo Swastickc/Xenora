@@ -1160,6 +1160,43 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    // The drive the hosted machine has: one fixed disk, letter C, large and
+    // empty enough that the exact numbers do not matter to a correct program.
+    registry.register(KERNEL32, "GetLogicalDrives", |_, _, _| Ok(1 << 2));
+    for symbol in ["GetDriveTypeA", "GetDriveTypeW"] {
+        registry.register(KERNEL32, symbol, |_, _, _| {
+            // Whatever the path, the machine's drives are the one fixed disk:
+            // DRIVE_FIXED is 3.
+            Ok(3)
+        });
+    }
+    for symbol in ["GetDiskFreeSpaceExA", "GetDiskFreeSpaceExW"] {
+        let space = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            // The three output counts are 64-bit integers the caller reads as
+            // ULARGE_INTEGER: free to the user, total, free in total. A memory
+            // drive of one gigabyte with no quota difference.
+            let gig = 1u64 << 30;
+            // The three outputs are the register parameters rdx, r8 and r9:
+            // free to the caller, total bytes, total free bytes.
+            for pointer in [args.rdx, args.r8, args.r9] {
+                if pointer == 0 {
+                    continue;
+                }
+                if memory.check_write(pointer, 8).is_err() {
+                    return space.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+                }
+                memory
+                    .write_u64(pointer, gig)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            if args.rdx == 0 && args.r8 == 0 && args.r9 == 0 {
+                return space.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            Ok(1)
+        });
+    }
+
     let flush = Arc::clone(state);
     registry.register(KERNEL32, "FlushFileBuffers", move |args, cpu, _| {
         let objects = flush.objects.lock().expect("guest object state");

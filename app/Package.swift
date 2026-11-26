@@ -9,5 +9,6 @@ let package = Package(
     targets: [
         .systemLibrary(name: "CXenora", path: "Sources/CXenora"),
         .executableTarget(name: "Xenora", dependencies: ["CXenora"]),
+        .testTarget(name: "XenoraTests", dependencies: ["Xenora"]),
     ]
 )

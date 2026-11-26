@@ -233,7 +233,7 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
         ("MOVBE", 1, ECX, 22, &[0x0F, 0x38, 0xF0, 0x06]), // movbe eax, [rsi]
         ("AESNI", 1, ECX, 25, &[0x66, 0x0F, 0x38, 0xDC, 0xC1]), // aesenc xmm0, xmm1
         ("XSAVE", 1, ECX, 26, &[0x0F, 0x01, 0xD0]),      // xgetbv
-        ("AVX", 1, ECX, 28, &[0xC5, 0xF4, 0x58, 0xC2]),  // vaddps ymm0, ymm1, ymm2
+        ("AVX", 1, ECX, 28, &[0xC5, 0xFC, 0x53, 0xC1]),  // vrcpps ymm0, ymm1
         ("F16C", 1, ECX, 29, &[0xC4, 0xE2, 0x79, 0x13, 0xC1]), // vcvtph2ps xmm0, xmm1
         ("RDRAND", 1, ECX, 30, &[0x0F, 0xC7, 0xF0]),     // rdrand eax
         ("BMI1", 7, EBX, 3, &[0xC4, 0xE2, 0x70, 0xF2, 0xC2]), // andn eax, ecx, edx

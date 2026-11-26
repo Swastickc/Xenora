@@ -8,12 +8,10 @@ use xenora_isa::meta::{self, EncodingFamily, FORMS, identify};
 const USAGE: &str = "usage: xenora shaders <coverage [--json] | inspect <gfx1030.bin>>";
 
 pub fn command(args: &[String]) -> ExitCode {
-    match args.first().map(String::as_str) {
-        Some("coverage") => coverage(args.get(1).map(String::as_str) == Some("--json")),
-        Some("inspect") => match args.get(1) {
-            Some(path) => inspect(path),
-            None => usage(),
-        },
+    match args {
+        [subcommand] if subcommand == "coverage" => coverage(false),
+        [subcommand, option] if subcommand == "coverage" && option == "--json" => coverage(true),
+        [subcommand, path] if subcommand == "inspect" => inspect(path),
         _ => usage(),
     }
 }

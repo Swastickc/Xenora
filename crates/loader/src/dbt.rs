@@ -446,7 +446,8 @@ pub fn is_translatable(insn: &Insn) -> bool {
 pub fn is_native(insn: &Insn) -> bool {
     // Locked read-modify-writes stay on the shared semantics, the one place
     // atomicity has to be provided once guest threads run concurrently.
-    if insn.lock {
+    // So do VEX-encoded forms, whose operation may be one that is lowered.
+    if insn.lock || insn.vex.is_some() {
         return false;
     }
     let wide = matches!(insn.size, 4 | 8);

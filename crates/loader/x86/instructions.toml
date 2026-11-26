@@ -25,6 +25,13 @@
 # and give the ModRM operand width in src: x = 16 bytes, q = 8, d = 4, w = 2.
 # A 16-byte memory operand must be aligned unless unaligned = true.
 #
+# A [[vex]] entry is a VEX-encoded form. length is "128", "256" or "any" (VEX.L) and w
+# is "0", "1" or "any" (VEX.W, the default). nds = true takes a
+# further register from VEX.vvvv, which must otherwise be all ones: a source, or the
+# destination of rm_imm_xmm. src is the memory
+# width: v = the vector length. Operands may have any alignment unless aligned = true.
+# Blends by a fourth register name it in bits 7:4 of their immediate.
+#
 # size: b = 8-bit, v = 16/32/64-bit by 0x66 and REX.W, q = 64-bit always,
 #       y = 32/64-bit only, n = no operand. imm: ib = signed 8-bit,
 #       iz = 16/32-bit sign-extended, iv = full operand size, iw = 16-bit,
@@ -281,6 +288,20 @@ pcmpestri = { writes = "cf zf sf of pf af", ref = "sdm PCMPESTRI" }
 pcmpistrm = { writes = "cf zf sf of pf af", ref = "sdm PCMPISTRM" }
 pcmpistri = { writes = "cf zf sf of pf af", ref = "sdm PCMPISTRI" }
 crc32 = { ref = "sdm CRC32" }
+lddqu = { ref = "sdm LDDQU" }
+movddup = { ref = "sdm MOVDDUP" }
+movsldup = { ref = "sdm MOVSLDUP" }
+movshdup = { ref = "sdm MOVSHDUP" }
+vzeroupper = { ref = "sdm VZEROUPPER" }
+vzeroall = { ref = "sdm VZEROALL" }
+vbroadcastss = { ref = "sdm VBROADCAST" }
+vbroadcastsd = { ref = "sdm VBROADCAST" }
+vbroadcastf128 = { ref = "sdm VBROADCAST" }
+vinsertf128 = { ref = "sdm VINSERTF128/VINSERTF32x4/VINSERTF64x2/VINSERTF32x8/VINSERTF64x4" }
+vextractf128 = { ref = "sdm VEXTRACTF128/VEXTRACTF32x4/VEXTRACTF64x2/VEXTRACTF32x8/VEXTRACTF64x4" }
+vpermilps = { ref = "sdm VPERMILPS" }
+vpermilpd = { ref = "sdm VPERMILPD" }
+vperm2f128 = { ref = "sdm VPERM2F128" }
 
 # Floating point. Every form can raise a SIMD floating-point exception.
 sqrtps = { faults = true, ref = "sdm SQRTPS" }
@@ -3334,4 +3355,2591 @@ prefix = "f2"
 opcode = 0x2D
 enc = "reg_xmm"
 size = "y"
+src = "q"
+
+# VEX-encoded forms. An operation shared with a legacy form has the same lanes;
+# the destination is cleared above the vector length.
+
+[[vex]]
+op = "movaps"
+map = "0f"
+opcode = 0x28
+enc = "xmm_rm"
+length = "any"
+src = "v"
+aligned = true
+
+[[vex]]
+op = "movaps"
+map = "0f"
+opcode = 0x29
+enc = "rm_xmm"
+length = "any"
+src = "v"
+aligned = true
+
+[[vex]]
+op = "movaps"
+map = "0f"
+prefix = "66"
+opcode = 0x28
+enc = "xmm_rm"
+length = "any"
+src = "v"
+aligned = true
+
+[[vex]]
+op = "movaps"
+map = "0f"
+prefix = "66"
+opcode = 0x29
+enc = "rm_xmm"
+length = "any"
+src = "v"
+aligned = true
+
+[[vex]]
+op = "movups"
+map = "0f"
+opcode = 0x10
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movups"
+map = "0f"
+opcode = 0x11
+enc = "rm_xmm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movups"
+map = "0f"
+prefix = "66"
+opcode = 0x10
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movups"
+map = "0f"
+prefix = "66"
+opcode = 0x11
+enc = "rm_xmm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movdqa"
+map = "0f"
+prefix = "66"
+opcode = 0x6F
+enc = "xmm_rm"
+length = "any"
+src = "v"
+aligned = true
+
+[[vex]]
+op = "movdqa"
+map = "0f"
+prefix = "66"
+opcode = 0x7F
+enc = "rm_xmm"
+length = "any"
+src = "v"
+aligned = true
+
+[[vex]]
+op = "movdqu"
+map = "0f"
+prefix = "f3"
+opcode = 0x6F
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movdqu"
+map = "0f"
+prefix = "f3"
+opcode = 0x7F
+enc = "rm_xmm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movntps"
+map = "0f"
+opcode = 0x2B
+enc = "rm_xmm"
+length = "any"
+src = "v"
+memory_only = true
+aligned = true
+
+[[vex]]
+op = "movntps"
+map = "0f"
+prefix = "66"
+opcode = 0x2B
+enc = "rm_xmm"
+length = "any"
+src = "v"
+memory_only = true
+aligned = true
+
+[[vex]]
+op = "movntdq"
+map = "0f"
+prefix = "66"
+opcode = 0xE7
+enc = "rm_xmm"
+length = "any"
+src = "v"
+memory_only = true
+aligned = true
+
+[[vex]]
+op = "movntdqa"
+map = "0f38"
+prefix = "66"
+opcode = 0x2A
+enc = "xmm_rm"
+length = "128"
+src = "v"
+memory_only = true
+aligned = true
+
+[[vex]]
+op = "lddqu"
+map = "0f"
+prefix = "f2"
+opcode = 0xF0
+enc = "xmm_rm"
+length = "any"
+src = "v"
+memory_only = true
+
+[[vex]]
+op = "movss"
+map = "0f"
+prefix = "f3"
+opcode = 0x10
+enc = "xmm_rm"
+length = "any"
+src = "d"
+memory_only = true
+
+[[vex]]
+op = "movss"
+map = "0f"
+prefix = "f3"
+opcode = 0x10
+enc = "xmm_rm"
+length = "any"
+src = "d"
+register_only = true
+nds = true
+
+[[vex]]
+op = "movss"
+map = "0f"
+prefix = "f3"
+opcode = 0x11
+enc = "rm_xmm"
+length = "any"
+src = "d"
+memory_only = true
+
+[[vex]]
+op = "movss"
+map = "0f"
+prefix = "f3"
+opcode = 0x11
+enc = "rm_xmm"
+length = "any"
+src = "d"
+register_only = true
+nds = true
+
+[[vex]]
+op = "movsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x10
+enc = "xmm_rm"
+length = "any"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "movsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x10
+enc = "xmm_rm"
+length = "any"
+src = "q"
+register_only = true
+nds = true
+
+[[vex]]
+op = "movsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x11
+enc = "rm_xmm"
+length = "any"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "movsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x11
+enc = "rm_xmm"
+length = "any"
+src = "q"
+register_only = true
+nds = true
+
+[[vex]]
+op = "movd"
+map = "0f"
+prefix = "66"
+opcode = 0x6E
+enc = "xmm_gpr"
+length = "128"
+
+[[vex]]
+op = "movd"
+map = "0f"
+prefix = "66"
+opcode = 0x7E
+enc = "gpr_xmm"
+length = "128"
+
+[[vex]]
+op = "movq"
+map = "0f"
+prefix = "f3"
+opcode = 0x7E
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "movq"
+map = "0f"
+prefix = "66"
+opcode = 0xD6
+enc = "rm_xmm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "movlps"
+map = "0f"
+opcode = 0x12
+enc = "xmm_rm"
+length = "128"
+src = "q"
+nds = true
+
+[[vex]]
+op = "movlps"
+map = "0f"
+prefix = "66"
+opcode = 0x12
+enc = "xmm_rm"
+length = "128"
+src = "q"
+memory_only = true
+nds = true
+
+[[vex]]
+op = "movhps"
+map = "0f"
+opcode = 0x16
+enc = "xmm_rm"
+length = "128"
+src = "q"
+nds = true
+
+[[vex]]
+op = "movhps"
+map = "0f"
+prefix = "66"
+opcode = 0x16
+enc = "xmm_rm"
+length = "128"
+src = "q"
+memory_only = true
+nds = true
+
+[[vex]]
+op = "movlps"
+map = "0f"
+opcode = 0x13
+enc = "rm_xmm"
+length = "128"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "movlps"
+map = "0f"
+prefix = "66"
+opcode = 0x13
+enc = "rm_xmm"
+length = "128"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "movhps"
+map = "0f"
+opcode = 0x17
+enc = "rm_xmm"
+length = "128"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "movhps"
+map = "0f"
+prefix = "66"
+opcode = 0x17
+enc = "rm_xmm"
+length = "128"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "movmskps"
+map = "0f"
+opcode = 0x50
+enc = "reg_xmm"
+length = "any"
+src = "v"
+register_only = true
+
+[[vex]]
+op = "movmskpd"
+map = "0f"
+prefix = "66"
+opcode = 0x50
+enc = "reg_xmm"
+length = "any"
+src = "v"
+register_only = true
+
+[[vex]]
+op = "movddup"
+map = "0f"
+prefix = "f2"
+opcode = 0x12
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "movddup"
+map = "0f"
+prefix = "f2"
+opcode = 0x12
+enc = "xmm_rm"
+length = "256"
+src = "v"
+
+[[vex]]
+op = "movsldup"
+map = "0f"
+prefix = "f3"
+opcode = 0x12
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "movshdup"
+map = "0f"
+prefix = "f3"
+opcode = 0x16
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "ldmxcsr"
+map = "0f"
+opcode = 0xAE
+digit = 2
+enc = "rm"
+length = "128"
+src = "d"
+memory_only = true
+
+[[vex]]
+op = "stmxcsr"
+map = "0f"
+opcode = 0xAE
+digit = 3
+enc = "rm"
+length = "128"
+src = "d"
+memory_only = true
+
+[[vex]]
+op = "vzeroupper"
+map = "0f"
+opcode = 0x77
+enc = "none"
+length = "128"
+
+[[vex]]
+op = "vzeroall"
+map = "0f"
+opcode = 0x77
+enc = "none"
+length = "256"
+
+[[vex]]
+op = "pand"
+map = "0f"
+opcode = 0x54
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pand"
+map = "0f"
+prefix = "66"
+opcode = 0x54
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pandn"
+map = "0f"
+opcode = 0x55
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pandn"
+map = "0f"
+prefix = "66"
+opcode = 0x55
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "por"
+map = "0f"
+opcode = 0x56
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "por"
+map = "0f"
+prefix = "66"
+opcode = 0x56
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pxor"
+map = "0f"
+opcode = 0x57
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pxor"
+map = "0f"
+prefix = "66"
+opcode = 0x57
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pand"
+map = "0f"
+prefix = "66"
+opcode = 0xDB
+enc = "xmm_rm"
+length = "128"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pandn"
+map = "0f"
+prefix = "66"
+opcode = 0xDF
+enc = "xmm_rm"
+length = "128"
+src = "v"
+nds = true
+
+[[vex]]
+op = "por"
+map = "0f"
+prefix = "66"
+opcode = 0xEB
+enc = "xmm_rm"
+length = "128"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pxor"
+map = "0f"
+prefix = "66"
+opcode = 0xEF
+enc = "xmm_rm"
+length = "128"
+src = "v"
+nds = true
+
+[[vex]]
+op = "vbroadcastss"
+map = "0f38"
+prefix = "66"
+opcode = 0x18
+enc = "xmm_rm"
+length = "any"
+w = "0"
+src = "d"
+memory_only = true
+
+[[vex]]
+op = "vbroadcastsd"
+map = "0f38"
+prefix = "66"
+opcode = 0x19
+enc = "xmm_rm"
+length = "256"
+w = "0"
+src = "q"
+memory_only = true
+
+[[vex]]
+op = "vbroadcastf128"
+map = "0f38"
+prefix = "66"
+opcode = 0x1A
+enc = "xmm_rm"
+length = "256"
+w = "0"
+src = "x"
+memory_only = true
+
+[[vex]]
+op = "vinsertf128"
+map = "0f3a"
+prefix = "66"
+opcode = 0x18
+enc = "xmm_rm_imm"
+length = "256"
+w = "0"
+src = "x"
+nds = true
+
+[[vex]]
+op = "vextractf128"
+map = "0f3a"
+prefix = "66"
+opcode = 0x19
+enc = "rm_xmm_imm"
+length = "256"
+w = "0"
+src = "x"
+
+[[vex]]
+op = "vpermilps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x04
+enc = "xmm_rm_imm"
+length = "any"
+w = "0"
+src = "v"
+
+[[vex]]
+op = "vpermilpd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x05
+enc = "xmm_rm_imm"
+length = "any"
+w = "0"
+src = "v"
+
+[[vex]]
+op = "vpermilps"
+map = "0f38"
+prefix = "66"
+opcode = 0x0C
+enc = "xmm_rm"
+length = "any"
+w = "0"
+src = "v"
+nds = true
+
+[[vex]]
+op = "vpermilpd"
+map = "0f38"
+prefix = "66"
+opcode = 0x0D
+enc = "xmm_rm"
+length = "any"
+w = "0"
+src = "v"
+nds = true
+
+[[vex]]
+op = "vperm2f128"
+map = "0f3a"
+prefix = "66"
+opcode = 0x06
+enc = "xmm_rm_imm"
+length = "256"
+w = "0"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pshufb"
+map = "0f38"
+prefix = "66"
+opcode = 0x00
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phaddw"
+map = "0f38"
+prefix = "66"
+opcode = 0x01
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phaddd"
+map = "0f38"
+prefix = "66"
+opcode = 0x02
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phaddsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x03
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaddubsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x04
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phsubw"
+map = "0f38"
+prefix = "66"
+opcode = 0x05
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phsubd"
+map = "0f38"
+prefix = "66"
+opcode = 0x06
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phsubsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x07
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psignb"
+map = "0f38"
+prefix = "66"
+opcode = 0x08
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psignw"
+map = "0f38"
+prefix = "66"
+opcode = 0x09
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psignd"
+map = "0f38"
+prefix = "66"
+opcode = 0x0A
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmulhrsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x0B
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pabsb"
+map = "0f38"
+prefix = "66"
+opcode = 0x1C
+enc = "xmm_rm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pabsw"
+map = "0f38"
+prefix = "66"
+opcode = 0x1D
+enc = "xmm_rm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pabsd"
+map = "0f38"
+prefix = "66"
+opcode = 0x1E
+enc = "xmm_rm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "palignr"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0F
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pblendvb"
+map = "0f3a"
+prefix = "66"
+opcode = 0x4C
+enc = "xmm_rm_imm"
+length = "128"
+w = "0"
+src = "v"
+nds = true
+
+[[vex]]
+op = "ptest"
+map = "0f38"
+prefix = "66"
+opcode = 0x17
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "pmuldq"
+map = "0f38"
+prefix = "66"
+opcode = 0x28
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpeqq"
+map = "0f38"
+prefix = "66"
+opcode = 0x29
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "packusdw"
+map = "0f38"
+prefix = "66"
+opcode = 0x2B
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pminsb"
+map = "0f38"
+prefix = "66"
+opcode = 0x38
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pminsd"
+map = "0f38"
+prefix = "66"
+opcode = 0x39
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pminuw"
+map = "0f38"
+prefix = "66"
+opcode = 0x3A
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pminud"
+map = "0f38"
+prefix = "66"
+opcode = 0x3B
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaxsb"
+map = "0f38"
+prefix = "66"
+opcode = 0x3C
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaxsd"
+map = "0f38"
+prefix = "66"
+opcode = 0x3D
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaxuw"
+map = "0f38"
+prefix = "66"
+opcode = 0x3E
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaxud"
+map = "0f38"
+prefix = "66"
+opcode = 0x3F
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmulld"
+map = "0f38"
+prefix = "66"
+opcode = 0x40
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "phminposuw"
+map = "0f38"
+prefix = "66"
+opcode = 0x41
+enc = "xmm_rm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pmovsxbw"
+map = "0f38"
+prefix = "66"
+opcode = 0x20
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "pmovzxbw"
+map = "0f38"
+prefix = "66"
+opcode = 0x30
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "pmovsxbd"
+map = "0f38"
+prefix = "66"
+opcode = 0x21
+enc = "xmm_rm"
+length = "128"
+src = "d"
+
+[[vex]]
+op = "pmovzxbd"
+map = "0f38"
+prefix = "66"
+opcode = 0x31
+enc = "xmm_rm"
+length = "128"
+src = "d"
+
+[[vex]]
+op = "pmovsxbq"
+map = "0f38"
+prefix = "66"
+opcode = 0x22
+enc = "xmm_rm"
+length = "128"
+src = "w"
+
+[[vex]]
+op = "pmovzxbq"
+map = "0f38"
+prefix = "66"
+opcode = 0x32
+enc = "xmm_rm"
+length = "128"
+src = "w"
+
+[[vex]]
+op = "pmovsxwd"
+map = "0f38"
+prefix = "66"
+opcode = 0x23
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "pmovzxwd"
+map = "0f38"
+prefix = "66"
+opcode = 0x33
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "pmovsxwq"
+map = "0f38"
+prefix = "66"
+opcode = 0x24
+enc = "xmm_rm"
+length = "128"
+src = "d"
+
+[[vex]]
+op = "pmovzxwq"
+map = "0f38"
+prefix = "66"
+opcode = 0x34
+enc = "xmm_rm"
+length = "128"
+src = "d"
+
+[[vex]]
+op = "pmovsxdq"
+map = "0f38"
+prefix = "66"
+opcode = 0x25
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "pmovzxdq"
+map = "0f38"
+prefix = "66"
+opcode = 0x35
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "pblendw"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0E
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "mpsadbw"
+map = "0f3a"
+prefix = "66"
+opcode = 0x42
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pextrb"
+map = "0f3a"
+prefix = "66"
+opcode = 0x14
+enc = "gpr_xmm_imm"
+length = "128"
+src = "b"
+
+[[vex]]
+op = "pextrw"
+map = "0f3a"
+prefix = "66"
+opcode = 0x15
+enc = "gpr_xmm_imm"
+length = "128"
+src = "w"
+
+[[vex]]
+op = "pextrd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x16
+enc = "gpr_xmm_imm"
+length = "128"
+
+[[vex]]
+op = "pinsrb"
+map = "0f3a"
+prefix = "66"
+opcode = 0x20
+enc = "xmm_gpr_imm"
+length = "128"
+src = "b"
+nds = true
+
+[[vex]]
+op = "pinsrd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x22
+enc = "xmm_gpr_imm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "roundps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x08
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "roundpd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x09
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "roundss"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0A
+enc = "xmm_rm_imm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "roundsd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0B
+enc = "xmm_rm_imm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "blendps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0C
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "blendpd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x0D
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "blendvps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x4A
+enc = "xmm_rm_imm"
+length = "any"
+w = "0"
+src = "v"
+nds = true
+
+[[vex]]
+op = "blendvpd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x4B
+enc = "xmm_rm_imm"
+length = "any"
+w = "0"
+src = "v"
+nds = true
+
+[[vex]]
+op = "extractps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x17
+enc = "gpr_xmm_imm"
+length = "128"
+src = "d"
+
+[[vex]]
+op = "insertps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x21
+enc = "xmm_rm_imm"
+length = "128"
+src = "d"
+nds = true
+
+[[vex]]
+op = "dpps"
+map = "0f3a"
+prefix = "66"
+opcode = 0x40
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "dppd"
+map = "0f3a"
+prefix = "66"
+opcode = 0x41
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpgtq"
+map = "0f38"
+prefix = "66"
+opcode = 0x37
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpestrm"
+map = "0f3a"
+prefix = "66"
+opcode = 0x60
+enc = "xmm_rm_length"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pcmpestri"
+map = "0f3a"
+prefix = "66"
+opcode = 0x61
+enc = "xmm_rm_length"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pcmpistrm"
+map = "0f3a"
+prefix = "66"
+opcode = 0x62
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pcmpistri"
+map = "0f3a"
+prefix = "66"
+opcode = 0x63
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pmovmskb"
+map = "0f"
+prefix = "66"
+opcode = 0xD7
+enc = "reg_xmm"
+length = "128"
+src = "x"
+register_only = true
+
+[[vex]]
+op = "punpcklbw"
+map = "0f"
+prefix = "66"
+opcode = 0x60
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpcklwd"
+map = "0f"
+prefix = "66"
+opcode = 0x61
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpckldq"
+map = "0f"
+prefix = "66"
+opcode = 0x62
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "packsswb"
+map = "0f"
+prefix = "66"
+opcode = 0x63
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpgtb"
+map = "0f"
+prefix = "66"
+opcode = 0x64
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpgtw"
+map = "0f"
+prefix = "66"
+opcode = 0x65
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpgtd"
+map = "0f"
+prefix = "66"
+opcode = 0x66
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "packuswb"
+map = "0f"
+prefix = "66"
+opcode = 0x67
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpckhbw"
+map = "0f"
+prefix = "66"
+opcode = 0x68
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpckhwd"
+map = "0f"
+prefix = "66"
+opcode = 0x69
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpckhdq"
+map = "0f"
+prefix = "66"
+opcode = 0x6A
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "packssdw"
+map = "0f"
+prefix = "66"
+opcode = 0x6B
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpcklqdq"
+map = "0f"
+prefix = "66"
+opcode = 0x6C
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "punpckhqdq"
+map = "0f"
+prefix = "66"
+opcode = 0x6D
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpeqb"
+map = "0f"
+prefix = "66"
+opcode = 0x74
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpeqw"
+map = "0f"
+prefix = "66"
+opcode = 0x75
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pcmpeqd"
+map = "0f"
+prefix = "66"
+opcode = 0x76
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddq"
+map = "0f"
+prefix = "66"
+opcode = 0xD4
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmullw"
+map = "0f"
+prefix = "66"
+opcode = 0xD5
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubusb"
+map = "0f"
+prefix = "66"
+opcode = 0xD8
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubusw"
+map = "0f"
+prefix = "66"
+opcode = 0xD9
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pminub"
+map = "0f"
+prefix = "66"
+opcode = 0xDA
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddusb"
+map = "0f"
+prefix = "66"
+opcode = 0xDC
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddusw"
+map = "0f"
+prefix = "66"
+opcode = 0xDD
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaxub"
+map = "0f"
+prefix = "66"
+opcode = 0xDE
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pavgb"
+map = "0f"
+prefix = "66"
+opcode = 0xE0
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pavgw"
+map = "0f"
+prefix = "66"
+opcode = 0xE3
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmulhuw"
+map = "0f"
+prefix = "66"
+opcode = 0xE4
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmulhw"
+map = "0f"
+prefix = "66"
+opcode = 0xE5
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubsb"
+map = "0f"
+prefix = "66"
+opcode = 0xE8
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubsw"
+map = "0f"
+prefix = "66"
+opcode = 0xE9
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pminsw"
+map = "0f"
+prefix = "66"
+opcode = 0xEA
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddsb"
+map = "0f"
+prefix = "66"
+opcode = 0xEC
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddsw"
+map = "0f"
+prefix = "66"
+opcode = 0xED
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaxsw"
+map = "0f"
+prefix = "66"
+opcode = 0xEE
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmuludq"
+map = "0f"
+prefix = "66"
+opcode = 0xF4
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pmaddwd"
+map = "0f"
+prefix = "66"
+opcode = 0xF5
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psadbw"
+map = "0f"
+prefix = "66"
+opcode = 0xF6
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubb"
+map = "0f"
+prefix = "66"
+opcode = 0xF8
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubw"
+map = "0f"
+prefix = "66"
+opcode = 0xF9
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubd"
+map = "0f"
+prefix = "66"
+opcode = 0xFA
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psubq"
+map = "0f"
+prefix = "66"
+opcode = 0xFB
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddb"
+map = "0f"
+prefix = "66"
+opcode = 0xFC
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddw"
+map = "0f"
+prefix = "66"
+opcode = 0xFD
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "paddd"
+map = "0f"
+prefix = "66"
+opcode = 0xFE
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psrlw"
+map = "0f"
+prefix = "66"
+opcode = 0xD1
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psrlw"
+map = "0f"
+prefix = "66"
+opcode = 0x71
+digit = 2
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psraw"
+map = "0f"
+prefix = "66"
+opcode = 0xE1
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psraw"
+map = "0f"
+prefix = "66"
+opcode = 0x71
+digit = 4
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psllw"
+map = "0f"
+prefix = "66"
+opcode = 0xF1
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psllw"
+map = "0f"
+prefix = "66"
+opcode = 0x71
+digit = 6
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psrld"
+map = "0f"
+prefix = "66"
+opcode = 0xD2
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psrld"
+map = "0f"
+prefix = "66"
+opcode = 0x72
+digit = 2
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psrad"
+map = "0f"
+prefix = "66"
+opcode = 0xE2
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psrad"
+map = "0f"
+prefix = "66"
+opcode = 0x72
+digit = 4
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "pslld"
+map = "0f"
+prefix = "66"
+opcode = 0xF2
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "pslld"
+map = "0f"
+prefix = "66"
+opcode = 0x72
+digit = 6
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psrlq"
+map = "0f"
+prefix = "66"
+opcode = 0xD3
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psrlq"
+map = "0f"
+prefix = "66"
+opcode = 0x73
+digit = 2
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psllq"
+map = "0f"
+prefix = "66"
+opcode = 0xF3
+enc = "xmm_rm"
+length = "128"
+src = "x"
+nds = true
+
+[[vex]]
+op = "psllq"
+map = "0f"
+prefix = "66"
+opcode = 0x73
+digit = 6
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "psrldq"
+map = "0f"
+prefix = "66"
+opcode = 0x73
+digit = 3
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "pslldq"
+map = "0f"
+prefix = "66"
+opcode = 0x73
+digit = 7
+enc = "rm_imm_xmm"
+length = "128"
+src = "x"
+nds = true
+register_only = true
+
+[[vex]]
+op = "pshufd"
+map = "0f"
+prefix = "66"
+opcode = 0x70
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pshufhw"
+map = "0f"
+prefix = "f3"
+opcode = 0x70
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "pshuflw"
+map = "0f"
+prefix = "f2"
+opcode = 0x70
+enc = "xmm_rm_imm"
+length = "128"
+src = "x"
+
+[[vex]]
+op = "shufps"
+map = "0f"
+opcode = 0xC6
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "shufpd"
+map = "0f"
+prefix = "66"
+opcode = 0xC6
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "punpckldq"
+map = "0f"
+opcode = 0x14
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "punpcklqdq"
+map = "0f"
+prefix = "66"
+opcode = 0x14
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "punpckhdq"
+map = "0f"
+opcode = 0x15
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "punpckhqdq"
+map = "0f"
+prefix = "66"
+opcode = 0x15
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "pinsrw"
+map = "0f"
+prefix = "66"
+opcode = 0xC4
+enc = "xmm_gpr_imm"
+length = "128"
+src = "w"
+nds = true
+
+[[vex]]
+op = "pextrw"
+map = "0f"
+prefix = "66"
+opcode = 0xC5
+enc = "reg_xmm_imm"
+length = "128"
+src = "x"
+register_only = true
+
+[[vex]]
+op = "sqrtps"
+map = "0f"
+opcode = 0x51
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "sqrtpd"
+map = "0f"
+prefix = "66"
+opcode = 0x51
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "sqrtss"
+map = "0f"
+prefix = "f3"
+opcode = 0x51
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "sqrtsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x51
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "addps"
+map = "0f"
+opcode = 0x58
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "addpd"
+map = "0f"
+prefix = "66"
+opcode = 0x58
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "addss"
+map = "0f"
+prefix = "f3"
+opcode = 0x58
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "addsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x58
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "mulps"
+map = "0f"
+opcode = 0x59
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "mulpd"
+map = "0f"
+prefix = "66"
+opcode = 0x59
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "mulss"
+map = "0f"
+prefix = "f3"
+opcode = 0x59
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "mulsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x59
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "subps"
+map = "0f"
+opcode = 0x5C
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "subpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5C
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "subss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5C
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "subsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5C
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "minps"
+map = "0f"
+opcode = 0x5D
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "minpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5D
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "minss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5D
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "minsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5D
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "divps"
+map = "0f"
+opcode = 0x5E
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "divpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5E
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "divss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5E
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "divsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5E
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "maxps"
+map = "0f"
+opcode = 0x5F
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "maxpd"
+map = "0f"
+prefix = "66"
+opcode = 0x5F
+enc = "xmm_rm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "maxss"
+map = "0f"
+prefix = "f3"
+opcode = 0x5F
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "maxsd"
+map = "0f"
+prefix = "f2"
+opcode = 0x5F
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "cmpps"
+map = "0f"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "cmppd"
+map = "0f"
+prefix = "66"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+length = "any"
+src = "v"
+nds = true
+
+[[vex]]
+op = "cmpss"
+map = "0f"
+prefix = "f3"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "cmpsd"
+map = "0f"
+prefix = "f2"
+opcode = 0xC2
+enc = "xmm_rm_imm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "ucomiss"
+map = "0f"
+opcode = 0x2E
+enc = "xmm_rm"
+length = "any"
+src = "d"
+
+[[vex]]
+op = "comiss"
+map = "0f"
+opcode = 0x2F
+enc = "xmm_rm"
+length = "any"
+src = "d"
+
+[[vex]]
+op = "ucomisd"
+map = "0f"
+prefix = "66"
+opcode = 0x2E
+enc = "xmm_rm"
+length = "any"
+src = "q"
+
+[[vex]]
+op = "comisd"
+map = "0f"
+prefix = "66"
+opcode = 0x2F
+enc = "xmm_rm"
+length = "any"
+src = "q"
+
+[[vex]]
+op = "cvtps2pd"
+map = "0f"
+opcode = 0x5A
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "cvtps2pd"
+map = "0f"
+opcode = 0x5A
+enc = "xmm_rm"
+length = "256"
+src = "x"
+
+[[vex]]
+op = "cvtpd2ps"
+map = "0f"
+prefix = "66"
+opcode = 0x5A
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "cvtss2sd"
+map = "0f"
+prefix = "f3"
+opcode = 0x5A
+enc = "xmm_rm"
+length = "any"
+src = "d"
+nds = true
+
+[[vex]]
+op = "cvtsd2ss"
+map = "0f"
+prefix = "f2"
+opcode = 0x5A
+enc = "xmm_rm"
+length = "any"
+src = "q"
+nds = true
+
+[[vex]]
+op = "cvtdq2ps"
+map = "0f"
+opcode = 0x5B
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "cvtps2dq"
+map = "0f"
+prefix = "66"
+opcode = 0x5B
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "cvttps2dq"
+map = "0f"
+prefix = "f3"
+opcode = 0x5B
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "cvttpd2dq"
+map = "0f"
+prefix = "66"
+opcode = 0xE6
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "cvtdq2pd"
+map = "0f"
+prefix = "f3"
+opcode = 0xE6
+enc = "xmm_rm"
+length = "128"
+src = "q"
+
+[[vex]]
+op = "cvtdq2pd"
+map = "0f"
+prefix = "f3"
+opcode = 0xE6
+enc = "xmm_rm"
+length = "256"
+src = "x"
+
+[[vex]]
+op = "cvtpd2dq"
+map = "0f"
+prefix = "f2"
+opcode = 0xE6
+enc = "xmm_rm"
+length = "any"
+src = "v"
+
+[[vex]]
+op = "cvtsi2ss"
+map = "0f"
+prefix = "f3"
+opcode = 0x2A
+enc = "xmm_gpr"
+length = "any"
+nds = true
+
+[[vex]]
+op = "cvttss2si"
+map = "0f"
+prefix = "f3"
+opcode = 0x2C
+enc = "reg_xmm"
+length = "any"
+src = "d"
+
+[[vex]]
+op = "cvtss2si"
+map = "0f"
+prefix = "f3"
+opcode = 0x2D
+enc = "reg_xmm"
+length = "any"
+src = "d"
+
+[[vex]]
+op = "cvtsi2sd"
+map = "0f"
+prefix = "f2"
+opcode = 0x2A
+enc = "xmm_gpr"
+length = "any"
+nds = true
+
+[[vex]]
+op = "cvttsd2si"
+map = "0f"
+prefix = "f2"
+opcode = 0x2C
+enc = "reg_xmm"
+length = "any"
+src = "q"
+
+[[vex]]
+op = "cvtsd2si"
+map = "0f"
+prefix = "f2"
+opcode = 0x2D
+enc = "reg_xmm"
+length = "any"
 src = "q"

@@ -24,10 +24,12 @@ HERE = Path(__file__).resolve().parent
 REGISTRY = HERE / "x86/instructions.toml"
 RUST = HERE / "src/x86_table.rs"
 
-TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "group"}
+TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "group", "vex"}
 OPERATION_KEYS = {"reads", "writes", "undefined", "conditional", "terminator", "faults", "ref"}
 FORM_KEYS = {"op", "map", "prefix", "opcode", "count", "digit", "enc", "size", "imm", "src",
              "memory_only", "register_only", "rm", "no_rex_b", "unaligned", "lock"}
+VEX_KEYS = {"op", "map", "prefix", "opcode", "digit", "enc", "length", "w", "src", "nds",
+            "memory_only", "register_only", "aligned"}
 GROUP_KEYS = {"map", "opcodes", "digits", "lock"}
 FLAGS = ["cf", "zf", "sf", "of", "pf", "af"]
 PREFIXES = {"", "66", "f3", "f2"}
@@ -70,6 +72,7 @@ ENCS = {
     "xmm_rm_imm": ("XmmRmImm", True, {"ub"}),
     # The operand size is that of the length registers.
     "xmm_rm_length": ("XmmRmLength", True, {"ub"}),
+    "rm_xmm_imm": ("RmXmmImm", True, {"ub"}),
     "rm_imm_xmm": ("RmImmXmm", True, {"ub"}),
     "xmm_gpr": ("XmmGpr", True, {""}),
     "gpr_xmm": ("GprXmm", True, {""}),
@@ -78,10 +81,22 @@ ENCS = {
     "reg_xmm": ("RegXmm", True, {""}),
     "reg_xmm_imm": ("RegXmmImm", True, {"ub"}),
 }
+# VEX encodings: the operand size, and whether VEX.vvvv may name a register.
+VEX_ENCS = {"none": ("n", False), "rm": ("n", False), "xmm_rm": ("x", True), "rm_xmm": ("x", True),
+            "xmm_rm_imm": ("x", True), "rm_xmm_imm": ("x", False), "xmm_gpr": ("y", True),
+            "gpr_xmm": ("y", False), "reg_xmm": ("y", False), "xmm_rm_length": ("y", False),
+            "rm_imm_xmm": ("x", True), "xmm_gpr_imm": ("y", True), "gpr_xmm_imm": ("y", False),
+            "reg_xmm_imm": ("y", False)}
+VEX_MAPS = {"0f": 1, "0f38": 2, "0f3a": 3}
+VEX_PREFIXES = {"": 0, "66": 1, "f3": 2, "f2": 3}
+VEX_LENGTHS = {"128": False, "256": True, "any": None}
+VEX_WIDTHS = {"0": False, "1": True, "any": None}
+# Memory width: the vector length, a number of bytes, or that of the general operand.
+VEX_SRCS = {"v": 0, "b": 1, "w": 2, "d": 4, "q": 8, "x": 16, "": 255}
 # Encodings whose ModRM operand is the destination, so LOCK can apply to it.
 RM_DESTINATIONS = {"rm_reg", "rm", "rm_imm", "rm_one", "rm_cl", "rm_reg_imm", "rm_reg_cl"}
 # Encodings whose ModRM operand is an XMM register or memory of the source width.
-XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "xmm_rm_length", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
+XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "rm_xmm_imm", "xmm_rm_length", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
 # Those whose operand size is that of a general register.
 GENERAL_SIZED = {"xmm_rm_length", "reg_xmm", "reg_xmm_imm"}
 # One-byte opcodes that are prefixes or the two-byte escape, never instructions.
@@ -245,10 +260,80 @@ def load(text):
                 first = next(iter(slots.values()))
                 if (first["size"] in "bn") != (form["size"] in "bn"):
                     fail(f"{where}: group mixes byte and wider operands")
+    for form in data.get("vex", ()):
+        forms.append(load_vex(form, operations))
+        used.add(form["op"])
+    overlapping = {}
+    for form in forms:
+        if "vex" not in form:
+            continue
+        vex, rivals = form["vex"], overlapping.setdefault(form["vex"]["key"], [])
+        for rival in rivals:
+            if all(a is None or b is None or a == b for a, b in (
+                    (vex["digit"], rival["vex"]["digit"]), (vex["length"], rival["vex"]["length"]),
+                    (vex["w"], rival["vex"]["w"]), (mode(form), mode(rival)))):
+                fail(f"vex {form['op']} {form['map']}:{form['opcode']:02x}: overlapping encoding")
+        rivals.append(form)
     unused = set(operations) - used
     if unused:
         fail(f"operations without forms: {sorted(unused)}")
     return operations, forms
+
+
+def mode(form):
+    """Whether a form takes only memory, only a register, or either (None)."""
+    return True if form["memory_only"] else False if form["register_only"] else None
+
+
+def load_vex(entry, operations):
+    """Validate a VEX entry, returning a form with its VEX rule."""
+    form = dict(entry)
+    where = f"vex {form.get('op')} {form.get('map')}:{form.get('opcode', 0):02x}"
+    check_keys(where, form, VEX_KEYS)
+    form.setdefault("prefix", "")
+    form.setdefault("src", "")
+    form.setdefault("w", "any")
+    form.setdefault("digit", None)
+    for key in ("nds", "memory_only", "register_only", "aligned"):
+        form[key] = bool(form.get(key))
+    for key, allowed in (("op", operations), ("map", VEX_MAPS), ("prefix", VEX_PREFIXES),
+                         ("enc", VEX_ENCS), ("length", VEX_LENGTHS), ("w", VEX_WIDTHS),
+                         ("src", VEX_SRCS)):
+        if form.get(key) not in allowed:
+            fail(f"{where}: unknown {key} {form.get(key)!r}")
+    if not 0 <= form["opcode"] <= 0xFF:
+        fail(f"{where}: opcode out of range")
+    size, sources = VEX_ENCS[form["enc"]]
+    if form["nds"] and not sources:
+        fail(f"{where}: {form['enc']} takes no register from VEX.vvvv")
+    if form["memory_only"] and form["register_only"]:
+        fail(f"{where}: memory_only and register_only contradict")
+    modrm = ENCS[form["enc"]][1]
+    if not modrm and (form["memory_only"] or form["register_only"] or form["digit"] is not None):
+        fail(f"{where}: operand restriction without ModRM")
+    if form["digit"] is not None and not 0 <= form["digit"] <= 7:
+        fail(f"{where}: a digit is 0-7")
+    # A lane exchanged with a general register or memory is a fixed width by
+    # source, or that of the general operand.
+    lane = form["enc"] in ("xmm_gpr_imm", "gpr_xmm_imm")
+    if lane and form["src"] not in ("b", "w", "d", ""):
+        fail(f"{where}: a lane is a byte, word, doubleword or the general operand")
+    if not lane and (form["src"] == "") != (form["enc"] in ("none", "xmm_gpr", "gpr_xmm")):
+        fail(f"{where}: source size does not match the encoding")
+    if form["aligned"] and form["src"] not in ("v", "x"):
+        fail(f"{where}: alignment applies only to whole vectors")
+    if form["enc"] == "rm_xmm" and form["nds"] and not form["register_only"]:
+        fail(f"{where}: a store takes no source from VEX.vvvv")
+    # A shift by an immediate writes VEX.vvvv and has its source in a register.
+    if form["enc"] == "rm_imm_xmm" and not (form["nds"] and form["register_only"]):
+        fail(f"{where}: {form['enc']} needs VEX.vvvv and a register operand")
+    form.update(size=size, imm="ub" if ENCS[form["enc"]][2] == {"ub"} else "", count=1, rm=None,
+                unaligned=not form["aligned"])
+    form["vex"] = {
+        "key": VEX_MAPS[form["map"]] << 10 | VEX_PREFIXES[form["prefix"]] << 8 | form["opcode"],
+        "digit": form["digit"], "length": VEX_LENGTHS[form["length"]], "w": VEX_WIDTHS[form["w"]],
+        "memory": VEX_SRCS[form["src"]], "nds": form["nds"]}
+    return form
 
 
 def camel(name):
@@ -265,7 +350,7 @@ def generate(operations, forms):
            "// Generated by crates/loader/generate_x86.py from crates/loader/x86/instructions.toml.",
            "// Do not edit.",
            "",
-           "use crate::x86_decode::{Encoding, Entry, Form, Immediate, OperandSize};",
+           "use crate::x86_decode::{Encoding, Entry, Form, Immediate, OperandSize, VexForm};",
            "",
            "/// Operations with decodable forms.",
            "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]",
@@ -305,7 +390,7 @@ def generate(operations, forms):
         out.append(
             f"    Form {{ op: Op::{camel(form['op'])}, encoding: Encoding::{ENCS[form['enc']][0]}, "
             f"size: OperandSize::{SIZES[form['size']]}, immediate: Immediate::{IMMS[form['imm']]}, "
-            f"source: {SRCS[form['src']]}, has_modrm: {str(ENCS[form['enc']][1]).lower()}, "
+            f"source: {0 if 'vex' in form else SRCS[form['src']]}, has_modrm: {str(ENCS[form['enc']][1]).lower()}, "
             f"memory_only: {str(bool(form.get('memory_only'))).lower()}, "
             f"register_only: {str(bool(form.get('register_only'))).lower()}, "
             f"fixed_rm: {'None' if form['rm'] is None else 'Some(%d)' % form['rm']}, "
@@ -318,6 +403,8 @@ def generate(operations, forms):
     tables = {name: ["Entry::Unsupported"] * 256 for name in TABLES.values()}
     slots = {}
     for index, form in enumerate(forms):
+        if "vex" in form:
+            continue
         table = TABLES[form["map"], form["prefix"]]
         for opcode in range(form["opcode"], form["opcode"] + form["count"]):
             slots.setdefault((table, opcode), {})[form["digit"]] = index
@@ -331,6 +418,16 @@ def generate(operations, forms):
     out.append("/// Form per ModRM digit; 65535 marks an unsupported digit.")
     out.append(f"pub static GROUPS: [[u16; 8]; {len(groups)}] = [")
     out += [f"    {row}," for row in groups]
+    out += ["];", ""]
+    ordered = sorted((form["vex"]["key"], index) for index, form in enumerate(forms) if "vex" in form)
+    optional = lambda value: "None" if value is None else f"Some({str(value).lower()})"
+    out.append("/// VEX-encoded forms by opcode map, mandatory prefix and opcode.")
+    out.append(f"pub static VEX_FORMS: [VexForm; {len(ordered)}] = [")
+    for key, index in ordered:
+        vex = forms[index]["vex"]
+        out.append(f"    VexForm {{ key: 0x{key:03x}, form: {index}, digit: {optional(vex['digit'])}, "
+                   f"length: {optional(vex['length'])}, wide: {optional(vex['w'])}, "
+                   f"memory: {vex['memory']}, nds: {str(vex['nds']).lower()} }},")
     out += ["];", ""]
     for name, entries in tables.items():
         out.append(f"pub static {name}: [Entry; 256] = [")

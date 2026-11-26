@@ -5,7 +5,7 @@ Historical reuse discussion records the earlier survey. Xenora uses
 public specifications and original fixtures, with other emulator
 projects serving only as references for test selection.
 
-Screened the eight A3 leads on 2026-11-23 against section 6 of the dual-track brief. The pins below identify the default-branch snapshots and their latest observed commits in UTC. The OpenScarlett tip changes documentation. A recent tip establishes activity, and its commit message records the subject of that activity. See the companion notes for [KyTx and Leonida](phase02-collaboration.md) and [CPU engine selection and original interpreter fixture](phase02-cpu-feasibility.md).
+Screened the eight A3 leads on 2026-11-23 against section 6 of the dual-track brief. The pins below identify the default-branch snapshots and their latest observed commits in UTC. The OpenScarlett tip changes documentation. A recent tip establishes activity, and its commit message records the subject of that activity. See the companion notes for [KyTx](phase02-collaboration.md) and [CPU engine selection and original interpreter fixture](phase02-cpu-feasibility.md).
 
 GitHub metadata and tree entries establish availability and paths. Pinned text inspection establishes what a selected function does in source. Upstream test counts, captures and README statements remain upstream reports. No upstream code, builds, fixtures or GPU workloads were executed here. Repository-level license labels are provisional for reuse. File-specific grants, origin and transitive terms remain unverified for every code surface below.
 

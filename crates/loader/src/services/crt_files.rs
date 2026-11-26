@@ -1066,6 +1066,15 @@ impl FileStreams {
         self.open.get(&file).is_some_and(|stream| stream.eof)
     }
 
+    /// Set the end-of-file indicator, as the read functions do when they
+    /// meet the end: `fread` and `fgetc` share `read_bytes`, which is too
+    /// low a level to know what the caller asked for.
+    pub(super) fn note_end_of_file(&mut self, file: u64) {
+        if let Some(stream) = self.open.get_mut(&file) {
+            stream.eof = true;
+        }
+    }
+
     /// The error indicator of a stream, set when a write through it fails.
     pub(super) fn error_flag(&self, file: u64) -> bool {
         self.open.get(&file).is_some_and(|stream| stream.error)

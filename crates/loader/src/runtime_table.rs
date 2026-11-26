@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 231] = [
+pub static SERVICES: [ServiceMetadata; 236] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -283,6 +283,61 @@ pub static SERVICES: [ServiceMetadata; 231] = [
         failure: "-1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream",
         reference: "stdio.h setvbuf",
         tests: &["fflush_and_setvbuf_return_their_documented_results"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "fread",
+        parameters: &[Parameter { name: "buffer", kind: "ptr" }, Parameter { name: "size", kind: "u64" }, Parameter { name: "count", kind: "u64" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "u64",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once",
+        reference: "stdio.h fread",
+        tests: &["fread_reads_whole_items_from_files_and_stdin"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "fgetc",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF with errno EINVAL for a null stream or EBADF for one open for writing",
+        reference: "stdio.h fgetc",
+        tests: &["fread_reads_whole_items_from_files_and_stdin"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "fseek",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }, Parameter { name: "offset", kind: "i32" }, Parameter { name: "origin", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream",
+        reference: "stdio.h fseek",
+        tests: &["fseek_ftell_and_rewind_move_through_file_streams"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "ftell",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EINVAL for a null stream or a position past what long holds; stops the guest for a standard stream",
+        reference: "stdio.h ftell",
+        tests: &["fseek_ftell_and_rewind_move_through_file_streams"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "rewind",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "void",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "errno EINVAL for a null stream; stops the guest for a standard stream",
+        reference: "stdio.h rewind",
+        tests: &["fseek_ftell_and_rewind_move_through_file_streams"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2789,6 +2844,51 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::setvbuf(&mut context, a0, a1, a2, a3)?;
         Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "fread", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.u64(2)?;
+        let a3 = call.u64(3)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::fread(&mut context, a0, a1, a2, a3)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "fgetc", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::fgetc(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "fseek", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.i32(1)?;
+        let a2 = call.i32(2)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::fseek(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "ftell", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::ftell(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "rewind", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let () = handlers::rewind(&mut context, a0)?;
+        Ok(0)
     });
     let s = state.clone();
     registry.register_with_status("ucrtbase.dll", "fopen", ServiceStatus::Partial, move |args, cpu, memory| {

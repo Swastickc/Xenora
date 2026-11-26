@@ -294,19 +294,28 @@ impl ServicesState {
         // Nothing is allocated for a structure that cannot be written.
         memory.check_write(output, STARTUP_INFO_SIZE)?;
         let mut startup = self.startup();
-        let (desktop, title) = match startup.strings[encoding as usize] {
-            Some(strings) => strings,
-            None => {
-                let mut place = |text: &Option<String>| match text {
-                    Some(text) => store(memory, &encoding.bytes(text)),
-                    None => Ok(0),
-                };
-                let strings = (place(&startup.info.desktop)?, place(&startup.info.title)?);
-                startup.strings[encoding as usize] = Some(strings);
-                strings
+        let index = encoding as usize;
+        if let Some((desktop, title)) = startup.strings[index] {
+            return memory.write_bytes(output, &startup.info.image(desktop, title));
+        }
+        let mut place = |text: &Option<String>| match text {
+            Some(text) => store(memory, &encoding.bytes(text)),
+            None => Ok(0),
+        };
+        let desktop = place(&startup.info.desktop)?;
+        let title = match place(&startup.info.title) {
+            Ok(title) => title,
+            Err(error) => {
+                if desktop != 0 {
+                    memory.release_heap_allocation(PROCESS_HEAP, desktop);
+                }
+                return Err(error);
             }
         };
-        memory.write_bytes(output, &startup.info.image(desktop, title))
+        // Adding the strings does not change the output range already checked.
+        memory.write_bytes(output, &startup.info.image(desktop, title))?;
+        startup.strings[index] = Some((desktop, title));
+        Ok(())
     }
 
     fn get_command_line(
@@ -364,6 +373,78 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_startup_info_string_allocation_leaves_no_partial_result() {
+        use crate::memory::{DYNAMIC_BUDGET, MemoryPermissions};
+        use crate::services::MockClock;
+
+        const OUTPUT: u64 = 0x1000;
+        const RETRY_OUTPUT: u64 = OUTPUT + STARTUP_INFO_SIZE as u64;
+        let variants: [(Encoding, &[u8], &[u8]); 2] = [
+            (Encoding::Narrow, b"Desk\0", b"Window\0"),
+            (
+                Encoding::Wide,
+                b"D\0e\0s\0k\0\0\0",
+                b"W\0i\0n\0d\0o\0w\0\0\0",
+            ),
+        ];
+        for (encoding, desktop, title) in variants {
+            let state = ServicesState::new(Arc::new(MockClock::new(0)));
+            state
+                .set_startup_info(ProcessStartupInfo {
+                    desktop: Some("Desk".into()),
+                    title: Some("Window".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let mut memory = GuestMemory::new();
+            let sentinel = [0xA5; 2 * STARTUP_INFO_SIZE];
+            memory
+                .map_region_with_data(
+                    OUTPUT,
+                    sentinel.len(),
+                    MemoryPermissions::READ_WRITE,
+                    &sentinel,
+                )
+                .unwrap();
+
+            // Leave enough heap space for desktop, but not both strings.
+            let pressure = memory
+                .map_heap_allocation(PROCESS_HEAP, DYNAMIC_BUDGET as usize - desktop.len())
+                .unwrap();
+            assert_eq!(
+                state.get_startup_info(&mut memory, OUTPUT, encoding),
+                Err(MemoryError::AllocationFailed)
+            );
+            let mut unchanged = [0; 2 * STARTUP_INFO_SIZE];
+            memory.read_bytes(OUTPUT, &mut unchanged).unwrap();
+            assert_eq!(unchanged, sentinel);
+            assert_eq!(state.startup().strings, [None, None]);
+            let remaining = memory
+                .map_heap_allocation(PROCESS_HEAP, desktop.len())
+                .expect("the failed call must leave the original heap capacity available");
+            assert!(memory.release_heap_allocation(PROCESS_HEAP, remaining));
+            assert!(memory.release_heap_allocation(PROCESS_HEAP, pressure));
+
+            state
+                .get_startup_info(&mut memory, OUTPUT, encoding)
+                .unwrap();
+            assert_eq!(memory.read_u32(OUTPUT).unwrap(), STARTUP_INFO_SIZE as u32);
+            let desktop_address = memory.read_u64(OUTPUT + 16).unwrap();
+            let title_address = memory.read_u64(OUTPUT + 24).unwrap();
+            for (address, expected) in [(desktop_address, desktop), (title_address, title)] {
+                let mut contents = vec![0; expected.len()];
+                memory.read_bytes(address, &mut contents).unwrap();
+                assert_eq!(contents, expected);
+            }
+            state
+                .get_startup_info(&mut memory, RETRY_OUTPUT, encoding)
+                .unwrap();
+            assert_eq!(memory.read_u64(RETRY_OUTPUT + 16).unwrap(), desktop_address);
+            assert_eq!(memory.read_u64(RETRY_OUTPUT + 24).unwrap(), title_address);
+        }
+    }
 
     #[test]
     fn every_documented_startup_flag_is_known_and_no_other() {

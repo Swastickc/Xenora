@@ -251,6 +251,11 @@ def collect_coverage(identified, registry, decoder, status):
         if key in seen:
             raise ValueError(f"{STATUS}: duplicate evidence for {key}")
         seen.add(key)
+        decodes = row.get("decoded") is True
+        if decodes and key not in decoder:
+            raise ValueError(
+                f"{STATUS}: {key} claims decoding but is absent from the decoder inventory"
+            )
         for field in ("llvm", "lowering", "reference", "cpu", "gpu"):
             if field in row and not isinstance(row[field], str):
                 raise ValueError(f"{STATUS}: {key} has invalid {field} evidence")
@@ -267,7 +272,6 @@ def collect_coverage(identified, registry, decoder, status):
         elif lowering:
             raise ValueError(f"{STATUS}: {key} has unrecognized lowering {row['lowering']!r}")
         # Verified evidence also requires the status row to say the form decodes.
-        decodes = row.get("decoded") is True
         if decodes and row.get("reference") == "implemented" and row.get("cpu") == "fixture verified":
             reference.add(key)
         if decodes and row.get("gpu") in {"fixture verified", "fixture verified on Apple M5"}:

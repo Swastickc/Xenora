@@ -48,7 +48,7 @@ separate backend evidence. The [host evidence](../research/host-lab.md) records 
 | Gate | Baseline disposition |
 | --- | --- |
 | P2-01 | Baseline captured. Phase 01 evidence and blockers are linked above. |
-| P2-02 | KyTx, Leonida and eight additional projects screened. Original fixtures and public specifications are the implementation source. No emulator code, tables or metadata are in scope for adoption. |
+| P2-02 | KyTx and nine additional projects screened. Original fixtures and public specifications are the implementation source. No emulator code, tables or metadata are in scope for adoption. |
 | P2-03 | VGPR-only OR verified on Apple M5. |
 | P2-04 | Workspace, LLVM and native GPU regression runs passed after OR integration. |
 | P2-05 | Independent OR expected values matched CPU execution and Metal readback. |

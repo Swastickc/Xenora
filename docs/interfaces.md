@@ -473,6 +473,17 @@ zero only. Its on-screen directional control can act as a virtual host input
 and replace only the horizontal directional bits, mirroring the legacy fixture
 control.
 
+`XInputGetCapabilities` is available on the same three library names for a
+connected virtual slot. It accepts flags zero or `XINPUT_FLAG_GAMEPAD` and
+writes the exact 20-byte public structure. Xenora reports the virtual surface
+as `XINPUT_DEVTYPE_GAMEPAD`/`XINPUT_DEVSUBTYPE_GAMEPAD`, every standard input
+button bit, trigger resolution 255 and thumbstick resolution 32767. Because no
+vibration output path exists, both motor resolutions and all capability feature
+flags are zero; the runtime does not pretend that host wireless, voice, plug-in
+module or force-feedback properties are known. Disconnected slots return
+`ERROR_DEVICE_NOT_CONNECTED`, and invalid slots, flags or output ranges return
+`ERROR_BAD_ARGUMENTS` before mutation.
+
 Vibration/haptics output, capabilities, keystrokes, headset and battery
 interfaces, physical-controller hotplug policy beyond the app's existing
 polling, multiplayer assignment, arbitrary game execution and real-game

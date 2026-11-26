@@ -15,6 +15,11 @@ const ERROR_BAD_ARGUMENTS: u32 = 160;
 const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 const XUSER_MAX_COUNT: u32 = 4;
 const XINPUT_STATE_BYTES: usize = 16;
+const XINPUT_CAPABILITIES_BYTES: usize = 20;
+const XINPUT_FLAG_GAMEPAD: u32 = 0x0001;
+const XINPUT_GAMEPAD_BUTTON_MASK: u16 = 0xf3ff;
+const XINPUT_DEVTYPE_GAMEPAD: u8 = 0x01;
+const XINPUT_DEVSUBTYPE_GAMEPAD: u8 = 0x01;
 const MODULES: [&str; 3] = ["xinput1_4.dll", "xinput9_1_0.dll", "xinputuap.dll"];
 
 /// One host-supplied controller snapshot in documented XInput units.
@@ -91,6 +96,23 @@ fn serialize(packet: u32, state: XInputControllerState) -> [u8; XINPUT_STATE_BYT
     bytes
 }
 
+/// Serialize the capabilities of Xenora's virtual XInput gamepad surface. The
+/// surface accepts every documented standard input field at full resolution,
+/// but this implementation has no vibration output path, so both motor
+/// resolutions are honestly zero and no feature flags are reported.
+fn serialize_virtual_capabilities() -> [u8; XINPUT_CAPABILITIES_BYTES] {
+    let mut bytes = [0; XINPUT_CAPABILITIES_BYTES];
+    bytes[0] = XINPUT_DEVTYPE_GAMEPAD;
+    bytes[1] = XINPUT_DEVSUBTYPE_GAMEPAD;
+    bytes[4..6].copy_from_slice(&XINPUT_GAMEPAD_BUTTON_MASK.to_le_bytes());
+    bytes[6] = u8::MAX;
+    bytes[7] = u8::MAX;
+    for place in bytes[8..16].as_chunks_mut::<2>().0.iter_mut() {
+        *place = i16::MAX.to_le_bytes();
+    }
+    bytes
+}
+
 fn get_state(slots: &Mutex<Slots>, index: u32, output: u64, memory: &mut GuestMemory) -> u32 {
     if index >= XUSER_MAX_COUNT || output == 0 || !memory.can_write(output, XINPUT_STATE_BYTES) {
         return ERROR_BAD_ARGUMENTS;
@@ -107,9 +129,35 @@ fn get_state(slots: &Mutex<Slots>, index: u32, output: u64, memory: &mut GuestMe
     0
 }
 
-/// Register the state query on the public XInput library names. Vibration,
-/// capabilities, keystrokes, headset, battery information and physical hotplug
-/// discovery remain separate unsupported surfaces.
+fn get_capabilities(
+    slots: &Mutex<Slots>,
+    index: u32,
+    flags: u32,
+    output: u64,
+    memory: &mut GuestMemory,
+) -> u32 {
+    if index >= XUSER_MAX_COUNT
+        || flags & !XINPUT_FLAG_GAMEPAD != 0
+        || output == 0
+        || !memory.can_write(output, XINPUT_CAPABILITIES_BYTES)
+    {
+        return ERROR_BAD_ARGUMENTS;
+    }
+    if slots.lock().unwrap()[index as usize].get().is_none() {
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
+    if memory
+        .write_bytes(output, &serialize_virtual_capabilities())
+        .is_err()
+    {
+        return ERROR_BAD_ARGUMENTS;
+    }
+    0
+}
+
+/// Register the state and capabilities queries on the public XInput library
+/// names. Vibration, keystrokes, headset, battery information and physical
+/// hotplug discovery remain separate unsupported surfaces.
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     for module in MODULES {
         let slots = Arc::clone(state);
@@ -122,6 +170,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     &slots.xinput,
                     args.rcx as u32,
                     args.rdx,
+                    memory,
+                )))
+            },
+        );
+        let slots = Arc::clone(state);
+        registry.register_with_status(
+            module,
+            "XInputGetCapabilities",
+            ServiceStatus::Partial,
+            move |args, _, memory| {
+                Ok(u64::from(get_capabilities(
+                    &slots.xinput,
+                    args.rcx as u32,
+                    args.rdx as u32,
+                    args.r8,
                     memory,
                 )))
             },
@@ -167,6 +230,26 @@ mod tests {
             .map_region(0x1000, 0x1000, MemoryPermissions::READ_WRITE)
             .unwrap();
         memory
+    }
+
+    fn call_capabilities(
+        registry: &ImportRegistry,
+        memory: &mut GuestMemory,
+        index: u64,
+        flags: u64,
+        output: u64,
+    ) -> u64 {
+        let mut cpu = CpuState::default();
+        cpu.set(crate::cpu::Register::Rcx, index);
+        cpu.set(crate::cpu::Register::Rdx, flags);
+        cpu.set(crate::cpu::Register::R8, output);
+        let descriptor = registry
+            .resolve(
+                "xinput1_4.dll",
+                &ImportName::Name("XInputGetCapabilities".to_owned()),
+            )
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
     }
 
     #[test]
@@ -242,6 +325,54 @@ mod tests {
             call(&registry, &mut memory, "xinputuap.dll", 0, 0x1200),
             u64::from(ERROR_DEVICE_NOT_CONNECTED)
         );
+    }
+
+    #[test]
+    fn connected_virtual_controller_reports_standard_input_capabilities() {
+        let (state, registry) = fixture();
+        assert!(state.set_xinput_controller(1, Some(XInputControllerState::default())));
+        let mut memory = writable_memory();
+        for flags in [0, 1] {
+            assert_eq!(
+                call_capabilities(&registry, &mut memory, 1, flags, 0x1200),
+                0
+            );
+            let mut output = [0; 20];
+            memory.read_bytes(0x1200, &mut output).unwrap();
+            assert_eq!(
+                output,
+                [
+                    1, 1, 0, 0, 0xff, 0xf3, 0xff, 0xff, 0xff, 0x7f, 0xff, 0x7f, 0xff, 0x7f, 0xff,
+                    0x7f, 0, 0, 0, 0,
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn capabilities_reject_bad_input_before_writing_and_disconnected_slots() {
+        let (_, registry) = fixture();
+        let mut memory = writable_memory();
+        memory.write_bytes(0x1fec, &[0xaa; 20]).unwrap();
+        for (index, flags, output) in [
+            (4, 0, 0x1fec),
+            (0, 2, 0x1fec),
+            (0, 0, 0),
+            (0, 0, 0x1fed),
+            (0, 0, 0x5000),
+        ] {
+            assert_eq!(
+                call_capabilities(&registry, &mut memory, index, flags, output),
+                u64::from(ERROR_BAD_ARGUMENTS)
+            );
+        }
+        assert_eq!(
+            call_capabilities(&registry, &mut memory, 0, 1, 0x1fec),
+            u64::from(ERROR_DEVICE_NOT_CONNECTED)
+        );
+        let mut output = [0; 20];
+        memory.read_bytes(0x1fec, &mut output).unwrap();
+        assert_eq!(output, [0xaa; 20]);
     }
 
     #[test]

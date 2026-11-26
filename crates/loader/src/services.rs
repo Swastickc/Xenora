@@ -1556,6 +1556,23 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _dup(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.duplicate_descriptor(fd)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _dup2(context: &mut ServiceContext<'_>, fd: i32, target: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.duplicate_descriptor2(context.memory, &mut drive, fd, target)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _setmode(context: &mut ServiceContext<'_>, fd: i32, mode: i32) -> Outcome<i32> {
         let outcome = {
             let mut streams = context.state.crt_streams();

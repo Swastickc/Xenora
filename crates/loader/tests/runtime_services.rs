@@ -6567,3 +6567,35 @@ fn legacy_descriptor_seek_and_tell_positions() {
     );
     assert_eq!(guest.errno(), EINVAL);
 }
+
+#[test]
+fn legacy_descriptor_duplication_shares_the_position() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    guest.memory.write_bytes(NAME, b"dup.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    // `_dup` answers the lowest free descriptor, and a seek through the
+    // original moves the position the duplication reads at.
+    let copy = guest.call("_dup", &[fd]) & 0xFFFF_FFFF;
+    assert_eq!(copy, fd + 1);
+    guest.memory.write_bytes(buf, b"abcdefgh").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf, 8]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_lseeki64", &[fd, 4, 0]), 4);
+    let mut bytes = [0u8; 4];
+    assert_eq!(guest.call("_read", &[copy, buf, 4]) & 0xFFFF_FFFF, 4);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"efgh", "the position is shared");
+    // Closing the original keeps the file open through the duplication.
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_lseeki64", &[copy, 0, 0]), 0);
+    // `_dup2` rewires the target, closing whatever it was, and a target that
+    // already is the descriptor is itself.
+    assert_eq!(guest.call("_dup2", &[copy, copy]) & 0xFFFF_FFFF, copy);
+    assert_eq!(guest.call("_dup2", &[copy, 9]) & 0xFFFF_FFFF, 9);
+    assert_eq!(guest.call("_read", &[9, buf, 2]) & 0xFFFF_FFFF, 2);
+    // A duplication of nothing and a bad target are -1 with EBADF.
+    assert_eq!(guest.call("_dup", &[77]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_dup2", &[77, 10]) & 0xFFFF_FFFF, MINUS_ONE);
+}

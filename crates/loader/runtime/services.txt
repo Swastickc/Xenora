@@ -494,6 +494,24 @@ service ucrtbase.dll _setmode(fd: i32, mode: i32) -> i32
     fails -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented
     ref io.h _setmode
     test legacy_descriptor_seek_and_tell_positions
+service ucrtbase.dll _dup(fd: i32) -> i32
+    handler _dup
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open, EMFILE at 8192 descriptors
+    ref io.h _dup
+    test legacy_descriptor_duplication_shares_the_position
+
+service ucrtbase.dll _dup2(fd: i32, target: i32) -> i32
+    handler _dup2
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or a target outside the table
+    ref io.h _dup2
+    test legacy_descriptor_duplication_shares_the_position
+
 
 
 service ucrtbase.dll _access(name: ptr, mode: i32) -> i32

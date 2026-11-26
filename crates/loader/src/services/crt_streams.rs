@@ -981,6 +981,36 @@ impl StandardStreams {
         self.seek_descriptor64(drive, fd, 0, 1)
     }
 
+    /// `_dup` and `_dup2` (#459). The duplication shares the file position,
+    /// as the CRT's does; the standard descriptors duplicate as any other.
+    pub(super) fn duplicate_descriptor(&mut self, fd: i32) -> Outcome<i32> {
+        if fd < 0 {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(self
+            .opened
+            .descriptor_duplicate(fd as u32)
+            .map(|fd| fd as i32)
+            .map_err(|errno| Failed(-1, errno)))
+    }
+
+    pub(super) fn duplicate_descriptor2(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+        fd: i32,
+        target: i32,
+    ) -> Outcome<i32> {
+        if fd < 0 || target < 0 {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(self
+            .opened
+            .descriptor_duplicate2(memory, drive, fd as u32, target as u32)
+            .map(|fd| fd as i32)
+            .map_err(|errno| Failed(-1, errno)))
+    }
+
     /// `_setmode` (#459): the text or binary translation of the descriptor's
     /// stream, answering the previous one. The hosted streams are
     /// byte-oriented, so the wide forms are `EINVAL` here, and a descriptor

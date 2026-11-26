@@ -152,6 +152,9 @@ enum Descriptor {
     /// `_fileno` gave it out for a stream: the state is the stream's, as
     /// the CRT shares one file between a stream and its descriptor.
     Shared(u64),
+    /// `_dup` or `_dup2` made it: the state is another descriptor's, as the
+    /// CRT shares the file position across the duplication.
+    Alias(u32),
 }
 
 #[derive(Default)]
@@ -544,7 +547,22 @@ impl FileStreams {
 
     /// The stream state a descriptor works on: its own for one `_open`
     /// made, or the stream's for one `_fileno` gave out.
+    /// The descriptor a duplication chain ends at: itself for one that is
+    /// no alias. The chain is short by construction — `_dup2` rewires — so
+    /// the bound never acts in practice.
+    fn descriptor_terminal(&self, fd: u32) -> Result<u32, u32> {
+        let mut at = fd;
+        for _ in 0..MAX_DESCRIPTORS {
+            match self.descriptors.get(&at).ok_or(EBADF)? {
+                Descriptor::Alias(next) => at = *next,
+                _ => return Ok(at),
+            }
+        }
+        Err(EBADF)
+    }
+
     fn descriptor_stream(&mut self, fd: u32) -> Result<&mut FileStream, u32> {
+        let fd = self.descriptor_terminal(fd)?;
         match self.descriptors.get(&fd).ok_or(EBADF)? {
             Descriptor::Shared(file) => {
                 let file = *file;
@@ -554,7 +572,41 @@ impl FileStreams {
                 Some(Descriptor::Owned(stream)) => Ok(stream),
                 _ => Err(EBADF),
             },
+            Descriptor::Alias(_) => Err(EBADF),
         }
+    }
+
+    /// `_dup`: the lowest free descriptor sharing the file position, as the
+    /// CRT's duplication shares it.
+    pub(super) fn descriptor_duplicate(&mut self, fd: u32) -> Result<u32, u32> {
+        self.descriptor_terminal(fd)?;
+        if !self.has_descriptor_room() {
+            return Err(EMFILE);
+        }
+        self.insert_descriptor(Descriptor::Alias(fd))
+    }
+
+    /// `_dup2`: `target` becomes the duplication, closed first as the CRT
+    /// closes it, unless it already is `fd`.
+    pub(super) fn descriptor_duplicate2(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+        fd: u32,
+        target: u32,
+    ) -> Result<u32, u32> {
+        self.descriptor_terminal(fd)?;
+        if target >= MAX_DESCRIPTORS {
+            return Err(EBADF);
+        }
+        if target == fd {
+            return Ok(target);
+        }
+        if self.descriptors.contains_key(&target) {
+            self.descriptor_close(memory, drive, target);
+        }
+        self.descriptors.insert(target, Descriptor::Alias(fd));
+        Ok(target)
     }
 
     /// `_open`. The flags are the `<fcntl.h>` values: the access mode in the
@@ -810,11 +862,32 @@ impl FileStreams {
     ) -> bool {
         match self.descriptors.remove(&fd) {
             Some(Descriptor::Owned(stream)) => {
-                if stream.temporary {
+                // A duplication of this descriptor becomes the owner, as the
+                // file stays open while any descriptor of it does; the rest
+                // of the chain rewires to it.
+                if let Some((&heir, _)) = self
+                    .descriptors
+                    .iter()
+                    .find(|(_, entry)| matches!(entry, Descriptor::Alias(of) if *of == fd))
+                {
+                    self.descriptors.insert(heir, Descriptor::Owned(stream));
+                    let rewire: Vec<u32> = self
+                        .descriptors
+                        .iter()
+                        .filter_map(|(&other, entry)| {
+                            (matches!(entry, Descriptor::Alias(of) if *of == fd) && other != heir)
+                                .then_some(other)
+                        })
+                        .collect();
+                    for other in rewire {
+                        self.descriptors.insert(other, Descriptor::Alias(heir));
+                    }
+                } else if stream.temporary {
                     drive.drive_remove(&stream.path);
                 }
                 true
             }
+            Some(Descriptor::Alias(_)) => true,
             Some(Descriptor::Shared(file)) => {
                 self.open.remove(&file);
                 memory.release_heap_allocation(PROCESS_HEAP, file);

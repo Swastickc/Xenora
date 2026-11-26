@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 214] = [
+pub static SERVICES: [ServiceMetadata; 216] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -602,6 +602,28 @@ pub static SERVICES: [ServiceMetadata; 214] = [
         failure: "-1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented",
         reference: "io.h _setmode",
         tests: &["legacy_descriptor_seek_and_tell_positions"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_dup",
+        parameters: &[Parameter { name: "fd", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EBADF for a descriptor that is not open, EMFILE at 8192 descriptors",
+        reference: "io.h _dup",
+        tests: &["legacy_descriptor_duplication_shares_the_position"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_dup2",
+        parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "target", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EBADF for a descriptor that is not open or a target outside the table",
+        reference: "io.h _dup2",
+        tests: &["legacy_descriptor_duplication_shares_the_position"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2850,6 +2872,23 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.i32(1)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::_setmode(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_dup", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_dup(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_dup2", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.i32(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_dup2(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

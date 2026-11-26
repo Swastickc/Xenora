@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 214 |
-| Generated adapters | 214 |
-| Unique handler implementations | 205 |
-| Implemented | 73 |
+| Services with a declared ABI | 216 |
+| Generated adapters | 216 |
+| Unique handler implementations | 207 |
+| Implemented | 75 |
 | Partial | 139 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 214 |
-| API-set aliases (not services) | 239 |
+| Conformance-tested through guest dispatch | 216 |
+| API-set aliases (not services) | 243 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -72,6 +72,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_lseeki64` | `(fd: i32, offset: u64, origin: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start |
 | `ucrtbase.dll!_telli64` | `(fd: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one |
 | `ucrtbase.dll!_setmode` | `(fd: i32, mode: i32) -> i32` | partial | -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented |
+| `ucrtbase.dll!_dup` | `(fd: i32) -> i32` | implemented | -1 with errno EBADF for a descriptor that is not open, EMFILE at 8192 descriptors |
+| `ucrtbase.dll!_dup2` | `(fd: i32, target: i32) -> i32` | implemented | -1 with errno EBADF for a descriptor that is not open or a target outside the table |
 | `ucrtbase.dll!_access` | `(name: ptr, mode: i32) -> i32` | implemented | -1 with errno ENOENT for a missing or rejected name, EINVAL for a null or empty name or mode bits other than 0, 2, 4 and 6 |
 | `ucrtbase.dll!_unlink` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT missing, EACCES for a directory, EINVAL for a null or empty name; it is remove by another name |
 | `ucrtbase.dll!_gmtime64` | `(time: ptr) -> ptr` | implemented | null with errno EINVAL for a null pointer or a time outside 1970-to-3000 |

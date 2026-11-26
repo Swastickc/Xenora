@@ -15,7 +15,7 @@ from .bench_stats import export_json, human_report, summarize
 from .claim_conflict import ClaimSnapshot, format_conflicts, predict_conflicts
 from .cpu_coverage import blocker_manifest, build_report as build_cpu_report, compare_reports, dumps_report as dumps_cpu
 from .env_check import (
-    check_branch_sync,
+    measure_branch_sync,
     check_git_worktree_clean,
     check_llvm_tool,
     check_rosetta_translated,
@@ -435,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
             check_swift_version(swift),
             check_llvm_tool(clang_path, clang_ver),
             check_git_worktree_clean(porcelain),
-            check_branch_sync(ahead=0, behind=0),
+            measure_branch_sync(root),
         ]
         report = summarize_env(findings)
         print(format_report(report), end="")

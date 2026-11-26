@@ -78,7 +78,7 @@ decided explicitly rather than inferred.
 | `Round(x)` | 15 places | Which rounding mode; nearest-even is implied by the round-mode table but not stated. |
 | `Mantissa(x)`, `Exponent(x)`, `TwosComplement(x)` | `V_FREXP_*`, `V_LDEXP_*` | The exact splitting and rounding of the mantissa. |
 | `sat8(x)` | `V_SAT_PK_U8_I16` | Saturation behaviour. |
-| `FindFirst1fromLSB(exec)` | `V_FFBH`, `V_FFBL` | The search order and the result when nothing is found. |
+| `FindFirst1fromLSB(exec)` | `V_READFIRSTLANE_B32`, p137 | Only the definition. The name gives the search order and the text gives the empty-mask result ("Lane# = 0 if exec is zero"), so no reading is open. `V_FFBH_*` and `V_FFBL_B32` do not use it; they carry their own loops and return -1 when no bit is set (p143). |
 | `isNaN(x)` | the VOPC float comparisons | Whether a signalling NaN and a quiet NaN are distinguished. |
 
 `IEEE_MODE` is a fourth kind of gap: it is used in the pseudocode but never

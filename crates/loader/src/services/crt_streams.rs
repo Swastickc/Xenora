@@ -1369,6 +1369,68 @@ impl StandardStreams {
         })
     }
 
+    /// `ungetc`. The byte pushed, or -1 with `EBADF` for a stream that is
+    /// not open and readable in the byte orientation. EOF in is EOF out
+    /// with nothing done, as ISO C 7.21.7.10 says.
+    pub(super) fn ungetc(&mut self, c: i32, file: u64) -> Outcome<i32> {
+        if c == -1 {
+            return Ok(Ok(-1));
+        }
+        let byte = c as u8;
+        Ok(match self.opened.ungetc_byte(file, byte) {
+            std::result::Result::Ok(()) => Ok(i32::from(byte)),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_open_osfhandle`: the descriptor number wrapping the kernel handle,
+    /// which the CRT takes ownership of. -1 with `EBADF` for a handle that
+    /// is no kernel pipe end — the only object this interop knows.
+    pub(super) fn open_osfhandle(&mut self, drive: &ObjectState, handle: u64) -> Outcome<i32> {
+        Ok(match self.opened.descriptor_open_handle(drive, handle) {
+            std::result::Result::Ok(fd) => Ok(fd as i32),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_get_osfhandle`: the kernel handle a descriptor wraps, as an
+    /// `intptr_t`. -1 with `EBADF` for one that wraps no kernel object —
+    /// the CRT's own files have none behind them.
+    pub(super) fn get_osfhandle(&mut self, fd: i32) -> Outcome<u64> {
+        if fd < 0 {
+            return Ok(Err(Failed(u64::MAX, EBADF)));
+        }
+        Ok(match self.opened.descriptor_handle(fd as u32) {
+            std::result::Result::Ok(handle) => Ok(handle),
+            std::result::Result::Err(errno) => Err(Failed(u64::MAX, errno)),
+        })
+    }
+
+    /// `_filbuf`. The byte as an unsigned char, or EOF at the end or for a
+    /// stream that is not open and readable.
+    pub(super) fn filbuf(&mut self, drive: &ObjectState, file: u64) -> Outcome<i32> {
+        if !self.opened.contains(file) {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(match self.opened.read_one(drive, file) {
+            std::result::Result::Ok(Some(byte)) => Ok(i32::from(byte)),
+            std::result::Result::Ok(None) => Ok(-1),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_flsbuf`. The byte written, or EOF for a stream that is not open
+    /// and writable.
+    pub(super) fn flsbuf(&mut self, drive: &mut ObjectState, c: i32, file: u64) -> Outcome<i32> {
+        if !self.opened.contains(file) {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(match self.opened.write_one(drive, file, c as u8) {
+            std::result::Result::Ok(()) => Ok(i32::from(c as u8)),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
     /// `_access`. 0 when the name is a file or a directory; the files the
     /// drive holds are always readable and writable, so the mode only
     /// decides the answer for what is missing. -1 with `ENOENT` then, or

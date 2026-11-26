@@ -4745,19 +4745,78 @@ fn legacy_amsg_exit_ends_the_process() {
 }
 
 #[test]
-fn environment_variables_are_never_found_in_the_empty_environment() {
+fn environment_variables_round_trip_and_miss_the_undefined_ones() {
     let mut guest = Guest::new();
+
+    // A fresh environment answers every query with the documented miss.
     guest.memory.write_bytes(SCRATCH, b"PATH\0").unwrap();
     for symbol in ["GetEnvironmentVariableA", "GetEnvironmentVariableW"] {
-        for args in [
-            [SCRATCH, SCRATCH + 0x40, 32],
-            [0, SCRATCH + 0x40, 32],
-            [SCRATCH, 0, 0],
-        ] {
-            assert_eq!(guest.call(symbol, &args) & 0xFFFF_FFFF, 0, "{symbol}");
-            assert_eq!(guest.last_error(), 203, "{symbol} ERROR_ENVVAR_NOT_FOUND");
-        }
+        assert_eq!(
+            guest.call(symbol, &[SCRATCH, SCRATCH + 0x40, 32]) & 0xFFFF_FFFF,
+            0
+        );
+        assert_eq!(guest.last_error(), 203, "{symbol} ERROR_ENVVAR_NOT_FOUND");
     }
+
+    // A defined variable round-trips through both widths, case-insensitively.
+    guest
+        .state
+        .set_environment_variable("XenoraProbe", Some("answer-42"));
+    guest.memory.write_bytes(SCRATCH, b"xenoraprobe\0").unwrap();
+    let got = guest.call("GetEnvironmentVariableA", &[SCRATCH, SCRATCH + 0x20, 32]) & 0xFFFF_FFFF;
+    assert_eq!(got, 9, "the length without the terminator");
+    let mut bytes = [0u8; 10];
+    guest.memory.read_bytes(SCRATCH + 0x20, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"answer-42\0");
+
+    let wide_name: Vec<u16> = "XENORAPROBE".encode_utf16().collect();
+    for (index, unit) in wide_name.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 2 * index as u64, *unit)
+            .unwrap();
+    }
+    guest
+        .memory
+        .write_u16(SCRATCH + 2 * wide_name.len() as u64, 0)
+        .unwrap();
+    let got = guest.call("GetEnvironmentVariableW", &[SCRATCH, SCRATCH + 0x60, 32]) & 0xFFFF_FFFF;
+    assert_eq!(got, 9);
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 0x60).unwrap(),
+        u16::from(b'a')
+    );
+
+    // A small buffer answers the size it needs, terminator included.
+    guest.memory.write_bytes(SCRATCH, b"xenoraprobe\0").unwrap();
+    assert_eq!(
+        guest.call("GetEnvironmentVariableA", &[SCRATCH, SCRATCH + 0x40, 4]) & 0xFFFF_FFFF,
+        10,
+        "length 9 plus the terminator"
+    );
+    for (index, unit) in wide_name.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 2 * index as u64, *unit)
+            .unwrap();
+    }
+    guest
+        .memory
+        .write_u16(SCRATCH + 2 * wide_name.len() as u64, 0)
+        .unwrap();
+    assert_eq!(
+        guest.call("GetEnvironmentVariableW", &[SCRATCH, SCRATCH + 0x40, 4]) & 0xFFFF_FFFF,
+        10
+    );
+    guest.memory.write_bytes(SCRATCH, b"xenoraprobe\0").unwrap();
+
+    // A deleted variable misses again.
+    guest.state.set_environment_variable("XenoraProbe", None);
+    assert_eq!(
+        guest.call("GetEnvironmentVariableA", &[SCRATCH, SCRATCH + 0x20, 32]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.last_error(), 203);
 }
 
 #[test]
@@ -7260,4 +7319,151 @@ fn synthetic_lifecycle_queue_teardown_is_terminal_only_with_open_handles() {
         call(1, &[]);
         assert_eq!(call(0, &[]).0, expected);
     }
+}
+
+/// `ungetc`: the pushed bytes come back last-pushed-first through the shared
+/// descriptor, the end-of-file indicator clears, and EOF in is EOF out with
+/// nothing done (ISO C 7.21.7.10).
+#[test]
+fn ungetc_stacks_bytes_and_steps_the_position_back() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "ungetc.bin", b"abcdef");
+    guest.memory.write_bytes(NAME, b"ungetc.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    let fd = guest.call("_fileno", &[file]) & 0xFFFF_FFFF;
+    let buf = TEXT + 0x200;
+    // Two bytes in, then two pushes come back last-pushed-first and the
+    // file resumes where it stopped.
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ab");
+    assert_eq!(
+        guest.call("ungetc", &[b'X' as u64, file]) & 0xFFFF_FFFF,
+        b'X' as u64
+    );
+    assert_eq!(
+        guest.call("ungetc", &[b'Y' as u64, file]) & 0xFFFF_FFFF,
+        b'Y' as u64
+    );
+    assert_eq!(guest.call("_read", &[fd, buf, 4]) & 0xFFFF_FFFF, 4);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..4], b"YXcd");
+    // EOF in is EOF out and stacks nothing.
+    assert_eq!(
+        guest.call("ungetc", &[0xFFFF_FFFF, file]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ef");
+    // The end-of-file indicator is a stdio notion: a stdio read at the end
+    // sets it, and a push clears it again.
+    assert!(line(&mut guest, file, 8).is_none(), "at the end");
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("ungetc", &[b'Z' as u64, file]) & 0xFFFF_FFFF,
+        b'Z' as u64
+    );
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[fd, buf, 1]) & 0xFFFF_FFFF, 1);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..1], b"Z");
+    // A push on a stream that is not open is EOF with EBADF.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("ungetc", &[b'Q' as u64, TEXT]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+}
+
+/// `_open_osfhandle` and `_get_osfhandle`: a kernel pipe end becomes a
+/// descriptor the CRT reads and writes, the CRT owns the handle once
+/// wrapped, and a write end closing marks the pipe's end of stream.
+#[test]
+fn osfhandle_interop_wraps_a_kernel_pipe() {
+    let (mut guest, _) = stdio_guest();
+    let ends = TEXT + 0x400;
+    let buf = TEXT + 0x500;
+    // A kernel pipe: both ends out.
+    assert_eq!(
+        guest.call("CreatePipe", &[ends, ends + 8, 0, 0]) & 0xFFFF_FFFF,
+        1
+    );
+    let read_end = guest.memory.read_u64(ends).unwrap();
+    let write_end = guest.memory.read_u64(ends + 8).unwrap();
+    assert_ne!(read_end, 0);
+    assert_ne!(write_end, 0);
+    // The write end becomes a descriptor; the handle it wraps comes back.
+    let fd_w = guest.call("_open_osfhandle", &[write_end, 0]) & 0xFFFF_FFFF;
+    assert_ne!(fd_w as i32, -1);
+    assert_eq!(guest.call("_get_osfhandle", &[fd_w]), write_end);
+    // Bytes written through the CRT drain through the CRT on the read end.
+    guest.memory.write_bytes(buf, b"pipe!").unwrap();
+    assert_eq!(guest.call("_write", &[fd_w, buf, 5]) & 0xFFFF_FFFF, 5);
+    let fd_r = guest.call("_open_osfhandle", &[read_end, 0]) & 0xFFFF_FFFF;
+    assert_ne!(fd_r as i32, -1);
+    assert_eq!(guest.call("_read", &[fd_r, buf, 3]) & 0xFFFF_FFFF, 3);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..3], b"pip");
+    // A handle that is no kernel object is EBADF, and so is a fd with none.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_open_osfhandle", &[0xDEAD, 0]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_get_osfhandle", &[77]), u64::MAX);
+    // Closing the write descriptor closes the handle: the kernel no longer
+    // knows it, and the read end drains what remains then answers empty.
+    assert_eq!(guest.call("_close", &[fd_w]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("CloseHandle", &[write_end]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[fd_r, buf, 8]) & 0xFFFF_FFFF, 2);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"e!");
+    assert_eq!(guest.call("_read", &[fd_r, buf, 8]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[fd_r]) & 0xFFFF_FFFF, 0);
+}
+
+/// `_filbuf` and `_flsbuf`: the legacy single-byte forms move one byte at
+/// a time through the stream, the read answering EOF at the end.
+#[test]
+fn filbuf_and_flsbuf_move_single_bytes() {
+    let (mut guest, _) = stdio_guest();
+    guest.memory.write_bytes(NAME, b"bytes.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"wb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    // Bytes out one at a time, each answering itself.
+    assert_eq!(
+        guest.call("_flsbuf", &[b'o' as u64, file]) & 0xFFFF_FFFF,
+        b'o' as u64
+    );
+    assert_eq!(
+        guest.call("_flsbuf", &[b'k' as u64, file]) & 0xFFFF_FFFF,
+        b'k' as u64
+    );
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+    // Back in: the bytes come one at a time and the end is EOF.
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    assert_eq!(guest.call("_filbuf", &[file]) & 0xFFFF_FFFF, b'o' as u64);
+    assert_eq!(guest.call("_filbuf", &[file]) & 0xFFFF_FFFF, b'k' as u64);
+    assert_eq!(guest.call("_filbuf", &[file]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    // A write on the read stream is EOF with EBADF, and so is either form
+    // on a pointer that is no stream.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_flsbuf", &[b'x' as u64, file]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_filbuf", &[TEXT]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
 }

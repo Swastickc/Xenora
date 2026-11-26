@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 236] = [
+pub static SERVICES: [ServiceMetadata; 242] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -129,6 +129,17 @@ pub static SERVICES: [ServiceMetadata; 236] = [
         failure: "0 with ERROR_INVALID_HANDLE",
         reference: "handleapi.h CloseHandle",
         tests: &["thread_handles_check_access_and_are_rejected_once_closed"],
+    },
+    ServiceMetadata {
+        library: "kernel32.dll",
+        symbol: "CreatePipe",
+        parameters: &[Parameter { name: "read_end", kind: "ptr" }, Parameter { name: "write_end", kind: "ptr" }, Parameter { name: "attributes", kind: "ptr" }, Parameter { name: "size", kind: "u32" }],
+        result: "bool32",
+        status: ServiceStatus::Implemented,
+        aliases: &[],
+        failure: "ERROR_NOT_SUPPORTED for security attributes, ERROR_INVALID_PARAMETER for a null output, ERROR_NOACCESS for memory it cannot write",
+        reference: "namedpipeapi.h CreatePipe",
+        tests: &["osfhandle_interop_wraps_a_kernel_pipe"],
     },
     ServiceMetadata {
         library: "kernel32.dll",
@@ -657,6 +668,61 @@ pub static SERVICES: [ServiceMetadata; 236] = [
         failure: "-1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start",
         reference: "io.h _lseeki64",
         tests: &["legacy_descriptor_seek_and_tell_positions"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_open_osfhandle",
+        parameters: &[Parameter { name: "osfhandle", kind: "handle" }, Parameter { name: "flags", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one",
+        reference: "io.h _open_osfhandle",
+        tests: &["osfhandle_interop_wraps_a_kernel_pipe"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_get_osfhandle",
+        parameters: &[Parameter { name: "fd", kind: "i32" }],
+        result: "u64",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included",
+        reference: "io.h _get_osfhandle",
+        tests: &["osfhandle_interop_wraps_a_kernel_pipe"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_filbuf",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here",
+        reference: "stdio.h _filbuf",
+        tests: &["filbuf_and_flsbuf_move_single_bytes"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_flsbuf",
+        parameters: &[Parameter { name: "c", kind: "i32" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF with EBADF for a stream that is not open and writable",
+        reference: "stdio.h _flsbuf",
+        tests: &["filbuf_and_flsbuf_move_single_bytes"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "ungetc",
+        parameters: &[Parameter { name: "c", kind: "i32" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream",
+        reference: "stdio.h ungetc",
+        tests: &["ungetc_stacks_bytes_and_steps_the_position_back"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2524,9 +2590,9 @@ pub static SERVICES: [ServiceMetadata; 236] = [
         result: "u32",
         status: ServiceStatus::Implemented,
         aliases: &["api-ms-win-core-processenvironment-l1-1-0.dll"],
-        failure: "0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty",
+        failure: "0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty",
         reference: "Microsoft Learn, GetEnvironmentVariable",
-        tests: &["environment_variables_are_never_found_in_the_empty_environment"],
+        tests: &["environment_variables_round_trip_and_miss_the_undefined_ones"],
     },
     ServiceMetadata {
         library: "kernel32.dll",
@@ -2535,9 +2601,9 @@ pub static SERVICES: [ServiceMetadata; 236] = [
         result: "u32",
         status: ServiceStatus::Implemented,
         aliases: &["api-ms-win-core-processenvironment-l1-1-0.dll"],
-        failure: "0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty",
+        failure: "0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty",
         reference: "Microsoft Learn, GetEnvironmentVariable",
-        tests: &["environment_variables_are_never_found_in_the_empty_environment"],
+        tests: &["environment_variables_round_trip_and_miss_the_undefined_ones"],
     },
     ServiceMetadata {
         library: "kernel32.dll",
@@ -2696,6 +2762,17 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.u64(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: bool = handlers::close_handle(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("kernel32.dll", "CreatePipe", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.u64(2)?;
+        let a3 = call.u32(3)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: bool = handlers::create_pipe(&mut context, a0, a1, a2, a3)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();
@@ -3141,6 +3218,49 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a2 = call.i32(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::_lseeki64(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_open_osfhandle", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.i32(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_open_osfhandle(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_get_osfhandle", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_get_osfhandle(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_filbuf", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_filbuf(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_flsbuf", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_flsbuf(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "ungetc", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::ungetc(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();
@@ -4622,7 +4742,7 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.u64(1)?;
         let a2 = call.u32(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
-        let result: u32 = handlers::environment_variable(&mut context, a0, a1, a2)?;
+        let result: u32 = handlers::environment_variable_narrow(&mut context, a0, a1, a2)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();
@@ -4632,7 +4752,7 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.u64(1)?;
         let a2 = call.u32(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
-        let result: u32 = handlers::environment_variable(&mut context, a0, a1, a2)?;
+        let result: u32 = handlers::environment_variable_wide(&mut context, a0, a1, a2)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

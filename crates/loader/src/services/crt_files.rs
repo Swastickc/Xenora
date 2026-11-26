@@ -18,6 +18,7 @@
 //! that `_ftelli64` or `fgetpos` returned can be given back to `_fseeki64` or
 //! `fsetpos` ("fseek, _fseeki64", "ftell, _ftelli64", "fgetpos", "fsetpos").
 
+use super::GuestObject;
 use super::ObjectState;
 use super::files::DriveEntry;
 use crate::memory::{GuestMemory, PROCESS_HEAP};
@@ -142,6 +143,9 @@ struct FileStream {
     /// The C orientation: 0 unoriented, 1 byte, 2 wide. The first io
     /// operation sets it; the other kind of operation then fails.
     orientation: u8,
+    /// Bytes `ungetc` pushed back, in push order: the last byte pushed is
+    /// the first one a read hands out again, as the CRT stacks them.
+    pushback: Vec<u8>,
 }
 
 /// A file descriptor, as `_open` and `_fileno` hand out. 0, 1 and 2 are
@@ -159,6 +163,9 @@ enum Descriptor {
     PipeRead(u32),
     /// The write end of one.
     PipeWrite(u32),
+    /// `_open_osfhandle` made it: the state is a kernel object's, as the
+    /// CRT takes ownership of the handle it wraps.
+    Handle(u64),
 }
 
 /// An anonymous pipe's shared state: the bytes written and not yet read,
@@ -237,6 +244,7 @@ impl FileStreams {
                 eof: false,
                 error: false,
                 orientation: 0,
+                pushback: Vec::new(),
             },
         );
         Ok(file)
@@ -305,6 +313,7 @@ impl FileStreams {
                 eof: false,
                 error: false,
                 orientation: 0,
+                pushback: Vec::new(),
             },
         );
         Ok(file)
@@ -442,11 +451,13 @@ impl FileStreams {
     }
 
     /// The position of a stream: where its next read takes place, or its
-    /// next write unless it appends.
+    /// next write unless it appends, less the bytes ungetc stacked — the
+    /// position indicator steps back one for each byte pushed, never below
+    /// zero (ISO C 7.21.7.10).
     pub(super) fn tell(&self, file: u64) -> Result<u64, u32> {
         self.open
             .get(&file)
-            .map(|stream| stream.position)
+            .map(|stream| stream.position.saturating_sub(stream.pushback.len() as u64))
             .ok_or(EBADF)
     }
 
@@ -475,8 +486,10 @@ impl FileStreams {
         drive.drive_file(&stream.path).ok_or(EBADF)?;
         stream.position = target as u64;
         // A successful seek or fsetpos clears the end-of-file indicator
-        // (ISO C 7.21.9.2 and 7.21.9.3).
+        // (ISO C 7.21.9.2 and 7.21.9.3) and undoes the pushback, as a seek
+        // forgets the bytes ungetc stacked (ISO C 7.21.7.10).
         stream.eof = false;
+        stream.pushback.clear();
         Ok(())
     }
 
@@ -497,6 +510,11 @@ impl FileStreams {
         let mut at = usize::try_from(stream.position).map_or(data.len(), |at| at.min(data.len()));
         let start = at;
         let mut bytes = Vec::new();
+        // Bytes ungetc pushed come first, the last pushed first, and the
+        // position climbs back over them as they are consumed.
+        while bytes.len() < limit && !stream.pushback.is_empty() {
+            bytes.push(stream.pushback.pop().expect("pushback byte"));
+        }
         while bytes.len() < limit && at < data.len() {
             let mut byte = data[at];
             if stream.text {
@@ -520,6 +538,21 @@ impl FileStreams {
     /// Whether a descriptor number is open, for `_isatty`.
     pub(super) fn has_descriptor(&self, fd: u32) -> bool {
         self.descriptors.contains_key(&fd)
+    }
+
+    /// `ungetc`: one byte back onto the stream, the last pushed the first
+    /// re-read. The end-of-file indicator clears, as the standard says it
+    /// does. The CRT promises a single byte of pushback; this machine's
+    /// streams keep stacking, which the standard allows an implementation
+    /// to do.
+    pub(super) fn ungetc_byte(&mut self, file: u64, byte: u8) -> Result<(), u32> {
+        let stream = self.open.get_mut(&file).ok_or(EBADF)?;
+        if !stream.readable || !orient(stream, false) {
+            return Err(EBADF);
+        }
+        stream.pushback.push(byte);
+        stream.eof = false;
+        Ok(())
     }
 
     /// The descriptor of a stream, for `_fileno`: the one it already has,
@@ -802,6 +835,7 @@ impl FileStreams {
             eof: false,
             error: false,
             orientation: 0,
+            pushback: Vec::new(),
         };
         if append && let Some(data) = drive.drive_file(&stream.path) {
             stream.position = data.len() as u64;
@@ -821,6 +855,10 @@ impl FileStreams {
         if let Some(Descriptor::Shared(file)) = self.descriptors.get(&fd) {
             let file = *file;
             return self.read_bytes(drive, file, limit);
+        }
+        // A handle descriptor drains the kernel pipe it wraps.
+        if let Some(Descriptor::Handle(handle)) = self.descriptors.get(&fd) {
+            return handle_read(drive, *handle, limit);
         }
         let stream = self.descriptor_stream(fd)?;
         if !stream.readable {
@@ -861,6 +899,9 @@ impl FileStreams {
         if let Some(Descriptor::Shared(file)) = self.descriptors.get(&fd) {
             let file = *file;
             return self.write(drive, file, bytes);
+        }
+        if let Some(Descriptor::Handle(handle)) = self.descriptors.get(&fd) {
+            return handle_write(drive, *handle, bytes);
         }
         let path = self.descriptor_stream(fd)?.path.clone();
         let stream = self.descriptor_stream(fd)?;
@@ -917,6 +958,10 @@ impl FileStreams {
             self.seek(drive, file, i64::from(offset), origin)?;
             return self.tell(file).map(|position| position as i64);
         }
+        if matches!(self.descriptors.get(&fd), Some(Descriptor::Handle(_))) {
+            // A pipe has no position to move, as the CRT answers for one.
+            return Err(EINVAL);
+        }
         let path = self.descriptor_stream(fd)?.path.clone();
         let stream = self.descriptor_stream(fd)?;
         let base = match origin {
@@ -952,6 +997,10 @@ impl FileStreams {
             self.seek(drive, file, offset, origin)?;
             return self.tell(file).map(|position| position as i64);
         }
+        if matches!(self.descriptors.get(&fd), Some(Descriptor::Handle(_))) {
+            // A pipe has no position to move, as the CRT answers for one.
+            return Err(EINVAL);
+        }
         let path = self.descriptor_stream(fd)?.path.clone();
         let stream = self.descriptor_stream(fd)?;
         let base = match origin {
@@ -986,6 +1035,53 @@ impl FileStreams {
 
     /// `_close`. Closing a shared descriptor closes the underlying file, so
     /// the stream it came from fails afterwards, as it does in the CRT.
+    /// `_filbuf`: one byte read off the stream, as the legacy macro
+    /// support reads it — the streams here are unbuffered, so the byte is
+    /// the next one, or nothing at the end.
+    pub(super) fn read_one(&mut self, drive: &ObjectState, file: u64) -> Result<Option<u8>, u32> {
+        let bytes = self.read_bytes(drive, file, 1)?;
+        Ok(bytes.first().copied())
+    }
+
+    /// `_flsbuf`: one byte written onto the stream. `EOF` for a stream that
+    /// cannot take it, as the write failure answers.
+    pub(super) fn write_one(
+        &mut self,
+        drive: &mut ObjectState,
+        file: u64,
+        byte: u8,
+    ) -> Result<(), u32> {
+        self.write(drive, file, &[byte])
+    }
+
+    /// `_open_osfhandle`: the descriptor wrapping a kernel object handle,
+    /// which the CRT takes ownership of. `EBADF` for a handle that is no
+    /// pipe end — the only kernel object this interop knows so far.
+    pub(super) fn descriptor_open_handle(
+        &mut self,
+        drive: &ObjectState,
+        handle: u64,
+    ) -> Result<u32, u32> {
+        if !matches!(
+            drive.handles.get(&handle),
+            Some(GuestObject::Pipe { .. } | GuestObject::File(_))
+        ) {
+            return Err(EBADF);
+        }
+        self.insert_descriptor(Descriptor::Handle(handle))
+    }
+
+    /// `_get_osfhandle`: the kernel handle a descriptor wraps. The CRT owns
+    /// one for the `_open_osfhandle` descriptors only; its own streams and
+    /// files have no kernel object behind them, so the answer is -1 with
+    /// `EBADF` there, as the hosted runtime answers for a bad descriptor.
+    pub(super) fn descriptor_handle(&self, fd: u32) -> Result<u64, u32> {
+        match self.descriptors.get(&fd) {
+            Some(Descriptor::Handle(handle)) => Ok(*handle),
+            _ => Err(EBADF),
+        }
+    }
+
     pub(super) fn descriptor_close(
         &mut self,
         memory: &mut GuestMemory,
@@ -1017,6 +1113,18 @@ impl FileStreams {
                 } else if stream.temporary {
                     drive.drive_remove(&stream.path);
                 }
+                true
+            }
+            Some(Descriptor::Handle(handle)) => {
+                // The CRT owns the handle now: closing the descriptor closes
+                // it, and a write end closing marks the pipe's end of stream,
+                // as CloseHandle does.
+                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
+                    && *write
+                {
+                    state.lock().expect("pipe state").write_open = false;
+                }
+                drive.handles.remove(&handle);
                 true
             }
             Some(Descriptor::Alias(_)) => true,
@@ -1139,6 +1247,92 @@ impl FileStreams {
             return Ok(None);
         }
         Ok(Some(line))
+    }
+}
+
+/// The pipe cap of the kernel pipes, so a CRT write plays by the same
+/// rules as a `WriteFile` one.
+const PIPE_CAP: usize = 16 * 1024 * 1024;
+
+/// The access bits of a kernel file object, as CreateFile takes them.
+const FILE_READ: u32 = 0x8000_0000;
+const FILE_WRITE: u32 = 0x4000_0000;
+
+/// `_read` of a handle descriptor: the pipe drains, the oldest byte first.
+/// An empty pipe with its write end still open cannot block — the guest is
+/// the only thread that could fill it — so the read answers what is there,
+/// and the end-of-file emptiness is honest only once the write end closes.
+fn handle_read(drive: &super::ObjectState, handle: u64, limit: usize) -> Result<Vec<u8>, u32> {
+    match drive.handles.get(&handle) {
+        Some(GuestObject::Pipe { state, write }) => {
+            if *write {
+                return Err(EACCES);
+            }
+            let mut pipe = state.lock().expect("pipe state");
+            let mut bytes = Vec::new();
+            while bytes.len() < limit {
+                let Some(byte) = pipe.buffer.pop_front() else {
+                    break;
+                };
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+        Some(GuestObject::File(file)) => {
+            use std::sync::atomic::Ordering;
+            if file.access & FILE_READ == 0 {
+                return Err(EACCES);
+            }
+            let data = drive.drive_file(file.path()).ok_or(EBADF)?;
+            let position = file.position().load(Ordering::Relaxed);
+            let at = usize::try_from(position).map_or(data.len(), |at| at.min(data.len()));
+            let taken = limit.min(data.len() - at);
+            let bytes = data[at..at + taken].to_vec();
+            file.position()
+                .store(position + taken as u64, Ordering::Relaxed);
+            Ok(bytes)
+        }
+        _ => Err(EBADF),
+    }
+}
+
+/// `_write` of one: the pipe fills, within the same cap the kernel applies.
+fn handle_write(drive: &mut super::ObjectState, handle: u64, bytes: &[u8]) -> Result<(), u32> {
+    match drive.handles.get(&handle) {
+        Some(GuestObject::Pipe { state, write }) => {
+            if !*write {
+                return Err(EACCES);
+            }
+            let mut pipe = state.lock().expect("pipe state");
+            if pipe.buffer.len() + bytes.len() > PIPE_CAP {
+                return Err(ENOSPC);
+            }
+            pipe.buffer.extend(bytes);
+            Ok(())
+        }
+        Some(GuestObject::File(_)) => {
+            use std::sync::atomic::Ordering;
+            // The object lookup ends before the drive write, which borrows
+            // the state again: the path and the position cell are the file's.
+            let Some(GuestObject::File(file)) = drive.handles.get(&handle) else {
+                return Err(EBADF);
+            };
+            if file.access & FILE_WRITE == 0 {
+                return Err(EACCES);
+            }
+            let path = file.path().to_owned();
+            let cell = std::sync::Arc::clone(file.position());
+            let position = cell.load(Ordering::Relaxed);
+            if !bytes.is_empty() {
+                let written = drive.drive_write(&path, position, bytes).ok_or(EBADF)?;
+                if !written {
+                    return Err(ENOSPC);
+                }
+            }
+            cell.store(position + bytes.len() as u64, Ordering::Relaxed);
+            Ok(())
+        }
+        _ => Err(EBADF),
     }
 }
 

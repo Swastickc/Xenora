@@ -36,6 +36,8 @@ const IMPORTS: &[(&str, &str)] = &[
     (RUNTIME, "_cexit"),
     (KERNEL32, "CreateEventW"),
     (KERNEL32, "SetLastError"),
+    (UCRT, "_onexit"),
+    ("msvcrt.dll", "_onexit"),
 ];
 /// The same imports as a program built with mingw-w64 names the three: by the
 /// runtime API set.
@@ -173,6 +175,29 @@ fn exit_runs_registered_functions_most_recent_first_then_ends_the_process() {
         assert_eq!(guest.u64_at(LOG), 321, "last registered runs first");
         assert_eq!(guest.state.exit_status(), Some(0x1234_5678));
     }
+}
+
+#[test]
+fn onexit_registers_in_the_same_list_and_answers_the_function() {
+    let mut guest = guest();
+    // `_onexit` answers the function pointer itself where `atexit` answers a
+    // status (Microsoft Learn, "_onexit, _onexit_m"), under both the modern
+    // and the legacy spelling.
+    assert_eq!(
+        guest.call("_onexit", &[routine(APPEND_1)]),
+        routine(APPEND_1)
+    );
+    // A zero function fails with a zero answer.
+    assert_eq!(guest.call("_onexit", &[0]), 0);
+    register(&mut guest, "atexit", APPEND_2);
+    assert_eq!(
+        guest.call("_onexit", &[routine(APPEND_3)]),
+        routine(APPEND_3)
+    );
+    let (_, exit) = guest.run("exit", &[9]);
+    assert_eq!(exit, ExitReason::ProcessExit(9));
+    // One list in reverse order, whichever spelling registered the function.
+    assert_eq!(guest.u64_at(LOG), 321);
 }
 
 #[test]

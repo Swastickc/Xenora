@@ -108,6 +108,14 @@ service kernel32.dll CloseHandle(object: handle) -> bool32
     ref handleapi.h CloseHandle
     test thread_handles_check_access_and_are_rejected_once_closed
 
+service kernel32.dll CreatePipe(read_end: ptr, write_end: ptr, attributes: ptr, size: u32) -> bool32
+    handler create_pipe
+    status implemented
+    fails ERROR_NOT_SUPPORTED for security attributes, ERROR_INVALID_PARAMETER for a null output, ERROR_NOACCESS for memory it cannot write
+    ref namedpipeapi.h CreatePipe
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+
 service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
     handler get_system_time_as_file_time
     status implemented
@@ -537,6 +545,51 @@ service ucrtbase.dll _lseeki64(fd: i32, offset: u64, origin: i32) -> u64
     fails -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start
     ref io.h _lseeki64
     test legacy_descriptor_seek_and_tell_positions
+
+service ucrtbase.dll _open_osfhandle(osfhandle: handle, flags: i32) -> i32
+    handler _open_osfhandle
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one
+    ref io.h _open_osfhandle
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+service ucrtbase.dll _get_osfhandle(fd: i32) -> u64
+    handler _get_osfhandle
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included
+    ref io.h _get_osfhandle
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+service ucrtbase.dll _filbuf(stream: ptr) -> i32
+    handler _filbuf
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here
+    ref stdio.h _filbuf
+    test filbuf_and_flsbuf_move_single_bytes
+
+service ucrtbase.dll _flsbuf(c: i32, stream: ptr) -> i32
+    handler _flsbuf
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with EBADF for a stream that is not open and writable
+    ref stdio.h _flsbuf
+    test filbuf_and_flsbuf_move_single_bytes
+
+service ucrtbase.dll ungetc(c: i32, stream: ptr) -> i32
+    handler ungetc
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream
+    ref stdio.h ungetc
+    test ungetc_stacks_bytes_and_steps_the_position_back
 
 service ucrtbase.dll _telli64(fd: i32) -> u64
     handler _telli64
@@ -2007,25 +2060,26 @@ service msvcrt.dll _amsg_exit(code: i32) -> void
     test legacy_amsg_exit_ends_the_process
 
 # Queries about the hosted process environment and the console identity.
-# The process environment is empty: no host variable passes through, so a
-# query never finds its variable, which is the exact behavior of an empty
-# environment rather than a stub.
+# The process environment starts empty: no host variable passes through.
+# SetEnvironmentVariable adds to it, and a query answers with the documented
+# size semantics, or misses with ERROR_ENVVAR_NOT_FOUND when the variable is
+# undefined - the exact behavior of an unset variable rather than a stub.
 
 service kernel32.dll GetEnvironmentVariableA(name: ptr, buffer: ptr, size: u32) -> u32
-    handler environment_variable
+    handler environment_variable_narrow
     status implemented
     alias api-ms-win-core-processenvironment-l1-1-0.dll
-    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    fails 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty
     ref Microsoft Learn, GetEnvironmentVariable
-    test environment_variables_are_never_found_in_the_empty_environment
+    test environment_variables_round_trip_and_miss_the_undefined_ones
 
 service kernel32.dll GetEnvironmentVariableW(name: ptr, buffer: ptr, size: u32) -> u32
-    handler environment_variable
+    handler environment_variable_wide
     status implemented
     alias api-ms-win-core-processenvironment-l1-1-0.dll
-    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    fails 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty
     ref Microsoft Learn, GetEnvironmentVariable
-    test environment_variables_are_never_found_in_the_empty_environment
+    test environment_variables_round_trip_and_miss_the_undefined_ones
 
 service kernel32.dll GetConsoleWindow() -> handle
     handler console_window

@@ -11,8 +11,8 @@ use super::{
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 const FILE_API: &str = "api-ms-win-core-file-l1-1-0.dll";
 const CRT_FILESYSTEM_API: &str = "api-ms-win-crt-filesystem-l1-1-0.dll";
@@ -41,6 +41,18 @@ pub(super) struct OpenFile {
     open_access: u32,
     pub(super) access: u32,
     share: u32,
+}
+
+impl OpenFile {
+    /// The CRT interop reads and writes the object through these, under the
+    /// same serialization the object table gives the kernel calls.
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(super) fn position(&self) -> &Arc<AtomicU64> {
+        &self.position
+    }
 }
 
 fn read_guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
@@ -1758,54 +1770,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.alias(CRT_FILESYSTEM_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }
-
-    let pipes = Arc::clone(state);
-    registry.register(KERNEL32, "CreatePipe", move |args, cpu, memory| {
-        // A size hint of any value is a hint, but the security attributes are
-        // meaningless inside the guest: there is no other process to inherit to.
-        if args.r8 != 0 {
-            return pipes.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
-        }
-        if args.rcx == 0 || args.rdx == 0 {
-            return pipes.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
-        }
-        if memory.check_write(args.rcx, 8).is_err() || memory.check_write(args.rdx, 8).is_err() {
-            return pipes.fail(cpu.gs_base, ERROR_NOACCESS, 0);
-        }
-        let state_shared = Arc::new(Mutex::new(PipeState {
-            write_open: true,
-            ..PipeState::default()
-        }));
-        let mut objects = pipes.objects.lock().expect("guest object state");
-        let Some(read_end) = objects.next_handle() else {
-            return pipes.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
-        };
-        objects.insert_handle(
-            read_end,
-            GuestObject::Pipe {
-                state: Arc::clone(&state_shared),
-                write: false,
-            },
-        );
-        let Some(write_end) = objects.next_handle() else {
-            objects.handles.remove(&read_end);
-            return pipes.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
-        };
-        objects.insert_handle(
-            write_end,
-            GuestObject::Pipe {
-                state: state_shared,
-                write: true,
-            },
-        );
-        memory
-            .write_u64(args.rcx, read_end)
-            .map_err(ExitReason::MemoryFault)?;
-        memory
-            .write_u64(args.rdx, write_end)
-            .map_err(ExitReason::MemoryFault)?;
-        Ok(1)
-    });
 
     let peek = Arc::clone(state);
     registry.register(KERNEL32, "PeekNamedPipe", move |args, cpu, memory| {

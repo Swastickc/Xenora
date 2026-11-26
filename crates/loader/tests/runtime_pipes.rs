@@ -14,6 +14,7 @@ mod support;
 use support::{Guest, SCRATCH};
 
 const KERNEL32: &str = "kernel32.dll";
+const UCRTBASE: &str = "ucrtbase.dll";
 
 const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "GetLastError"),
@@ -22,6 +23,12 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "WriteFile"),
     (KERNEL32, "CloseHandle"),
     (KERNEL32, "PeekNamedPipe"),
+    (KERNEL32, "CreateFileA"),
+    (UCRTBASE, "_open_osfhandle"),
+    (UCRTBASE, "_get_osfhandle"),
+    (UCRTBASE, "_read"),
+    (UCRTBASE, "_write"),
+    (UCRTBASE, "_close"),
 ];
 
 const READ_END: u64 = SCRATCH;
@@ -114,4 +121,59 @@ fn peek_reports_without_taking() {
     );
     assert_eq!(guest.call("CloseHandle", &[read_end]), 1);
     assert_eq!(guest.call("CloseHandle", &[write_end]), 1);
+}
+
+/// `_open_osfhandle` of a kernel file object: the CRT descriptor reads and
+/// writes the same bytes at the same position the kernel handle tracks, as
+/// spawn redirection needs when a file stands in for a pipe.
+#[test]
+fn osfhandle_wraps_a_kernel_file() {
+    const NAME: u64 = SCRATCH + 0x400;
+    const COUNT_AT: u64 = SCRATCH + 0x700;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    // A file with content the kernel wrote.
+    guest.memory.write_bytes(NAME, b"inter.bin\0").unwrap();
+    let handle = guest.call("CreateFileA", &[NAME, 0x4000_0000, 3, 0, 2, 0, 0]);
+    assert_ne!(handle, u64::MAX);
+    guest.memory.write_bytes(BUFFER, b"interop!").unwrap();
+    assert_eq!(
+        guest.call("WriteFile", &[handle, BUFFER, 8, COUNT_AT, 0]),
+        1
+    );
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    // Reopen for reading and writing and wrap the handle as a descriptor.
+    let handle = guest.call("CreateFileA", &[NAME, 0xC000_0000, 3, 0, 3, 0, 0]);
+    assert_ne!(handle, u64::MAX);
+    let fd = guest.call("_open_osfhandle", &[handle, 0]) & 0xFFFF_FFFF;
+    assert_ne!(fd as i32, -1);
+    assert_eq!(guest.call("_get_osfhandle", &[fd]), handle);
+    // Two bytes through the CRT, then the kernel reads on from the shared
+    // position — one position, both worlds.
+    assert_eq!(guest.call("_read", &[fd, BUFFER, 2]) & 0xFFFF_FFFF, 2);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(BUFFER, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"in");
+    assert_eq!(guest.call("ReadFile", &[handle, BUFFER, 3, COUNT_AT, 0]), 1);
+    assert_eq!(guest.u32_at(COUNT_AT), 3);
+    guest.memory.read_bytes(BUFFER, &mut verify).unwrap();
+    assert_eq!(&verify[..3], b"ter");
+    // A CRT write lands where the kernel read ended, and the kernel
+    // position climbs with it: one byte remains of the file afterwards.
+    guest.memory.write_bytes(BUFFER, b"XY").unwrap();
+    assert_eq!(guest.call("_write", &[fd, BUFFER, 2]) & 0xFFFF_FFFF, 2);
+    assert_eq!(guest.call("ReadFile", &[handle, BUFFER, 8, COUNT_AT, 0]), 1);
+    assert_eq!(guest.u32_at(COUNT_AT), 1);
+    guest.memory.read_bytes(BUFFER, &mut verify).unwrap();
+    assert_eq!(&verify[..1], b"!");
+    // The CRT owns the handle now: closing the descriptor closes it.
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 0);
+    // And the content is what both worlds wrote, in order.
+    let check = guest.call("CreateFileA", &[NAME, 0x8000_0000, 3, 0, 3, 0, 0]);
+    assert_ne!(check, u64::MAX);
+    assert_eq!(guest.call("ReadFile", &[check, BUFFER, 8, COUNT_AT, 0]), 1);
+    assert_eq!(guest.u32_at(COUNT_AT), 8);
+    guest.memory.read_bytes(BUFFER, &mut verify).unwrap();
+    assert_eq!(&verify, b"interXY!");
+    assert_eq!(guest.call("CloseHandle", &[check]), 1);
 }

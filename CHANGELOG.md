@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- A narrow host-side Metal acceleration-structure probe now performs runtime ray-tracing capability detection and builds one original single-triangle primitive acceleration structure through public classic Metal APIs, with explicit scratch/input lifetime extension and command-buffer completion validation. The local Apple Silicon probe passes repeated construction, but it does not test ray intersections, rendering, performance, refit/compaction or console compatibility.
 - The CRT spawn family refuses honestly: `_spawnve` and `_wspawnve` answer minus one with ENOSYS in errno across ucrtbase, msvcrt and the process API set, since the machine is one process and cannot host a child. Local in-module tests cover the refusal shape.
 - `GetSecurityInfo` answers the owner and group of any object as the machine's one identity and honestly refuses access-control-list queries (ERROR_NOT_SUPPORTED in the return value), since the machine models no ACLs. Local in-module tests cover both directions.
 - `getservbyname` resolves service names from the standard Internet assignment table (http, https, ssh, ftp, smtp, domain, and others) with ports in network byte order and misses unknown services honestly. Local in-module tests cover the resolution and the miss.

@@ -804,6 +804,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_errno(registry);
     crt::register_conversions(registry);
     crt::register_conio(registry);
+    crt::register_spawn_refusal(registry);
     crt::register_utilities(registry);
     crt_callbacks::register(registry, &state);
     environment::register(registry, &state);
@@ -814,6 +815,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     advapi::register(registry, &state);
     advapi::register_tokens(registry, &state);
     advapi::register_safer(registry, &state);
+    advapi::register_security_query(registry, &state);
     // The legacy CRT's printf family, which the variadic calling convention
     // keeps out of the typed table (#459).
     crt_streams::register_legacy(registry, &state);

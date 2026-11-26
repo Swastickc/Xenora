@@ -23,12 +23,37 @@ const DELAY_DESCRIPTOR_LEN: u32 = 32;
 const DELAY_RVA_BASED: u32 = 1;
 const ORDINAL_FLAG: u64 = 1 << 63;
 
+/// Whether an import or service key is a symbolic name or a numeric ordinal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ImportKind {
+    Name,
+    Ordinal,
+}
+
+impl ImportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Ordinal => "ordinal",
+        }
+    }
+}
+
 /// How an import names its target. A symbol that happens to be spelled like an
 /// ordinal is still a name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ImportName {
     Name(String),
     Ordinal(u16),
+}
+
+impl ImportName {
+    pub fn kind(&self) -> ImportKind {
+        match self {
+            Self::Name(_) => ImportKind::Name,
+            Self::Ordinal(_) => ImportKind::Ordinal,
+        }
+    }
 }
 
 impl fmt::Display for ImportName {

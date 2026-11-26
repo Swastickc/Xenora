@@ -265,6 +265,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     register_address_conversion(registry, state);
     register_loopback(registry, state);
     register_socket_names(registry, state);
+    register_service_lookup(registry, state);
     register_socket_options(registry, state);
     register_event_select(registry, state);
     register_ioctl_and_reverse(registry, state);
@@ -834,6 +835,110 @@ fn register_ioctl_and_reverse(registry: &mut ImportRegistry, state: &Arc<Service
                     Ok(0)
                 }
             }
+        },
+    );
+}
+
+fn register_service_lookup(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    // getservbyname resolves a service name and protocol to its port from
+    // the services database. The machine carries the standard Internet
+    // assignment table the way Windows ships system32\\drivers\\etc\\services:
+    // a fixed, documented list. An unknown name is an honest null. busybox
+    // binds the import for its networking applets; callers that never look
+    // a service up are undisturbed. Ports leave in network byte order, per
+    // the documented contract.
+    let lookup = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "getservbyname",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            use crate::memory::PROCESS_HEAP;
+            const SERVICES: [(&[u8], u16, &[u8]); 10] = [
+                (b"ftp\0", 21, b"tcp\0"),
+                (b"ssh\0", 22, b"tcp\0"),
+                (b"telnet\0", 23, b"tcp\0"),
+                (b"smtp\0", 25, b"tcp\0"),
+                (b"domain\0", 53, b"tcp\0"),
+                (b"domain\0", 53, b"udp\0"),
+                (b"http\0", 80, b"tcp\0"),
+                (b"ntp\0", 123, b"udp\0"),
+                (b"https\0", 443, b"tcp\0"),
+                (b"bootps\0", 67, b"udp\0"),
+            ];
+            let fail = |error: u32| {
+                let _ = lookup.fail(cpu.gs_base, error, 0);
+                Ok(0)
+            };
+            if lookup.winsock.lock().expect("guest Winsock state").refs == 0 {
+                return fail(WSANOTINITIALISED);
+            }
+            let name_ptr = args.rcx;
+            let proto_ptr = args.rdx;
+            if name_ptr == 0 {
+                return fail(WSAEFAULT);
+            }
+            // Read the name byte by byte, case-insensitively compared.
+            let mut name = Vec::new();
+            for offset in 0..32u64 {
+                let mut one = [0u8; 1];
+                if memory.read_bytes(name_ptr + offset, &mut one).is_err() {
+                    return fail(WSAEFAULT);
+                }
+                if one[0] == 0 {
+                    break;
+                }
+                name.push(one[0].to_ascii_lowercase());
+            }
+            let mut proto = Vec::new();
+            if proto_ptr != 0 {
+                for offset in 0..8u64 {
+                    let mut one = [0u8; 1];
+                    if memory.read_bytes(proto_ptr + offset, &mut one).is_err() {
+                        return fail(WSAEFAULT);
+                    }
+                    if one[0] == 0 {
+                        break;
+                    }
+                    proto.push(one[0].to_ascii_lowercase());
+                }
+            }
+            let found = SERVICES.iter().find(|(service, _, transport)| {
+                let service_name: Vec<u8> = service
+                    .iter()
+                    .take_while(|byte| **byte != 0)
+                    .copied()
+                    .collect();
+                let transport_name: Vec<u8> = transport
+                    .iter()
+                    .take_while(|byte| **byte != 0)
+                    .copied()
+                    .collect();
+                service_name == name && (proto.is_empty() || transport_name == proto)
+            });
+            let Some((service, port, transport)) = found else {
+                return fail(11001); // WSANO_DATA: no such service is known.
+            };
+            // servent: name ptr, aliases ptr, port (u16 at +16), proto ptr (+24).
+            let base = match memory.map_heap_allocation(PROCESS_HEAP, 80) {
+                Ok(base) => base,
+                Err(_) => return fail(WSAENOBUFS),
+            };
+            let write = memory.write_bytes(base + 32, service);
+            if write.is_err() {
+                return fail(WSAEFAULT);
+            }
+            if memory.write_bytes(base + 48, transport).is_err() {
+                return fail(WSAEFAULT);
+            }
+            if memory.write_u64(base, base + 32).is_err() // s_name
+                || memory.write_u64(base + 8, 0).is_err() // s_aliases: none
+                || memory.write_u16(base + 16, port.to_be()).is_err() // network order
+                || memory.write_u64(base + 24, base + 48).is_err()
+            {
+                return fail(WSAEFAULT);
+            }
+            Ok(base)
         },
     );
 }
@@ -2589,4 +2694,62 @@ fn event_select_posts_and_enumeration_drains() {
     );
     let final_bits = memory.read_u32(0x1300).unwrap();
     assert_ne!(final_bits & FD_CLOSE, 0, "close posted");
+}
+
+#[cfg(test)]
+#[test]
+fn servbyname_resolves_the_standard_ports_and_misses_honestly() {
+    use super::ServicesState;
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::{GuestMemory, MemoryPermissions};
+    use crate::services::MockClock;
+    use std::sync::Arc;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, module: &str, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(module, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+
+    // Winsock must be started before the lookup answers.
+    assert_eq!(call(&mut memory, MODULE, "WSAStartup", &[0x202, 0x1800]), 0);
+    memory.write_bytes(0x1100, b"http\0").unwrap();
+    memory.write_bytes(0x1120, b"tcp\0").unwrap();
+    let servent = call(&mut memory, MODULE, "getservbyname", &[0x1100, 0x1120]);
+    assert_ne!(servent, 0, "http/tcp is in the assignment table");
+    let port = memory.read_u16(servent + 16).unwrap();
+    assert_eq!(port, 80u16.to_be(), "the port leaves in network byte order");
+    let name_ptr = memory.read_u64(servent).unwrap();
+    let mut name = [0u8; 5];
+    memory.read_bytes(name_ptr, &mut name).unwrap();
+    assert_eq!(&name[..], b"http\0");
+    // A null protocol accepts the first matching entry.
+    let servent = call(&mut memory, MODULE, "getservbyname", &[0x1100, 0]);
+    assert_ne!(servent, 0);
+    // An unknown service is the honest miss: null, not an invention.
+    memory.write_bytes(0x1100, b"nosuchsvc\0").unwrap();
+    assert_eq!(call(&mut memory, MODULE, "getservbyname", &[0x1100, 0]), 0);
 }

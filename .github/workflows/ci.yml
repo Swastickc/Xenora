@@ -52,6 +52,7 @@ jobs:
           python3 crates/isa/generate_semantics.py --check
           python3 scripts/audit/semantic_coverage.py --check
           python3 scripts/audit/status.py --check
+          python3 scripts/audit/runtime_inventory.py --check
           # The generated status check must not depend on the host locale encoding.
           LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 python3 scripts/audit/status.py --check
           for fixture in x2 x3 x4; do

@@ -664,7 +664,7 @@ pub static SERVICES: [ServiceMetadata; 224] = [
         parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "buffer", kind: "ptr" }],
         result: "i32",
         status: ServiceStatus::Partial,
-        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "api-ms-win-crt-filesystem-l1-1-0.dll", "msvcrt.dll"],
         failure: "-1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none",
         reference: "sys/stat.h _fstat64",
         tests: &["legacy_fstat64_fills_the_legacy_structure"],

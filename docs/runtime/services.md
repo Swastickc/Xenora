@@ -13,7 +13,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | Partial | 145 |
 | Stub | 2 |
 | Conformance-tested through guest dispatch | 224 |
-| API-set aliases (not services) | 259 |
+| API-set aliases (not services) | 260 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |

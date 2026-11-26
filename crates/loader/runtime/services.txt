@@ -540,6 +540,7 @@ service ucrtbase.dll _fstat64(fd: i32, buffer: ptr) -> i32
     handler _fstat64
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
     alias msvcrt.dll
     fails -1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none
     ref sys/stat.h _fstat64

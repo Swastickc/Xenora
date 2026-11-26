@@ -1369,6 +1369,20 @@ impl StandardStreams {
         })
     }
 
+    /// `ungetc`. The byte pushed, or -1 with `EBADF` for a stream that is
+    /// not open and readable in the byte orientation. EOF in is EOF out
+    /// with nothing done, as ISO C 7.21.7.10 says.
+    pub(super) fn ungetc(&mut self, c: i32, file: u64) -> Outcome<i32> {
+        if c == -1 {
+            return Ok(Ok(-1));
+        }
+        let byte = c as u8;
+        Ok(match self.opened.ungetc_byte(file, byte) {
+            std::result::Result::Ok(()) => Ok(i32::from(byte)),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
     /// `_access`. 0 when the name is a file or a directory; the files the
     /// drive holds are always readable and writable, so the mode only
     /// decides the answer for what is missing. -1 with `ENOENT` then, or

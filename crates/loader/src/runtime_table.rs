@@ -660,6 +660,17 @@ pub static SERVICES: [ServiceMetadata; 236] = [
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
+        symbol: "ungetc",
+        parameters: &[Parameter { name: "c", kind: "i32" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream",
+        reference: "stdio.h ungetc",
+        tests: &["ungetc_stacks_bytes_and_steps_the_position_back"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
         symbol: "_telli64",
         parameters: &[Parameter { name: "fd", kind: "i32" }],
         result: "u64",
@@ -3141,6 +3152,15 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a2 = call.i32(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::_lseeki64(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "ungetc", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::ungetc(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

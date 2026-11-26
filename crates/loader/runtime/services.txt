@@ -538,6 +538,15 @@ service ucrtbase.dll _lseeki64(fd: i32, offset: u64, origin: i32) -> u64
     ref io.h _lseeki64
     test legacy_descriptor_seek_and_tell_positions
 
+service ucrtbase.dll ungetc(c: i32, stream: ptr) -> i32
+    handler ungetc
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream
+    ref stdio.h ungetc
+    test ungetc_stacks_bytes_and_steps_the_position_back
+
 service ucrtbase.dll _telli64(fd: i32) -> u64
     handler _telli64
     status implemented

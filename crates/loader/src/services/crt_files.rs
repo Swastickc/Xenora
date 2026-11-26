@@ -142,6 +142,9 @@ struct FileStream {
     /// The C orientation: 0 unoriented, 1 byte, 2 wide. The first io
     /// operation sets it; the other kind of operation then fails.
     orientation: u8,
+    /// Bytes `ungetc` pushed back, in push order: the last byte pushed is
+    /// the first one a read hands out again, as the CRT stacks them.
+    pushback: Vec<u8>,
 }
 
 /// A file descriptor, as `_open` and `_fileno` hand out. 0, 1 and 2 are
@@ -237,6 +240,7 @@ impl FileStreams {
                 eof: false,
                 error: false,
                 orientation: 0,
+                pushback: Vec::new(),
             },
         );
         Ok(file)
@@ -305,6 +309,7 @@ impl FileStreams {
                 eof: false,
                 error: false,
                 orientation: 0,
+                pushback: Vec::new(),
             },
         );
         Ok(file)
@@ -442,11 +447,13 @@ impl FileStreams {
     }
 
     /// The position of a stream: where its next read takes place, or its
-    /// next write unless it appends.
+    /// next write unless it appends, less the bytes ungetc stacked — the
+    /// position indicator steps back one for each byte pushed, never below
+    /// zero (ISO C 7.21.7.10).
     pub(super) fn tell(&self, file: u64) -> Result<u64, u32> {
         self.open
             .get(&file)
-            .map(|stream| stream.position)
+            .map(|stream| stream.position.saturating_sub(stream.pushback.len() as u64))
             .ok_or(EBADF)
     }
 
@@ -475,8 +482,10 @@ impl FileStreams {
         drive.drive_file(&stream.path).ok_or(EBADF)?;
         stream.position = target as u64;
         // A successful seek or fsetpos clears the end-of-file indicator
-        // (ISO C 7.21.9.2 and 7.21.9.3).
+        // (ISO C 7.21.9.2 and 7.21.9.3) and undoes the pushback, as a seek
+        // forgets the bytes ungetc stacked (ISO C 7.21.7.10).
         stream.eof = false;
+        stream.pushback.clear();
         Ok(())
     }
 
@@ -497,6 +506,11 @@ impl FileStreams {
         let mut at = usize::try_from(stream.position).map_or(data.len(), |at| at.min(data.len()));
         let start = at;
         let mut bytes = Vec::new();
+        // Bytes ungetc pushed come first, the last pushed first, and the
+        // position climbs back over them as they are consumed.
+        while bytes.len() < limit && !stream.pushback.is_empty() {
+            bytes.push(stream.pushback.pop().expect("pushback byte"));
+        }
         while bytes.len() < limit && at < data.len() {
             let mut byte = data[at];
             if stream.text {
@@ -520,6 +534,21 @@ impl FileStreams {
     /// Whether a descriptor number is open, for `_isatty`.
     pub(super) fn has_descriptor(&self, fd: u32) -> bool {
         self.descriptors.contains_key(&fd)
+    }
+
+    /// `ungetc`: one byte back onto the stream, the last pushed the first
+    /// re-read. The end-of-file indicator clears, as the standard says it
+    /// does. The CRT promises a single byte of pushback; this machine's
+    /// streams keep stacking, which the standard allows an implementation
+    /// to do.
+    pub(super) fn ungetc_byte(&mut self, file: u64, byte: u8) -> Result<(), u32> {
+        let stream = self.open.get_mut(&file).ok_or(EBADF)?;
+        if !stream.readable || !orient(stream, false) {
+            return Err(EBADF);
+        }
+        stream.pushback.push(byte);
+        stream.eof = false;
+        Ok(())
     }
 
     /// The descriptor of a stream, for `_fileno`: the one it already has,
@@ -802,6 +831,7 @@ impl FileStreams {
             eof: false,
             error: false,
             orientation: 0,
+            pushback: Vec::new(),
         };
         if append && let Some(data) = drive.drive_file(&stream.path) {
             stream.position = data.len() as u64;

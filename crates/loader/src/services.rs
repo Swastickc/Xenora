@@ -1834,6 +1834,11 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn ungetc(context: &mut ServiceContext<'_>, c: i32, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().ungetc(c, stream);
+        or_errno(context, outcome)
+    }
+
     pub fn _access(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let outcome = {
             let streams = context.state.crt_streams();

@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 236 |
-| Generated adapters | 236 |
-| Unique handler implementations | 226 |
+| Services with a declared ABI | 231 |
+| Generated adapters | 231 |
+| Unique handler implementations | 221 |
 | Implemented | 80 |
-| Partial | 154 |
+| Partial | 149 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 236 |
-| API-set aliases (not services) | 282 |
+| Conformance-tested through guest dispatch | 231 |
+| API-set aliases (not services) | 273 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -43,11 +43,6 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fputs` | `(text: ptr, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fflush` | `(stream: ptr) -> i32` | partial | stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!setvbuf` | `(stream: ptr, buffer: ptr, mode: i32, size: u64) -> i32` | partial | -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream |
-| `ucrtbase.dll!fread` | `(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64` | partial | 0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once |
-| `ucrtbase.dll!fgetc` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream or EBADF for one open for writing |
-| `ucrtbase.dll!fseek` | `(stream: ptr, offset: i32, origin: i32) -> i32` | partial | -1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream |
-| `ucrtbase.dll!ftell` | `(stream: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or a position past what long holds; stops the guest for a standard stream |
-| `ucrtbase.dll!rewind` | `(stream: ptr) -> void` | partial | errno EINVAL for a null stream; stops the guest for a standard stream |
 | `ucrtbase.dll!fopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM |
 | `ucrtbase.dll!fclose` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream |
 | `ucrtbase.dll!fgets` | `(buffer: ptr, count: i32, stream: ptr) -> ptr` | partial | null at end of file; null with errno EINVAL or EBADF; stops the guest for a pointer that is no stream |
@@ -77,6 +72,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_fileno` | `(stream: ptr) -> i32` | implemented | -1 with errno EINVAL for a null stream; stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!_isatty` | `(fd: i32) -> i32` | implemented | 0 always, as nothing here is a character device; errno EBADF for a descriptor that is not open |
 | `ucrtbase.dll!_lseeki64` | `(fd: i32, offset: u64, origin: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start |
+| `ucrtbase.dll!ungetc` | `(c: i32, stream: ptr) -> i32` | implemented | EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream |
 | `ucrtbase.dll!_telli64` | `(fd: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one |
 | `ucrtbase.dll!_setmode` | `(fd: i32, mode: i32) -> i32` | partial | -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented |
 | `ucrtbase.dll!_dup` | `(fd: i32) -> i32` | implemented | -1 with errno EBADF for a descriptor that is not open, EMFILE at 8192 descriptors |
@@ -253,4 +249,3 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!GetConsoleTitleW` | `(buffer: ptr, size: u32) -> u32` | partial | 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size; the answer is the title length even when the buffer holds less, Xenora's documented choice |
 | `kernel32.dll!SetConsoleTitleA` | `(title: ptr) -> bool32` | partial | FALSE with ERROR_INVALID_PARAMETER for a null title |
 | `kernel32.dll!GetConsoleTitleA` | `(buffer: ptr, size: u32) -> u32` | partial | 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size, the same documented length answer as the wide form |
-| `ucrtbase.dll!_getpid` | `() -> i32` | implemented | never |

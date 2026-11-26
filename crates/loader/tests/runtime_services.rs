@@ -7261,3 +7261,172 @@ fn synthetic_lifecycle_queue_teardown_is_terminal_only_with_open_handles() {
         assert_eq!(call(0, &[]).0, expected);
     }
 }
+||||||| parent of 0b6eb6b0 (crt: ungetc pushes bytes back onto a stream)
+
+/// `ungetc`: the pushed bytes come back last-pushed-first through the shared
+/// descriptor, the end-of-file indicator clears, and EOF in is EOF out with
+/// nothing done (ISO C 7.21.7.10).
+#[test]
+fn ungetc_stacks_bytes_and_steps_the_position_back() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "ungetc.bin", b"abcdef");
+    guest.memory.write_bytes(NAME, b"ungetc.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    let fd = guest.call("_fileno", &[file]) & 0xFFFF_FFFF;
+    let buf = TEXT + 0x200;
+    // Two bytes in, then two pushes come back last-pushed-first and the
+    // file resumes where it stopped.
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ab");
+    assert_eq!(
+        guest.call("ungetc", &[b'X' as u64, file]) & 0xFFFF_FFFF,
+        b'X' as u64
+    );
+    assert_eq!(
+        guest.call("ungetc", &[b'Y' as u64, file]) & 0xFFFF_FFFF,
+        b'Y' as u64
+    );
+    assert_eq!(guest.call("_read", &[fd, buf, 4]) & 0xFFFF_FFFF, 4);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..4], b"YXcd");
+    // EOF in is EOF out and stacks nothing.
+    assert_eq!(
+        guest.call("ungetc", &[0xFFFF_FFFF, file]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ef");
+    // The end-of-file indicator is a stdio notion: a stdio read at the end
+    // sets it, and a push clears it again.
+    assert!(line(&mut guest, file, 8).is_none(), "at the end");
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("ungetc", &[b'Z' as u64, file]) & 0xFFFF_FFFF,
+        b'Z' as u64
+    );
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[fd, buf, 1]) & 0xFFFF_FFFF, 1);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..1], b"Z");
+    // A push on a stream that is not open is EOF with EBADF.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("ungetc", &[b'Q' as u64, TEXT]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+}
+
+#[test]
+fn synthetic_lifecycle_queue_teardown_is_terminal_only_with_open_handles() {
+    use xenora_loader::services::gaming_runtime::register_synthetic_lifecycle;
+    let names = [
+        "XGameRuntimeInitialize",
+        "XGameRuntimeUninitialize",
+        "XTaskQueueCreate",
+        "XTaskQueueCloseHandle",
+    ];
+    for close_before_teardown in [true, false] {
+        let imports: Vec<_> = names
+            .iter()
+            .map(|name| ("xgameruntime.dll", Symbol::Name(name)))
+            .collect();
+        let image = build(&imports);
+        let pe = ParsedPe::parse(&image.bytes).unwrap();
+        let mut memory = pe.load_into_memory(&image.bytes).unwrap().memory;
+        memory
+            .map_region(SCRATCH, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+            .map_region(STACK, 0x1000, MemoryPermissions::READ_WRITE)
+        let (mut registry, _, state) = standard_with_state(0);
+        register_synthetic_lifecycle(&mut registry, state);
+        assert_eq!(
+            registry
+                .bind_imports(&pe, &image.bytes, BASE, &mut memory)
+                .unwrap(),
+            4
+        );
+        let mut engine = DbtEngine::new(256 * 1024).unwrap();
+        engine.set_import_registry(registry);
+        let mut call = |index: u64, args: &[u64]| {
+            let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index, STACK_TOP);
+            for (reg, value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+                .into_iter()
+                .zip(args)
+            {
+                cpu.set(reg, *value);
+            }
+            assert_eq!(
+                engine.run(&mut cpu, &mut memory, 20).exit_reason,
+                ExitReason::Halt
+            );
+            (cpu.get(Register::Rax), memory.read_u64(SCRATCH).unwrap())
+        };
+        assert_eq!(call(0, &[]).0, 0);
+        let (status, handle) = call(2, &[0, 0, SCRATCH]);
+        assert_eq!(status, 0);
+        assert_ne!(handle, 0);
+        if close_before_teardown {
+            call(3, &[handle]);
+        }
+        call(1, &[]);
+        let expected = if close_before_teardown {
+            0
+        } else {
+            0x8924_0105
+        assert_eq!(call(0, &[]).0, expected);
+        call(3, &[handle]);
+    }
+}
+||||||| parent of 0b6eb6b0 (crt: ungetc pushes bytes back onto a stream)
+
+/// `ungetc`: the pushed bytes come back last-pushed-first through the shared
+/// descriptor, the end-of-file indicator clears, and EOF in is EOF out with
+/// nothing done (ISO C 7.21.7.10).
+fn ungetc_stacks_bytes_and_steps_the_position_back() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "ungetc.bin", b"abcdef");
+    guest.memory.write_bytes(NAME, b"ungetc.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    let fd = guest.call("_fileno", &[file]) & 0xFFFF_FFFF;
+    let buf = TEXT + 0x200;
+    // Two bytes in, then two pushes come back last-pushed-first and the
+    // file resumes where it stopped.
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ab");
+    assert_eq!(
+        guest.call("ungetc", &[b'X' as u64, file]) & 0xFFFF_FFFF,
+        b'X' as u64
+    );
+        guest.call("ungetc", &[b'Y' as u64, file]) & 0xFFFF_FFFF,
+        b'Y' as u64
+    assert_eq!(guest.call("_read", &[fd, buf, 4]) & 0xFFFF_FFFF, 4);
+    assert_eq!(&verify[..4], b"YXcd");
+    // EOF in is EOF out and stacks nothing.
+        guest.call("ungetc", &[0xFFFF_FFFF, file]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    assert_eq!(&verify[..2], b"ef");
+    // The end-of-file indicator is a stdio notion: a stdio read at the end
+    // sets it, and a push clears it again.
+    assert!(line(&mut guest, file, 8).is_none(), "at the end");
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+        guest.call("ungetc", &[b'Z' as u64, file]) & 0xFFFF_FFFF,
+        b'Z' as u64
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[fd, buf, 1]) & 0xFFFF_FFFF, 1);
+    assert_eq!(&verify[..1], b"Z");
+    // A push on a stream that is not open is EOF with EBADF.
+    guest.set_errno(0);
+        guest.call("ungetc", &[b'Q' as u64, TEXT]) & 0xFFFF_FFFF,
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);

@@ -361,6 +361,41 @@ fn find_first(
     Ok(handle)
 }
 
+/// The machine has exactly one volume, mounted at C:. Its GUID name is
+/// fixed: there is no mount manager to generate one.
+pub(super) const VOLUME_GUID: &str = "\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\";
+pub(super) const VOLUME_LABEL: &str = "XENORA";
+pub(super) const VOLUME_FS: &str = "XENORA-FS";
+pub(super) const ERROR_NO_MORE_FILES: u32 = 18;
+const ERROR_MORE_DATA: u32 = 234;
+
+fn write_string(
+    memory: &mut GuestMemory,
+    output: u64,
+    capacity: u64,
+    text: &str,
+    wide: bool,
+) -> bool {
+    let units = text.chars().count() as u64 + 1;
+    if output == 0 || capacity < units {
+        return false;
+    }
+    if wide {
+        let wide_units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        for (index, unit) in wide_units.iter().enumerate() {
+            if memory.write_u16(output + index as u64 * 2, *unit).is_err() {
+                return false;
+            }
+        }
+    } else {
+        let bytes = format!("{text}\0");
+        if memory.write_bytes(output, bytes.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     let open = Arc::clone(state);
     registry.register(KERNEL32, "CreateFileW", move |args, cpu, memory| {
@@ -720,6 +755,180 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     // can contend for a byte range, so a valid file handle locks and unlocks
     // successfully and the overlapped offsets do not matter. What the calls
     // can still do is refuse an unknown handle.
+    // The volume enumeration walks the machine's one volume, then ends.
+    for (symbol, wide) in [("FindFirstVolumeW", true), ("FindFirstVolumeA", false)] {
+        let first_volume = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let mut objects = first_volume.objects.lock().expect("guest object state");
+            let Some(handle) = objects.next_handle() else {
+                return first_volume.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, INVALID_HANDLE);
+            };
+            if !write_string(memory, args.rcx, args.rdx, VOLUME_GUID, wide) {
+                return first_volume.fail(cpu.gs_base, ERROR_MORE_DATA, INVALID_HANDLE);
+            }
+            let entries = vec![SearchEntry {
+                name: VOLUME_GUID.to_owned(),
+                attributes: 0,
+                size: 0,
+            }];
+            objects.insert_handle(handle, GuestObject::Search(Search { entries, next: 1 }));
+            Ok(handle)
+        });
+    }
+
+    for (symbol, _wide) in [("FindNextVolumeW", true), ("FindNextVolumeA", false)] {
+        let next_volume = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let _ = memory;
+            {
+                let objects = next_volume.objects.lock().expect("guest object state");
+                if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::Search(_))) {
+                    return next_volume.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+                }
+            }
+            // The machine has exactly one volume; the first call after the
+            // enumeration always ends it.
+            next_volume.fail(cpu.gs_base, ERROR_NO_MORE_FILES, 0)
+        });
+    }
+
+    let volume_close = Arc::clone(state);
+    registry.register(KERNEL32, "FindVolumeClose", move |args, cpu, memory| {
+        let _ = memory;
+        let mut objects = volume_close.objects.lock().expect("guest object state");
+        if !matches!(objects.handles.get(&args.rcx), Some(GuestObject::Search(_))) {
+            return volume_close.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        }
+        objects.handles.remove(&args.rcx);
+        Ok(1)
+    });
+
+    // The volume information is fixed: one label, one serial, the hosted
+    // filesystem's limits.
+    for (symbol, wide) in [
+        ("GetVolumeInformationW", true),
+        ("GetVolumeInformationA", false),
+    ] {
+        let volume_info = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let root = if wide {
+                read_guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)?
+            } else {
+                read_guest_path_a(memory, args.rcx).map_err(ExitReason::MemoryFault)?
+            };
+            let Some(root) = root else {
+                return volume_info.fail(cpu.gs_base, INVALID_NAME, 0);
+            };
+            // read_guest_path strips the c:\ prefix, so the root is empty.
+            if !root.is_empty() {
+                return volume_info.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
+            }
+            let serial_out = args.get(3, memory).map_err(ExitReason::MemoryFault)?;
+            let component_out = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            let flags_out = args.get(5, memory).map_err(ExitReason::MemoryFault)?;
+            let fs_name = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
+            let fs_capacity = args.get(7, memory).map_err(ExitReason::MemoryFault)?;
+            if args.rdx != 0 && !write_string(memory, args.rdx, args.r8, VOLUME_LABEL, wide) {
+                return volume_info.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            if serial_out != 0 {
+                memory
+                    .write_u32(serial_out, 0x58414E4F)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            if component_out != 0 {
+                memory
+                    .write_u32(component_out, 255)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            if flags_out != 0 {
+                // Case-preserving names, Unicode stored on disk, persistent ACLs absent.
+                memory
+                    .write_u32(flags_out, 0x2 | 0x4)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            if fs_name != 0 && !write_string(memory, fs_name, fs_capacity, VOLUME_FS, wide) {
+                return volume_info.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            Ok(1)
+        });
+    }
+
+    // Mount point and volume name translations are exact on a one-volume
+    // machine.
+    for (symbol, wide) in [
+        ("GetVolumeNameForVolumeMountPointW", true),
+        ("GetVolumeNameForVolumeMountPointA", false),
+    ] {
+        let mount_point = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let reader = if wide {
+                read_guest_path
+            } else {
+                read_guest_path_a
+            };
+            let Some(point) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+                return mount_point.fail(cpu.gs_base, INVALID_NAME, 0);
+            };
+            if !point.is_empty() {
+                return mount_point.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
+            }
+            if !write_string(memory, args.rdx, args.r8, VOLUME_GUID, wide) {
+                return mount_point.fail(cpu.gs_base, ERROR_MORE_DATA, 0);
+            }
+            Ok(1)
+        });
+    }
+
+    for (symbol, wide) in [
+        ("GetVolumePathNamesForVolumeNameW", true),
+        ("GetVolumePathNamesForVolumeNameA", false),
+    ] {
+        let path_names = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let reader = if wide {
+                read_guest_path
+            } else {
+                read_guest_path_a
+            };
+            let Some(name) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+                return path_names.fail(cpu.gs_base, INVALID_NAME, 0);
+            };
+            // The reader lowercases: compare case-insensitively, with or
+            // without the trailing separator.
+            let canonical = VOLUME_GUID.to_ascii_lowercase();
+            if name != canonical && name != canonical.trim_end_matches('\\') {
+                return path_names.fail(cpu.gs_base, FILE_NOT_FOUND, 0);
+            }
+            // A multi-string of one entry: C:\ then the terminating empty string.
+            let needed = if wide { 10 } else { 5 };
+            if args.r8 < needed {
+                return path_names.fail(cpu.gs_base, ERROR_MORE_DATA, 0);
+            }
+            if wide {
+                for (index, unit) in "C:\\".encode_utf16().enumerate() {
+                    memory
+                        .write_u16(args.rdx + index as u64 * 2, unit)
+                        .map_err(ExitReason::MemoryFault)?;
+                }
+                memory
+                    .write_u16(args.rdx + 6, 0)
+                    .map_err(ExitReason::MemoryFault)?;
+                memory
+                    .write_u16(args.rdx + 8, 0)
+                    .map_err(ExitReason::MemoryFault)?;
+            } else {
+                memory
+                    .write_bytes(args.rdx, b"C:\\")
+                    .map_err(ExitReason::MemoryFault)?;
+                memory
+                    .write_bytes(args.rdx + 3, b"\0\0")
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            Ok(1)
+        });
+    }
+
     for symbol in ["LockFileEx", "UnlockFileEx"] {
         let lock = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, _| {
@@ -1512,6 +1721,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "FlushFileBuffers",
         "GetFileType",
         "AreFileApisANSI",
+        "FindFirstVolumeW",
+        "FindFirstVolumeA",
+        "FindNextVolumeW",
+        "FindNextVolumeA",
+        "FindVolumeClose",
+        "GetVolumeInformationW",
+        "GetVolumeInformationA",
+        "GetVolumeNameForVolumeMountPointW",
+        "GetVolumeNameForVolumeMountPointA",
+        "GetVolumePathNamesForVolumeNameW",
+        "GetVolumePathNamesForVolumeNameA",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

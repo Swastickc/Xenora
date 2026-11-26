@@ -1994,12 +1994,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
     });
 
-    registry.register(KERNEL32, "AreFileApisANSI", |_, _, _| {
-        // Every narrow path the hosted drive takes is already ANSI: there is
-        // no OEM translation layer behind it.
-        Ok(1)
-    });
-
     // GetFileAttributesEx packs the attributes with the times and size.
     // The drive tracks no times: they are zero, the 1601 epoch, documented
     // rather than invented.
@@ -2060,19 +2054,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
-    // UnlockFile is the plain form of the byte-range unlock: the drive does
-    // not track ranges, and a valid file handle accepts, as LockFileEx does.
-    let unlock = Arc::clone(state);
-    registry.register(KERNEL32, "UnlockFile", move |args, cpu, memory| {
-        let _ = memory;
-        let objects = unlock.objects.lock().expect("guest object state");
-        if matches!(objects.handles.get(&args.rcx), Some(GuestObject::File(_))) {
-            Ok(1)
-        } else {
-            unlock.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0)
-        }
-    });
-
     // IsDBCSLeadByteEx: every code page the machine serves - UTF-8 and the
     // documented Western pages 1252/437 - is either single-byte or UTF-8,
     // neither of which has DBCS lead bytes. False is the correct answer for
@@ -2097,6 +2078,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             times.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
         });
     }
+
+    // DeviceIoControl needs device drivers the machine does not have. The
+    // handle validates - a bad handle is a bad handle - and every control
+    // code is honestly unsupported rather than silently ignored.
+    let device_control = Arc::clone(state);
+    registry.register(KERNEL32, "DeviceIoControl", move |args, cpu, memory| {
+        let _ = memory;
+        {
+            let objects = device_control.objects.lock().expect("guest object state");
+            if !objects.handles.contains_key(&args.rcx) {
+                return device_control.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+            }
+        }
+        device_control.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+    });
 
     for symbol in [
         "CreateFileW",
@@ -2154,6 +2150,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "IsDBCSLeadByteEx",
         "SetFileTime",
         "SetSystemTime",
+        "DeviceIoControl",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

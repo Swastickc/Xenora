@@ -26,6 +26,8 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "AreFileApisANSI"),
     (KERNEL32, "GetLogicalDrives"),
     (KERNEL32, "GetDriveTypeA"),
+    (KERNEL32, "GetDiskFreeSpaceA"),
+    (KERNEL32, "GetDiskFreeSpaceW"),
     (KERNEL32, "GetDiskFreeSpaceExW"),
     (KERNEL32, "SetHandleInformation"),
     (KERNEL32, "GetFileSize"),
@@ -39,6 +41,14 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "SetFileAttributesA"),
     (KERNEL32, "MoveFileExW"),
     (KERNEL32, "GetCompressedFileSizeA"),
+    ("msvcrt.dll", "strstr"),
+    ("msvcrt.dll", "strtok"),
+    ("msvcrt.dll", "strcspn"),
+    ("msvcrt.dll", "strspn"),
+    ("msvcrt.dll", "strpbrk"),
+    ("msvcrt.dll", "_stricmp"),
+    ("msvcrt.dll", "_strnicmp"),
+    ("msvcrt.dll", "strcpy"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -51,6 +61,8 @@ const CREATE_ALWAYS: u64 = 2;
 const INVALID_HANDLE_VALUE: u64 = u64::MAX;
 const ERROR_INVALID_HANDLE: u64 = 6;
 const ERROR_ACCESS_DENIED: u64 = 5;
+const ERROR_NOT_LOCKED: u64 = 158;
+const ERROR_NOACCESS: u64 = 998;
 const STD_OUTPUT_HANDLE: u64 = 0xFFFF_FFF5; // -11
 
 fn wide(guest: &mut Guest, text: &str) -> u64 {
@@ -153,6 +165,48 @@ fn the_volume_queries_describe_the_one_disk() {
     assert_eq!(guest.u64_at(TOTAL_FREE), gig);
 }
 
+#[test]
+fn legacy_disk_space_queries_use_the_explicit_root_and_check_all_outputs() {
+    const OUT: [u64; 4] = [
+        SCRATCH + 0x100,
+        SCRATCH + 0x104,
+        SCRATCH + 0x108,
+        SCRATCH + 0x10c,
+    ];
+    const NARROW: u64 = SCRATCH + 0x40;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let file = create_file(&mut guest, "one-byte.bin", GENERIC_WRITE);
+    assert_ne!(file, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(SCRATCH + 0x80, b"x").unwrap();
+    assert_eq!(
+        guest.call("WriteFile", &[file, SCRATCH + 0x80, 1, SCRATCH + 0x84, 0]),
+        1
+    );
+    let root = wide(&mut guest, "C:\\");
+    narrow_at(&mut guest, NARROW, "C:\\");
+    for (symbol, path) in [
+        ("GetDiskFreeSpaceW", root),
+        ("GetDiskFreeSpaceA", NARROW),
+        ("GetDiskFreeSpaceW", 0),
+    ] {
+        assert_eq!(
+            guest.call(symbol, &[path, OUT[0], OUT[1], OUT[2], OUT[3]]),
+            1
+        );
+        assert_eq!(OUT.map(|at| guest.u32_at(at)), [1, 4096, 4095, 4096]);
+    }
+    guest.memory.write_u32(OUT[0], 123).unwrap();
+    assert_eq!(
+        guest.call(
+            "GetDiskFreeSpaceW",
+            &[root, OUT[0], OUT[1], OUT[2], u64::MAX]
+        ),
+        0
+    );
+    assert_eq!(last_error(&mut guest), ERROR_NOACCESS);
+    assert_eq!(guest.u32_at(OUT[0]), 123);
+}
+
 /// SetHandleInformation accepts a valid handle and refuses an unknown one;
 /// GetFileSize answers the low word with the high word through its pointer.
 #[test]
@@ -184,24 +238,47 @@ fn narrow_at(guest: &mut Guest, at: u64, text: &str) -> u64 {
     at
 }
 
-/// MoveFileExA renames with REPLACE_EXISTING, refuses the reboot flag, and
-/// the byte-range locks accept any valid file handle.
+/// MoveFileExA renames a file after its lock is released and refuses the reboot flag.
 #[test]
 fn move_file_ex_and_the_byte_range_locks() {
     const NAME_A: u64 = SCRATCH;
     const NAME_B: u64 = SCRATCH + 0x40;
     const OUT2: u64 = SCRATCH + 0x400;
     const GOT: u64 = SCRATCH + 0x808;
+    const OVERLAPPED: u64 = SCRATCH + 0x840;
     let mut guest = Guest::new(IMPORTS, &[]);
     let handle = create_file(&mut guest, "moved.bin", GENERIC_WRITE);
     assert_ne!(handle, INVALID_HANDLE_VALUE);
     guest.memory.write_bytes(OUT2, b"payload").unwrap();
     assert_eq!(guest.call("WriteFile", &[handle, OUT2, 7, GOT, 0]), 1);
-    // The locks of a machine with one executor accept a valid file handle.
-    assert_eq!(guest.call("LockFileEx", &[handle, 0, 0, 1, 0, OUT2]), 1);
-    assert_eq!(guest.call("UnlockFileEx", &[handle, 0, 1, 0, OUT2]), 1);
-    assert_eq!(guest.call("LockFileEx", &[0xDEAD, 0, 0, 1, 0, OUT2]), 0);
+    guest.memory.write_bytes(OVERLAPPED, &[0; 32]).unwrap();
+    assert_eq!(
+        guest.call("LockFileEx", &[handle, 0, 0, 1, 0, OVERLAPPED]),
+        1
+    );
+    assert_eq!(
+        guest.call("UnlockFileEx", &[handle, 0, 1, 0, OVERLAPPED]),
+        1
+    );
+    assert_eq!(
+        guest.call("UnlockFileEx", &[handle, 0, 1, 0, OVERLAPPED]),
+        0
+    );
+    assert_eq!(last_error(&mut guest), ERROR_NOT_LOCKED);
+    assert_eq!(
+        guest.call("LockFileEx", &[0xDEAD, 0, 0, 1, 0, OVERLAPPED]),
+        0
+    );
     assert_eq!(last_error(&mut guest), ERROR_INVALID_HANDLE);
+    // A valid file handle with metadata-only access cannot lock data.
+    let metadata = create_file_disposition(&mut guest, "moved.bin", 0, 3); // OPEN_EXISTING
+    assert_ne!(metadata, INVALID_HANDLE_VALUE);
+    assert_eq!(
+        guest.call("LockFileEx", &[metadata, 0, 0, 1, 0, OVERLAPPED]),
+        0
+    );
+    assert_eq!(last_error(&mut guest), ERROR_ACCESS_DENIED);
+    assert_eq!(guest.call("CloseHandle", &[metadata]), 1);
     assert_eq!(guest.call("CloseHandle", &[handle]), 1);
     // A plain rename, then one over an existing target without the flag
     // refused and with it accepted.
@@ -320,4 +397,67 @@ fn the_compressed_size_is_the_size() {
         guest.call("GetCompressedFileSizeA", &[NAME6, 0]) & 0xFFFF_FFFF,
         0xFFFF_FFFF
     );
+}
+
+/// The string search family: substring scans, span counts, the stateful
+/// tokenizer and case-insensitive comparison, reached through the legacy
+/// msvcrt.dll aliases.
+#[test]
+fn string_search_and_tokenizing_through_the_legacy_aliases() {
+    const TEXT: u64 = SCRATCH + 0x300;
+    const NEEDLE: u64 = SCRATCH + 0x380;
+    const DELIMS: u64 = SCRATCH + 0x3C0;
+    const OTHER: u64 = SCRATCH + 0x400;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    narrow_at(&mut guest, TEXT, "the quick brown fox jumps");
+    narrow_at(&mut guest, NEEDLE, "brown");
+    // strstr finds the substring at its byte offset.
+    let found = guest.call("strstr", &[TEXT, NEEDLE]);
+    assert_eq!(found, TEXT + 10);
+    narrow_at(&mut guest, NEEDLE, "zebra");
+    assert_eq!(guest.call("strstr", &[TEXT, NEEDLE]), 0);
+    // strcspn/strspn count the spans.
+    narrow_at(&mut guest, DELIMS, "aeiou");
+    assert_eq!(
+        guest.call("strcspn", &[TEXT, DELIMS]),
+        2,
+        "first vowel at index 2"
+    );
+    narrow_at(&mut guest, DELIMS, "theq ");
+    assert_eq!(guest.call("strspn", &[TEXT, DELIMS]), 5, "theq+space run");
+    // strpbrk returns the pointer of the first matching byte.
+    narrow_at(&mut guest, DELIMS, "xyz");
+    let hit = guest.call("strpbrk", &[TEXT, DELIMS]);
+    assert_eq!(hit, TEXT + 18, "the x in fox");
+    // strtok tokenizes in place with CRT scan state.
+    narrow_at(&mut guest, TEXT, "alpha,beta gamma");
+    narrow_at(&mut guest, DELIMS, ", ");
+    let first = guest.call("strtok", &[TEXT, DELIMS]);
+    assert_eq!(first, TEXT);
+    let second = guest.call("strtok", &[0, DELIMS]);
+    assert_eq!(second, TEXT + 6);
+    let third = guest.call("strtok", &[0, DELIMS]);
+    assert_eq!(third, TEXT + 11);
+    assert_eq!(guest.call("strtok", &[0, DELIMS]), 0);
+    // Case-insensitive comparison folds ASCII letters.
+    narrow_at(&mut guest, TEXT, "Hello");
+    narrow_at(&mut guest, OTHER, "hELLO");
+    assert_eq!(guest.call("_stricmp", &[TEXT, OTHER]) as u32 as i32, 0);
+    narrow_at(&mut guest, OTHER, "hELLo");
+    assert_eq!(guest.call("_stricmp", &[TEXT, OTHER]) as u32 as i32, 0);
+    narrow_at(&mut guest, OTHER, "hep");
+    let diff = guest.call("_stricmp", &[TEXT, OTHER]) as u32 as i32;
+    assert!(diff < 0);
+    // _strnicmp bounds the scan.
+    narrow_at(&mut guest, TEXT, "abcdef");
+    narrow_at(&mut guest, OTHER, "ABCxyz");
+    assert_eq!(guest.call("_strnicmp", &[TEXT, OTHER, 3]) as u32 as i32, 0);
+    assert!(guest.call("_strnicmp", &[TEXT, OTHER, 6]) as u32 as i32 != 0);
+    // strcpy through the legacy alias copies and returns the destination.
+    narrow_at(&mut guest, TEXT, "copied");
+    let destination = guest.call("strcpy", &[OTHER, TEXT]);
+    assert_eq!(destination, OTHER);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(OTHER, &mut verify).unwrap();
+    assert_eq!(&verify[..7], b"copied\0");
 }

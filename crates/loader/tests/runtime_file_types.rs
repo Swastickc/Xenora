@@ -30,6 +30,10 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "SetHandleInformation"),
     (KERNEL32, "GetFileSize"),
     (KERNEL32, "WriteFile"),
+    (KERNEL32, "MoveFileExA"),
+    (KERNEL32, "LockFileEx"),
+    (KERNEL32, "UnlockFileEx"),
+    (KERNEL32, "ReadFile"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -166,4 +170,42 @@ fn handle_information_and_the_size_form() {
     assert_eq!(guest.call("GetFileSize", &[0xDEAD, 0]), 0xFFFF_FFFF);
     assert_eq!(last_error(&mut guest), ERROR_INVALID_HANDLE);
     assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+}
+
+fn narrow_at(guest: &mut Guest, at: u64, text: &str) -> u64 {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    guest.memory.write_bytes(at, &bytes).unwrap();
+    at
+}
+
+/// MoveFileExA renames with REPLACE_EXISTING, refuses the reboot flag, and
+/// the byte-range locks accept any valid file handle.
+#[test]
+fn move_file_ex_and_the_byte_range_locks() {
+    const NAME_A: u64 = SCRATCH;
+    const NAME_B: u64 = SCRATCH + 0x40;
+    const OUT2: u64 = SCRATCH + 0x400;
+    const GOT: u64 = SCRATCH + 0x808;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "moved.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(OUT2, b"payload").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT2, 7, GOT, 0]), 1);
+    // The locks of a machine with one executor accept a valid file handle.
+    assert_eq!(guest.call("LockFileEx", &[handle, 0, 0, 1, 0, OUT2]), 1);
+    assert_eq!(guest.call("UnlockFileEx", &[handle, 0, 1, 0, OUT2]), 1);
+    assert_eq!(guest.call("LockFileEx", &[0xDEAD, 0, 0, 1, 0, OUT2]), 0);
+    assert_eq!(last_error(&mut guest), ERROR_INVALID_HANDLE);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    // A plain rename, then one over an existing target without the flag
+    // refused and with it accepted.
+    narrow_at(&mut guest, NAME_A, "moved.bin");
+    narrow_at(&mut guest, NAME_B, "renamed.bin");
+    assert_eq!(guest.call("MoveFileExA", &[NAME_A, NAME_B, 0]), 1);
+    // DELAY_UNTIL_REBOOT is honestly unsupported: there is no boot to wait for.
+    assert_eq!(guest.call("MoveFileExA", &[NAME_B, NAME_A, 4]), 0);
+    let error = last_error(&mut guest);
+    assert_eq!(error, 50, "ERROR_NOT_SUPPORTED, got {error}");
+    assert_eq!(guest.call("MoveFileExA", &[NAME_B, NAME_A, 0]), 1);
 }

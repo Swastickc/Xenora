@@ -22,7 +22,14 @@ class CorpusTests(unittest.TestCase):
             tools = Path(directory)
             for name, script in (
                 ("llvm-mc", "exit 0\n"),
-                ("llvm-objdump", "cat <<'DUMP'\n" + output + "\nDUMP\n"),
+                (
+                    "llvm-objdump",
+                    "case \" $* \" in\n"
+                    "  *\" --disassemble-zeroes \"*) ;;\n"
+                    "  *) echo 'missing --disassemble-zeroes' >&2; exit 1 ;;\n"
+                    "esac\n"
+                    "cat <<'DUMP'\n" + output + "\nDUMP\n",
+                ),
             ):
                 tool = tools / name
                 tool.write_text("#!/bin/sh\n" + script, encoding="utf-8")

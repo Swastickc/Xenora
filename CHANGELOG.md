@@ -8,6 +8,8 @@ exact revision and known limitations.
 
 ### Added
 
+- The advapi32 SAFER and token-membership surface: `SaferCreateLevel` validates the scope, level and flags and remembers the level under the handle it hands out, `SaferComputeTokenFromLevel` answers the machine's one token for a valid level because a machine without privilege separation computes no restriction, `SaferCloseLevel` ends the handle's life exactly once, `CheckTokenMembership` answers honestly that the machine user's own SID is a member of the machine token and another SID is not, and `SetTokenInformation` honestly refuses to reprogram the one fixed identity. Verified through the in-module unit tests of `advapi.rs`.
+
 - Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
 
 ### Fixed

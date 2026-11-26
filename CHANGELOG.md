@@ -174,6 +174,7 @@ remains unsupported.
 - Extended the read-only RDNA2 planning CLI (`python3 -m qa rdna2`) with family/status filters, compact summaries, Codex-ready manifests under `artifacts/`, active-claim exclusion (family claims exclude those families; path-only claims block overlapping permitted files), coverage reconcile against `semantic_coverage` without inflating counts, and inventory diffs. Covered by `tests/qa/test_rdna2_plan.py`; planning only, no GPU production edits.
 
 - The macOS Run panel accepts one literal program argument per row, preserving order, spaces, and empty values. It also shows the final runner stage after CRLF guest output (#544).
+- The macOS Run panel accepts an optional regular file up to 1 MiB as the guest's standard input. With no file selected, standard input is empty (#723).
 
 ### Fixed
 - `scripts/demo.sh` no longer requires GNU `timeout`. It sources the same fallback as `scripts/test-gpu.sh`, which now lives in `scripts/lib/timeout.sh`, and drops the `exec` that could not run a shell function. On a stock macOS host the documented demo stopped at `exec` with `timeout: not found` before running a fixture.

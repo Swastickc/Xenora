@@ -79,6 +79,26 @@ fn crt_sprintf(name: &str) -> PathBuf {
     build("build-crt-sprintf.sh", "run-program-crt-sprintf", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_winfiles(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-winfiles.sh", "run-program-crt-winfiles", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_winmemory(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-winmemory.sh", "run-program-crt-winmemory", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_winsys(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-winsys.sh", "run-program-crt-winsys", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_crtutils(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-crtutils.sh", "run-program-crt-crtutils", &OUT).join(format!("{name}.exe"))
+}
+
 /// The SHA-256 of a file, from the host's `shasum`.
 fn digest(path: &Path) -> String {
     let output = Command::new("shasum")
@@ -475,7 +495,7 @@ fn a_step_limit_that_is_too_small_is_a_failure_not_an_exit() {
     assert_eq!(run.code, Some(125), "{}", run.stderr);
     assert_eq!(
         run.stderr,
-        "run failed: the program stopped without exiting after 5000 entry steps: \
+        "run failed: the program stopped without exiting after 5002 entry steps: \
          StepLimitExceeded\n"
     );
     // What it had written by then is shown, and is the start of the whole.
@@ -553,14 +573,18 @@ fn a_program_has_no_step_limit_unless_one_is_given() {
     // inside its loop. One more than the count runs (the loader reports the
     // limit when the count is used up exactly at the exit), and so does the
     // largest number there is.
+    // The scheduler counts the two dispatch trampolines of the main thread
+    // as instructions, which direct execution never had: the report is the
+    // budget plus those two.
     let short = (needed / 2).to_string();
     let run = run_program(&path, &["--max-steps", &short], &arguments);
     assert_eq!(run.code, Some(125), "{}", run.stderr);
+    let reported = needed / 2 + 2;
     assert_eq!(
         run.stderr,
         format!(
             "gate a2: counting to 500000\r\nrun failed: the program stopped without exiting \
-             after {short} entry steps: StepLimitExceeded\n"
+             after {reported} entry steps: StepLimitExceeded\n"
         )
     );
     assert_eq!(run.stdout, echoed("gate-a2-spin", &arguments));
@@ -858,4 +882,65 @@ fn a_program_using_the_buffer_forms_of_printf_runs_and_detects_a_wrong_result() 
         run.stdout,
         "!\r\ncheck 31 failed: control\r\ncrt_sprintf: 30 of 31 checks passed\r\n"
     );
+}
+
+#[test]
+fn a_program_using_the_windows_file_services_runs_and_detects_a_wrong_result() {
+    for name in ["crt-winfiles-O0", "crt-winfiles-O2"] {
+        let run = run_program(&crt_winfiles(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(
+            run.stdout, "crt-winfiles: 25/25 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_winfiles("crt-winfiles-break"), &[], &[]);
+    assert_eq!(run.code, Some(26), "control: {:?}", run.stdout);
+}
+
+#[test]
+fn a_program_using_the_legacy_memory_services_runs_and_detects_a_wrong_result() {
+    for name in ["crt-winmemory-O0", "crt-winmemory-O2"] {
+        let run = run_program(&crt_winmemory(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(
+            run.stdout, "crt-winmemory: 16/16 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_winmemory("crt-winmemory-break"), &[], &[]);
+    assert_eq!(run.code, Some(17), "control: {:?}", run.stdout);
+}
+
+#[test]
+fn a_program_using_the_error_environment_and_system_services_runs() {
+    for name in ["crt-winsys-O0", "crt-winsys-O2"] {
+        let run = run_program(&crt_winsys(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(run.stdout, "crt-winsys: 25/25 checks passed\r\n", "{name}");
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_winsys("crt-winsys-break"), &[], &[]);
+    assert_eq!(run.code, Some(26), "control: {:?}", run.stdout);
+}
+
+#[test]
+fn a_program_using_the_small_crt_utilities_runs() {
+    for name in ["crt-crtutils-O0", "crt-crtutils-O2"] {
+        let run = run_program(&crt_crtutils(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(
+            run.stdout, "crt-crtutils: 23/23 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_crtutils("crt-crtutils-break"), &[], &[]);
+    assert_eq!(run.code, Some(24), "control: {:?}", run.stdout);
 }

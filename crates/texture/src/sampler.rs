@@ -63,21 +63,27 @@ pub struct TextureMetadata {
 
 impl TextureMetadata {
     pub fn new(width: usize, height: usize, mips: u32) -> Result<Self, SamplerError> {
-        if width == 0 || height == 0 {
-            return Err(SamplerError::InvalidTextureDimensions);
-        }
-        if mips == 0 {
-            return Err(SamplerError::InvalidTextureMipCount);
-        }
-        let max_mips = usize::BITS - width.max(height).leading_zeros();
-        if mips > max_mips {
-            return Err(SamplerError::MipOutOfBounds);
-        }
-        Ok(Self {
+        let metadata = Self {
             width,
             height,
             mips,
-        })
+        };
+        metadata.validate()?;
+        Ok(metadata)
+    }
+
+    fn validate(&self) -> Result<(), SamplerError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(SamplerError::InvalidTextureDimensions);
+        }
+        if self.mips == 0 {
+            return Err(SamplerError::InvalidTextureMipCount);
+        }
+        let max_mips = usize::BITS - self.width.max(self.height).leading_zeros();
+        if self.mips > max_mips {
+            return Err(SamplerError::MipOutOfBounds);
+        }
+        Ok(())
     }
 }
 
@@ -143,13 +149,7 @@ impl SamplerDesc {
     /// Validates the sampler descriptor against specific texture metadata.
     pub fn validate_against_texture(&self, texture: &TextureMetadata) -> Result<(), SamplerError> {
         self.validate()?;
-
-        if texture.width == 0 || texture.height == 0 {
-            return Err(SamplerError::InvalidTextureDimensions);
-        }
-        if texture.mips == 0 {
-            return Err(SamplerError::InvalidTextureMipCount);
-        }
+        texture.validate()?;
 
         if let Some(explicit_mip) = self.explicit_mip
             && explicit_mip >= texture.mips
@@ -204,6 +204,23 @@ mod tests {
         let sampler_large = SamplerDesc::nearest_clamp().with_explicit_mip(100);
         assert_eq!(
             sampler_large.validate_against_texture(&meta),
+            Err(SamplerError::MipOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn test_sampler_rejects_impossible_mip_count_in_metadata_literal() {
+        let sampler = SamplerDesc::nearest_clamp().with_explicit_mip(1);
+        let mut metadata = TextureMetadata {
+            width: 1,
+            height: 3,
+            mips: 2,
+        };
+        assert_eq!(sampler.validate_against_texture(&metadata), Ok(()));
+
+        metadata.height = 1;
+        assert_eq!(
+            sampler.validate_against_texture(&metadata),
             Err(SamplerError::MipOutOfBounds)
         );
     }

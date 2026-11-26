@@ -35,6 +35,17 @@ timestamps come from the sample. When AVFoundation returns an invalid sample
 duration for a decoded frame, the object reports the nominal frame duration
 instead of propagating NaN into caller-visible timing.
 
+## Metal texture upload
+
+`VideoTextureUploader` is a deliberately small copy-based bridge from decoded
+32-bit BGRA `CVPixelBuffer` frames to native `MTLTexture` objects. It validates
+the pixel format and dimensions, creates a non-mipmapped `bgra8Unorm` texture
+with shader-read usage, locks the source buffer read-only and copies rows while
+preserving the source row stride. The returned texture owns its uploaded texels
+independently of the sample buffer after `replace` completes. This is upload
+infrastructure only: it does not sample, present, schedule, color-convert or
+synchronize frames.
+
 ## Verification
 
 `app/Tests/XenoraTests/VideoPlaybackTests.swift` generates a small H.264 MOV
@@ -47,7 +58,10 @@ tests cover:
 - seeking to a later timestamp and the explicit paused transition;
 - invalid seek-time negative controls;
 - rejection of non-video input;
-- repeated create/close cycles and terminal use-after-close failure.
+- repeated create/close cycles and terminal use-after-close failure;
+- exact row-major texture bytes from an independently generated BGRA control;
+- rejection of a non-BGRA pixel buffer before texture creation;
+- upload of one decoded fixture frame to a native Metal texture.
 
 The tests run natively on Apple Silicon through Swift's release test target.
 They are local AVFoundation integration evidence only. They do not establish
@@ -56,7 +70,7 @@ compatibility.
 
 ## Explicit limitations
 
-This slice does not implement Metal texture upload, a real-time playback clock,
+This slice does not implement zero-copy texture import, a real-time playback clock,
 frame dropping, audio decoding, audio synchronization, streaming/network input,
 subtitles, multiple video tracks, rotation/transform handling, color-space
 conversion policy, DRM-protected media, Bink video or any undocumented console

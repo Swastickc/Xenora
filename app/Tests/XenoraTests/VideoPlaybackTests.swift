@@ -4,6 +4,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 import Foundation
+import Metal
 import Testing
 @testable import Xenora
 
@@ -177,4 +178,83 @@ struct VideoPlaybackTests {
             }
         }
     }
+
+    @Test func pixelBufferUploadPreservesRowsAndPixelBytes() throws {
+        let uploader = try VideoTextureUploader()
+        let buffer = try makePixelBuffer(width: 3, height: 2, seed: 7)
+        let texture = try uploader.upload(pixelBuffer: buffer)
+
+        #expect(texture.width == 3)
+        #expect(texture.height == 2)
+        #expect(texture.pixelFormat == .bgra8Unorm)
+        var readback = [UInt8](repeating: 0, count: 3 * 2 * 4)
+        readback.withUnsafeMutableBytes { pointer in
+            texture.getBytes(
+                pointer.baseAddress!,
+                bytesPerRow: 3 * 4,
+                from: MTLRegion(
+                    origin: MTLOrigin(x: 0, y: 0, z: 0),
+                    size: MTLSize(width: 3, height: 2, depth: 1)
+                ),
+                mipmapLevel: 0
+            )
+        }
+        var expected: [UInt8] = []
+        for row in 0..<2 {
+            for column in 0..<3 {
+                expected.append(7)
+                expected.append(UInt8(truncatingIfNeeded: 7 + row))
+                expected.append(UInt8(truncatingIfNeeded: 7 + column))
+                expected.append(255)
+            }
+        }
+        #expect(readback == expected)
+    }
+
+    @Test func nonBgraPixelBuffersAreRejectedBeforeTextureCreation() throws {
+        var buffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            2,
+            2,
+            kCVPixelFormatType_32ARGB,
+            nil,
+            &buffer
+        )
+        #expect(status == kCVReturnSuccess)
+        let pixelBuffer = try #require(buffer)
+        do {
+            _ = try VideoTextureUploader().upload(pixelBuffer: pixelBuffer)
+            Issue.record("non-BGRA pixel buffer was accepted")
+        } catch let error as VideoTextureUploadError {
+            #expect(error == .unsupportedPixelFormat)
+        }
+    }
+
+    @Test func decodedFrameUploadProducesANativeTexture() async throws {
+        let url = temporaryVideoURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        try await writeFixture(url: url)
+        let playback = try await VideoPlayback.load(url: url)
+        defer { playback.close() }
+        try playback.play()
+        let frame = try #require(try playback.nextFrame())
+        let texture = try VideoTextureUploader().upload(frame: frame)
+
+        #expect(texture.width == 16)
+        #expect(texture.height == 16)
+        #expect(texture.pixelFormat == .bgra8Unorm)
+        var alpha = [UInt8](repeating: 0, count: 4)
+        texture.getBytes(
+            &alpha,
+            bytesPerRow: 4,
+            from: MTLRegion(
+                origin: MTLOrigin(x: 8, y: 8, z: 0),
+                size: MTLSize(width: 1, height: 1, depth: 1)
+            ),
+            mipmapLevel: 0
+        )
+        #expect(alpha[3] == 255)
+    }
+
 }

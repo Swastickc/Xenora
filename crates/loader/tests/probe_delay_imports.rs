@@ -256,6 +256,23 @@ fn assert_incomplete_ordinary_descriptor(bytes: &[u8], rva: u32, prefix: &[Row])
 }
 
 #[test]
+fn ordinary_directory_size_bounds_the_terminator_and_preserves_partial_inventory() {
+    let mut bytes = FIXTURE.to_vec();
+    let optional = u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()) as usize + 24;
+    for (size, truncated) in [(39, true), (40, false)] {
+        put(&mut bytes, optional + 124, size);
+        let report = probe_pe_bytes(&bytes, &ProbeConfig::default()).unwrap();
+        assert_eq!(rows(&report.imports), ORDINARY);
+        assert_eq!(report.import_error.is_some(), truncated);
+    }
+
+    put(&mut bytes, optional + 108, 1);
+    let report = probe_pe_bytes(&bytes, &ProbeConfig::default()).unwrap();
+    assert!(report.imports.is_empty());
+    assert_eq!(report.import_error, None);
+}
+
+#[test]
 fn ordinary_terminator_must_have_zero_timestamp_and_forwarder_chain() {
     for offset in [4, 8] {
         let mut bytes = FIXTURE.to_vec();

@@ -599,10 +599,10 @@ impl ImportRegistry {
         loaded_base: u64,
         memory: &mut GuestMemory,
     ) -> Result<usize, ImportError> {
-        let Some(directory) = find_import_directory(bytes) else {
+        let Some((rva, size)) = find_import_directory(bytes) else {
             return Ok(0);
         };
-        let (entries, error) = parse_imports(bytes, directory, |rva| pe.rva_to_file_offset(rva));
+        let (entries, error) = parse_imports(bytes, rva, size, |rva| pe.rva_to_file_offset(rva));
         if let Some(error) = error {
             return Err(ImportError::Table(error));
         }
@@ -922,20 +922,20 @@ impl Nonvolatile {
     }
 }
 
-/// RVA of the import directory, if the image has one.
-pub(crate) fn find_import_directory(bytes: &[u8]) -> Option<u32> {
+/// RVA and size of the import directory, if the image has one.
+pub(crate) fn find_import_directory(bytes: &[u8]) -> Option<(u32, u32)> {
     let field = |offset: usize, len: usize| bytes.get(offset..offset.checked_add(len)?);
     let u32_at = |offset| Some(u32::from_le_bytes(field(offset, 4)?.try_into().ok()?));
     let coff = (u32_at(0x3C)? as usize).checked_add(4)?;
     let optional = coff.checked_add(20)?;
     let optional_len = u16::from_le_bytes(field(coff + 16, 2)?.try_into().ok()?);
     // The import directory is data directory 1, at offset 120.
-    if optional_len < 128 {
+    if optional_len < 128 || u32_at(optional.checked_add(108)?)? < 2 {
         return None;
     }
     let rva = u32_at(optional.checked_add(120)?)?;
     let size = u32_at(optional.checked_add(124)?)?;
-    (rva != 0 && size != 0).then_some(rva)
+    (rva != 0).then_some((rva, size))
 }
 
 #[cfg(test)]

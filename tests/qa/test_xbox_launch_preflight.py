@@ -164,6 +164,21 @@ class NativeStartupTests(unittest.TestCase):
         self.assertEqual(report["outcome"]["phase"], "startup")
         self.assertIn("xenora-launch-one.dll!first_action", report["outcome"]["message"])
 
+    def test_ordinary_import_terminator_must_fit_the_directory(self):
+        data = bytearray((self.fixtures / "dependent-startup.exe").read_bytes())
+        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+        # Two 20-byte descriptors followed by a 20-byte zero terminator.
+        import_size_offset = pe_offset + 24 + 124
+        struct.pack_into("<I", data, import_size_offset, 59)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "short-import-directory.exe"
+            path.write_bytes(data)
+            result, report = self.run_guest(path)
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertEqual(report["last_completed_stage"], "relocated")
+        self.assertEqual(report["outcome"]["phase"], "startup")
+        self.assertIn("before its empty descriptor", report["outcome"]["message"])
+
     def test_rejected_images_and_entry_budget_come_from_different_stages(self):
         data = (self.fixtures / "large-startup.exe").read_bytes()
         pe_offset = struct.unpack_from("<I", data, 0x3C)[0]

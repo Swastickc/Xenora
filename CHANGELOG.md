@@ -6,6 +6,10 @@ exact revision and known limitations.
 
 ## [Unreleased]
 
+### Fixed
+
+- PE startup and static inspection now keep ordinary import descriptors within the declared directory. Startup reports a missing in-range terminator at import binding, and static inspection retains the imports found before the error.
+
 ### Added
 - The volume enumeration and information: `FindFirstVolumeA/W` enumerate the machine's one volume under its fixed GUID name, `FindNextVolumeA/W` end it, `FindVolumeClose` closes the search, `GetVolumeInformationA/W` answer the fixed label, serial, component limit and filesystem identity, and the mount-point/volume-name translation forms translate the `C:\` root and the GUID name to each other. Verified through the unit tests of `runtime_volumes.rs`.
 - Console input honesty: `GetNumberOfConsoleInputEvents` counts the empty input buffer exactly, `PeekConsoleInputA/W` succeed reading nothing, `ReadConsoleInputA/W` fail with `ERROR_NOT_SUPPORTED` rather than blocking the only executor forever, `SetConsoleCP`/`SetConsoleOutputCP` accept UTF-8 only, `SetConsoleCtrlHandler` stores handlers that correctly never fire on a machine with no control events, and `GenerateConsoleCtrlEvent` is honestly unsupported. Verified through the unit tests of `runtime_console_input.rs`.

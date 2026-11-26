@@ -42,6 +42,13 @@ check the synthetic pixels on the GPU from a terminal, run:
 build/Xenora.app/Contents/MacOS/Xenora --smoke-frame
 ```
 
+In **Run executable (experimental)**, use **Choose input file…** under
+**Standard input** to select a regular file of at most 1 MiB. When you click
+**Run**, the app sends the file's bytes to the guest worker as standard
+input. Use **Clear input file** to remove the selection. Opening another
+executable also clears it. With no file selected, the guest sees end-of-file
+immediately.
+
 Closing the app and running `scripts/build-app.sh` again rebuilds the same
 bundle. Commercial Xbox game execution is unsupported.
 

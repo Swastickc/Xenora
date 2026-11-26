@@ -28,6 +28,7 @@ loader: _assert prints its message and ends the process)
 - Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
 
 ### Fixed
+- QA verification evidence is now bound to the selected checkout: profile suites run with that repository as their working directory, `qa verify` rejects a revision other than the checkout HEAD, and `--check-stale` requires matching profile and revision metadata and passing suites while reporting staleness separately (#277).
 - The RDNA 2 errata record named `V_FFBH`/`V_FFBL` as users of the undefined `FindFirst1fromLSB` helper and said its empty-mask result was missing. Its only user is `V_READFIRSTLANE_B32`, whose text gives that result; the row is corrected. `S_BFE_I32` now carries the SCC note its PR described, and the `S_BFE_*` SCC citation names pages 104 and 105 instead of 113.
 - PE inspection and import binding now require the complete two-byte Hint before a named symbol in both ordinary and delayed import tables (#768).
 - Native macOS CI now runs the Swift package tests and the frame-loop and Audio/VFS control smokes in addition to checking the app bundle (#753).

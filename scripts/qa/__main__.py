@@ -65,7 +65,7 @@ from .runtime_inventory import (
 )
 from .compat_gaps import analyze_gaps, compact_gaps, dumps_gaps, load_dependency_report
 from .stale_branch import classify_sync, format_sync_reports
-from .verify import dumps_evidence, evidence_is_stale, load_evidence, run_profile
+from .verify import assess_evidence, current_revision, dumps_evidence, load_evidence, run_profile
 
 
 def _root() -> Path:
@@ -405,13 +405,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         if args.check_stale:
             evidence = load_evidence(Path(args.check_stale).read_text(encoding="utf-8"))
-            stale = evidence_is_stale(evidence, root)
-            json.dump({"stale": stale, "fingerprint": evidence.source_fingerprint}, sys.stdout, indent=2)
+            assessment = assess_evidence(
+                evidence,
+                root,
+                requested_profile=args.profile,
+                actual_revision=current_revision(root),
+            )
+            json.dump({"fingerprint": evidence.source_fingerprint, **assessment}, sys.stdout, indent=2)
             print()
-            return 1 if stale else 0
-        revision = args.revision or subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True
-        ).strip()
+            return 0 if assessment["accepted"] else 1
+        actual = current_revision(root)
+        if args.revision and args.revision != actual:
+            print(
+                f"verify: requested revision {args.revision} does not match checkout revision {actual}",
+                file=sys.stderr,
+            )
+            return 2
+        revision = actual
         evidence = run_profile(
             args.profile, root=root, revision=revision, stop_on_fail=not args.no_stop
         )

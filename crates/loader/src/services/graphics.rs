@@ -8,7 +8,7 @@
 //! objects and issued one fixed three-vertex draw. This module exposes the
 //! real command path to guest code: device, queue, allocator, command list,
 //! buffer and render-target resources, state binding, draws, execution,
-//! framebuffer readback and ordered destruction. A guest can also bind a
+//! framebuffer readback, timeline fences and ordered destruction. A guest can also bind a
 //! texture: descriptor heaps, shader resource views, samplers and root
 //! signatures are reachable from guest code, and the service computes every
 //! descriptor handle so that the guest never sees a host pointer.
@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 const MODULE: &str = "xenora_graphics.dll";
+const ERROR_TIMEOUT: u32 = 1460;
 
 /// The smallest vertex stride the runtime accepts: one `float4` position.
 /// A flat draw reads three consecutive `float4` positions and ignores the
@@ -79,8 +80,10 @@ fn hresult(error: &GraphicsError) -> u64 {
         | GraphicsError::InvalidQueueHandle
         | GraphicsError::InvalidAllocatorHandle
         | GraphicsError::InvalidCommandListHandle
+        | GraphicsError::InvalidFenceHandle
         | GraphicsError::InvalidResourceHandle => invalid_arg(),
         GraphicsError::ResourceLifetimeViolation => access_denied(),
+        GraphicsError::FenceTimeout { .. } => HResult::from_win32(ERROR_TIMEOUT).guest_return(),
         _ => HResult::FAIL.guest_return(),
     }
 }
@@ -94,6 +97,7 @@ fn is_invalid_handle(error: &GraphicsError) -> bool {
             | GraphicsError::InvalidQueueHandle
             | GraphicsError::InvalidAllocatorHandle
             | GraphicsError::InvalidCommandListHandle
+            | GraphicsError::InvalidFenceHandle
             | GraphicsError::InvalidResourceHandle
     )
 }
@@ -291,6 +295,119 @@ fn xenora_create_command_queue(
         return Ok(invalid_arg());
     }
     Ok(ok())
+}
+
+/// Create a timeline fence at a guest-supplied initial value.
+fn xenora_create_fence(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    memory: &mut GuestMemory,
+) -> Result<u64, ExitReason> {
+    let device = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+    let initial = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
+    let out = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
+    if out == 0 || !writable_out(memory, out) {
+        return Ok(invalid_arg());
+    }
+    let mut graphics = lock_graphics(state)?;
+    let fence = match with_handle(
+        device,
+        memory,
+        GraphicsError::InvalidDeviceHandle,
+        |handle| graphics.create_fence(handle, initial),
+    ) {
+        Ok(fence) => fence,
+        Err(error) => return Ok(binding_hresult(&error)),
+    };
+    if memory.write_u64(out, fence.to_u64()).is_err() {
+        return Ok(invalid_arg());
+    }
+    Ok(ok())
+}
+
+/// Apply a queue operation with the same device and handle checks for waits and signals.
+fn queue_fence(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    memory: &GuestMemory,
+    operation: fn(
+        &mut GraphicsContext,
+        GraphicsHandle,
+        GraphicsHandle,
+        u64,
+    ) -> Result<(), GraphicsError>,
+) -> Result<u64, ExitReason> {
+    let queue = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+    let fence = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
+    let value = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
+    let mut graphics = lock_graphics(state)?;
+    let result = with_handle(
+        queue,
+        memory,
+        GraphicsError::InvalidQueueHandle,
+        |queue_handle| {
+            with_handle(
+                fence,
+                memory,
+                GraphicsError::InvalidFenceHandle,
+                |fence_handle| operation(&mut graphics, queue_handle, fence_handle, value),
+            )
+        },
+    );
+    Ok(result.map_or_else(|error| binding_hresult(&error), |()| ok()))
+}
+
+fn xenora_queue_wait(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    memory: &mut GuestMemory,
+) -> Result<u64, ExitReason> {
+    queue_fence(state, args, memory, GraphicsContext::queue_wait)
+}
+
+fn xenora_queue_signal(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    memory: &mut GuestMemory,
+) -> Result<u64, ExitReason> {
+    queue_fence(state, args, memory, GraphicsContext::queue_signal)
+}
+
+/// Write the completed fence value to `*pValue`.
+fn xenora_get_fence_completed_value(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    memory: &mut GuestMemory,
+) -> Result<u64, ExitReason> {
+    let fence = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+    let out = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
+    if out == 0 || !writable_out(memory, out) {
+        return Ok(invalid_arg());
+    }
+    let graphics = lock_graphics(state)?;
+    let value = match with_handle(fence, memory, GraphicsError::InvalidFenceHandle, |handle| {
+        graphics.fence_completed_value(handle)
+    }) {
+        Ok(value) => value,
+        Err(error) => return Ok(binding_hresult(&error)),
+    };
+    if memory.write_u64(out, value).is_err() {
+        return Ok(invalid_arg());
+    }
+    Ok(ok())
+}
+
+fn xenora_destroy_fence(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    memory: &mut GuestMemory,
+) -> Result<u64, ExitReason> {
+    let fence = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+    let mut graphics = lock_graphics(state)?;
+    let result = with_handle(fence, memory, GraphicsError::InvalidFenceHandle, |handle| {
+        graphics.destroy_fence(handle)
+    });
+    Ok(result.map_or_else(|error| binding_hresult(&error), |()| ok()))
 }
 
 /// Create a command allocator for a device.
@@ -1233,6 +1350,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
     export!("XenoraCreateDevice", xenora_create_device);
     export!("XenoraCreateCommandQueue", xenora_create_command_queue);
+    export!("XenoraCreateFence", xenora_create_fence);
+    export!("XenoraQueueWait", xenora_queue_wait);
+    export!("XenoraQueueSignal", xenora_queue_signal);
+    export!(
+        "XenoraGetFenceCompletedValue",
+        xenora_get_fence_completed_value
+    );
+    export!("XenoraDestroyFence", xenora_destroy_fence);
     export!(
         "XenoraCreateCommandAllocator",
         xenora_create_command_allocator
@@ -1532,6 +1657,14 @@ mod tests {
         check_binding_creator_outputs(|state, device, out, memory| {
             let args = call_args(memory, device, 0, 1, out, &[]);
             xenora_create_root_signature(state, &args, memory)
+        });
+    }
+
+    #[test]
+    fn fence_creation_with_unwritable_handle_outputs_is_transactional() {
+        check_binding_creator_outputs(|state, device, out, memory| {
+            let args = call_args(memory, device, 0x1_0000_0003, out, 0, &[]);
+            xenora_create_fence(state, &args, memory)
         });
     }
 

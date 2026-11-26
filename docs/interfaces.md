@@ -937,8 +937,9 @@ one-time initialization that another thread has pending.
   instructions that modify the header directly on another host thread.
 - TLS provides the documented 1,088 indexes. FLS provides the 128
   `FLS_MAXIMUM_AVAILABLE` slots defined in the MinGW-w64 headers. Values are
-  per guest thread, new indexes read as zero everywhere, and successful get
-  calls clear the last error. Values live in the runtime, not in the TEB
+  per guest thread, new indexes read as zero everywhere, and successful
+  `TlsGetValue` calls clear the last error; `TlsGetValue2` leaves it unchanged.
+  Values live in the runtime, not in the TEB
   `TlsSlots` array, so guest code that reads the TEB directly does not see
   them. `FlsFree` releases the slot, then calls its cleanup callback on the
   calling thread for each thread's nonnull value, in TEB order.
@@ -1020,7 +1021,8 @@ listing: critical sections, SRW locks and mutexes use
 `api-ms-win-core-synch-l1-1-0`; condition variables and one-time
 initialization use `api-ms-win-core-synch-l1-2-0`; SLists use
 `api-ms-win-core-interlocked-l1-1-0`; TLS uses
-`api-ms-win-core-processthreads-l1-1-0`; and FLS uses
+`api-ms-win-core-processthreads-l1-1-0`, with `TlsGetValue2` also in
+`api-ms-win-core-processthreads-l1-1-8`; and FLS uses
 `api-ms-win-core-fibers-l1-1-0`.
 
 ### C runtime startup configuration

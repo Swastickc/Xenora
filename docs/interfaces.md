@@ -473,6 +473,8 @@ zero only. Its on-screen directional control can act as a virtual host input
 and replace only the horizontal directional bits, mirroring the legacy fixture
 control.
 
+`XInputSetState` accepts the exact four-byte public vibration layout for a connected virtual slot and records the latest motor command with a sequence number for a future host output backend. Acceptance is queue evidence only; no haptic actuation or physical hardware effect is claimed, so capabilities still report zero motor resolution. Disconnected slots, invalid indexes and invalid input memory fail before mutation.
+
 `XInputGetCapabilities` is available on the same three library names for a
 connected virtual slot. It accepts flags zero or `XINPUT_FLAG_GAMEPAD` and
 writes the exact 20-byte public structure. Xenora reports the virtual surface

@@ -43,6 +43,9 @@ pub(crate) struct Slot {
     connected: bool,
     packet_number: u32,
     state: XInputControllerState,
+    vibration_sequence: u32,
+    left_motor: u16,
+    right_motor: u16,
 }
 
 pub(crate) type Slots = [Slot; 4];
@@ -67,6 +70,17 @@ impl Slot {
 }
 
 impl ServicesState {
+    /// Read the latest vibration command accepted for a slot. The sequence
+    /// increments for every accepted command, including repeated motor values.
+    pub fn xinput_vibration(&self, index: u32) -> Option<(u32, u16, u16)> {
+        if index >= XUSER_MAX_COUNT {
+            return None;
+        }
+        let slot = &self.xinput.lock().unwrap()[index as usize];
+        slot.connected
+            .then_some((slot.vibration_sequence, slot.left_motor, slot.right_motor))
+    }
+
     /// Replace a user slot's explicit controller snapshot. `None` disconnects
     /// the slot. Returns false for an index outside the documented 0..4 range.
     /// Physical controller discovery is the host's responsibility.
@@ -126,6 +140,25 @@ fn get_state(slots: &Mutex<Slots>, index: u32, output: u64, memory: &mut GuestMe
     {
         return ERROR_BAD_ARGUMENTS;
     }
+    0
+}
+
+fn set_state(slots: &Mutex<Slots>, index: u32, input: u64, memory: &mut GuestMemory) -> u32 {
+    if index >= XUSER_MAX_COUNT || input == 0 {
+        return ERROR_BAD_ARGUMENTS;
+    }
+    let mut slots = slots.lock().unwrap();
+    let slot = &mut slots[index as usize];
+    if !slot.connected {
+        return ERROR_DEVICE_NOT_CONNECTED;
+    }
+    let mut bytes = [0; 4];
+    if memory.read_bytes(input, &mut bytes).is_err() {
+        return ERROR_BAD_ARGUMENTS;
+    }
+    slot.left_motor = u16::from_le_bytes([bytes[0], bytes[1]]);
+    slot.right_motor = u16::from_le_bytes([bytes[2], bytes[3]]);
+    slot.vibration_sequence = slot.vibration_sequence.wrapping_add(1);
     0
 }
 
@@ -189,6 +222,20 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 )))
             },
         );
+        let slots = Arc::clone(state);
+        registry.register_with_status(
+            module,
+            "XInputSetState",
+            ServiceStatus::Partial,
+            move |args, _, memory| {
+                Ok(u64::from(set_state(
+                    &slots.xinput,
+                    args.rcx as u32,
+                    args.rdx,
+                    memory,
+                )))
+            },
+        );
     }
 }
 
@@ -230,6 +277,24 @@ mod tests {
             .map_region(0x1000, 0x1000, MemoryPermissions::READ_WRITE)
             .unwrap();
         memory
+    }
+
+    fn call_set_state(
+        registry: &ImportRegistry,
+        memory: &mut GuestMemory,
+        index: u64,
+        input: u64,
+    ) -> u64 {
+        let mut cpu = CpuState::default();
+        cpu.set(crate::cpu::Register::Rcx, index);
+        cpu.set(crate::cpu::Register::Rdx, input);
+        let descriptor = registry
+            .resolve(
+                "xinput1_4.dll",
+                &ImportName::Name("XInputSetState".to_owned()),
+            )
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
     }
 
     fn call_capabilities(
@@ -347,6 +412,35 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn vibration_commands_are_accepted_only_for_connected_slots() {
+        let (state, registry) = fixture();
+        let mut memory = writable_memory();
+        memory.write_u32(0x1200, 0x8001_4002).unwrap();
+        assert_eq!(
+            call_set_state(&registry, &mut memory, 0, 0x1200),
+            u64::from(ERROR_DEVICE_NOT_CONNECTED)
+        );
+        assert!(state.set_xinput_controller(0, Some(XInputControllerState::default())));
+        assert_eq!(call_set_state(&registry, &mut memory, 0, 0x1200), 0);
+        assert_eq!(state.xinput_vibration(0), Some((1, 0x4002, 0x8001)));
+        assert_eq!(call_set_state(&registry, &mut memory, 0, 0x1200), 0);
+        assert_eq!(state.xinput_vibration(0), Some((2, 0x4002, 0x8001)));
+        assert_eq!(
+            call_set_state(&registry, &mut memory, 4, 0x1200),
+            u64::from(ERROR_BAD_ARGUMENTS)
+        );
+        assert_eq!(
+            call_set_state(&registry, &mut memory, 0, 0),
+            u64::from(ERROR_BAD_ARGUMENTS)
+        );
+        assert_eq!(
+            call_set_state(&registry, &mut memory, 0, 0x5000),
+            u64::from(ERROR_BAD_ARGUMENTS)
+        );
+        assert_eq!(state.xinput_vibration(0), Some((2, 0x4002, 0x8001)));
     }
 
     #[test]

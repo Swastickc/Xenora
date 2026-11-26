@@ -18,16 +18,41 @@ import runner
 
 
 class RunnerTests(unittest.TestCase):
-    def test_capture_preserves_exit_and_limits_both_streams(self):
-        result = runner.capture(
-            [sys.executable, "-c", "import sys; print('a'*40000); print('b'*40000,file=sys.stderr); sys.exit(7)"],
-            10, os.environ.copy(),
-        )
+    def test_capture_preserves_exit_and_both_ends_of_truncated_streams(self):
+        half = runner.OUTPUT_LIMIT // 2
+        script = r"""
+import sys
+
+half = int(sys.argv[1])
+sys.stdout.write("a" * half + "discarded stdout" + "b" * (half - 1) + "\n")
+diagnostic = "fixture check failed\n"
+sys.stderr.write("c" * half + "discarded stderr" + "d" * (half - len(diagnostic)) + diagnostic)
+sys.exit(7)
+"""
+        result = runner.capture([sys.executable, "-c", script, str(half)], 10, os.environ.copy())
+
         self.assertEqual((result["status"], result["returncode"]), ("failed", 7))
         self.assertTrue(result["stdout_truncated"])
         self.assertTrue(result["stderr_truncated"])
-        self.assertLessEqual(len(result["stdout"]), runner.OUTPUT_LIMIT)
-        self.assertLessEqual(len(result["stderr"]), runner.OUTPUT_LIMIT)
+        self.assertEqual(result["stdout"], "a" * half + "b" * (half - 1) + "\n")
+        diagnostic = "fixture check failed\n"
+        self.assertEqual(result["stderr"], "c" * half + "d" * (half - len(diagnostic)) + diagnostic)
+
+    def test_capture_preserves_untruncated_streams_exactly(self):
+        for size in (runner.OUTPUT_LIMIT - 1, runner.OUTPUT_LIMIT):
+            with self.subTest(size=size):
+                result = runner.capture(
+                    [sys.executable, "-c",
+                     "import sys; sys.stdout.write('a'*int(sys.argv[1])); print('last line', file=sys.stderr)",
+                     str(size)],
+                    10, os.environ.copy(),
+                )
+
+                self.assertEqual((result["status"], result["returncode"]), ("passed", 0))
+                self.assertFalse(result["stdout_truncated"])
+                self.assertFalse(result["stderr_truncated"])
+                self.assertEqual(result["stdout"], "a" * size)
+                self.assertEqual(result["stderr"], "last line\n")
 
     def test_deadline_terminates_child(self):
         result = runner.capture([sys.executable, "-c", "import time; time.sleep(30)"], 0.1, os.environ.copy())
@@ -158,6 +183,106 @@ subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]])
                     }
                     path.write_text(json.dumps(result))
                     runner.read_result(path)
+
+    def report_output(self, result, *options):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.json"
+            path.write_text(json.dumps({"schema_version": runner.SCHEMA_VERSION, **result}))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(runner.main(["report", str(path), *options]), 0)
+        return output.getvalue()
+
+    def test_markdown_reports_stage_outcomes_and_excludes_captured_output(self):
+        commit_hash = "7" * 40
+        result = {
+            "context": {
+                "commit": {"status": "passed", "stdout": commit_hash + "\n"},
+                "worktree_status": {"status": "passed", "stdout": " M private-file-marker\n"},
+            },
+            "workloads": [
+                {
+                    "id": "built",
+                    "status": "timeout",
+                    "stages": [
+                        {"name": "host-build", "status": "passed", "returncode": 0},
+                        {"name": "fixture-command", "status": "timeout", "timeout_seconds": 3},
+                    ],
+                },
+                {
+                    "id": "blocked",
+                    "status": "failed",
+                    "stages": [
+                        {
+                            "name": "host-build",
+                            "status": "failed",
+                            "returncode": 7,
+                            "stdout": "captured-stdout-marker",
+                            "stderr": "captured-stderr-marker",
+                            "detail": "stage-detail-marker",
+                        },
+                        {"name": "fixture-command", "status": "skipped"},
+                    ],
+                },
+            ],
+        }
+
+        markdown = self.report_output(result, "--format", "markdown")
+
+        self.assertTrue(markdown.startswith("# Xenora fixture report\n"))
+        self.assertIn(f"- Commit: {commit_hash}\n", markdown)
+        self.assertIn("- Worktree: dirty\n", markdown)
+        for row in (
+            ("`built`", "host-build", "passed", "0", "unavailable"),
+            ("`built`", "fixture-command", "timeout", "unavailable", "3"),
+            ("`blocked`", "host-build", "failed", "7", "unavailable"),
+            ("`blocked`", "fixture-command", "skipped", "unavailable", "unavailable"),
+        ):
+            self.assertIn("| " + " | ".join(row) + " |", markdown)
+        self.assertNotIn("marker", markdown)
+
+    def test_markdown_handles_legacy_report_without_context(self):
+        result = {
+            "workloads": [
+                {
+                    "id": "legacy",
+                    "status": "missing-tool",
+                    "stages": [{"name": "fixture-command", "status": "missing-tool"}],
+                },
+            ],
+        }
+
+        markdown = self.report_output(result, "--format", "markdown")
+
+        self.assertIn("- Commit: unavailable\n", markdown)
+        self.assertIn("- Worktree: unavailable\n", markdown)
+        self.assertIn("| `legacy` | fixture-command | missing-tool | unavailable | unavailable |", markdown)
+        self.assertNotIn("host-build", markdown)
+        self.assertEqual(
+            self.report_output(result),
+            "legacy: missing-tool\n  fixture-command: missing-tool\n",
+        )
+
+    def test_markdown_blocks_untrusted_workload_and_metadata_markup(self):
+        payload = "unsafe|value\n# injection\n<script>injected</script>"
+        result = {
+            "context": {"commit": {"status": "passed", "stdout": payload}},
+            "workloads": [
+                {
+                    "id": payload,
+                    "status": "passed",
+                    "stages": [{"name": "fixture-command", "status": "passed", "returncode": 0}],
+                },
+            ],
+        }
+
+        markdown = self.report_output(result, "--format", "markdown")
+
+        self.assertIn("- Commit: unavailable\n", markdown)
+        self.assertIn("| unavailable | fixture-command | passed | 0 | unavailable |", markdown)
+        self.assertNotIn("unsafe|value", markdown)
+        self.assertNotIn("\n# injection", markdown)
+        self.assertNotIn("<script>", markdown)
 
     def test_build_failure_skips_fixture_and_survives_report_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:

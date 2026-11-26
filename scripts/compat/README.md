@@ -11,6 +11,7 @@ python3 scripts/compat/runner.py list
 python3 scripts/compat/runner.py run --suite c
 python3 scripts/compat/runner.py run guest_cpp_path --timeout 300
 python3 scripts/compat/runner.py report artifacts/compat/RESULT.json
+python3 scripts/compat/runner.py report artifacts/compat/RESULT.json --format markdown
 python3 scripts/compat/runner.py compare artifacts/compat/BASE.json artifacts/compat/HEAD.json
 ```
 
@@ -18,7 +19,9 @@ Runs are sequential. The runner first compiles the host test harness with
 `cargo test --no-run`, then runs the fixture test only if that succeeds. The
 host-build stage does not compile the guest fixture. The timeout applies to
 each stage separately. A timed-out command and its process group are killed.
-Output is retained as a bounded prefix with truncation flags. Reports contain
+Output is retained up to 32 KiB per stream; longer output keeps the beginning
+and end and sets a truncation flag. Markdown summaries omit captured output.
+JSON reports contain
 the command, host status, exit code, output, elapsed time, host and Rust
 versions, commit and worktree status. Review reports before sharing: compiler
 and test output may contain local paths. Results default to the ignored

@@ -7,7 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
-- A compatibility runner for selected original C, C++ and module fixture tests, with bounded command execution and reports that distinguish test outcomes from separate build or guest-execution evidence (#792).
+- A compatibility runner for selected original C, C++ and module fixture tests, with bounded command execution, JSON and Markdown reports, and distinct host-build and fixture-command outcomes (#792).
 - The CRT spawn family refuses honestly: `_spawnve` and `_wspawnve` answer minus one with ENOSYS in errno across ucrtbase, msvcrt and the process API set, since the machine is one process and cannot host a child. Local in-module tests cover the refusal shape.
 - `GetSecurityInfo` answers the owner and group of any object as the machine's one identity and honestly refuses access-control-list queries (ERROR_NOT_SUPPORTED in the return value), since the machine models no ACLs. Local in-module tests cover both directions.
 - `getservbyname` resolves service names from the standard Internet assignment table (http, https, ssh, ftp, smtp, domain, and others) with ports in network byte order and misses unknown services honestly. Local in-module tests cover the resolution and the miss.

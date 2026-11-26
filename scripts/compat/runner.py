@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import signal
 import subprocess
@@ -25,6 +26,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_LIMIT = 32 * 1024
+OUTPUT_HALF = OUTPUT_LIMIT // 2
 DEFAULT_TIMEOUT = 300
 RESULTS_DIR = ROOT / "artifacts" / "compat"
 SCHEMA_VERSION = 1
@@ -32,7 +34,7 @@ STATUSES = {"passed", "failed", "timeout", "missing-tool", "launch-error"}
 
 
 def capture(argv, timeout, env):
-    """Retain a bounded prefix of each stream and drain the rest until exit."""
+    """Drain both streams, retaining the beginning and end if over the limit."""
     started = time.monotonic()
     output = {name: bytearray() for name in ("stdout", "stderr")}
     truncated = dict.fromkeys(output, False)
@@ -84,9 +86,11 @@ def capture(argv, timeout, env):
                             selector.unregister(key.fileobj)
                             continue
                         name = key.data
-                        available = OUTPUT_LIMIT - len(output[name])
-                        output[name].extend(chunk[:available])
-                        truncated[name] |= len(chunk) > available
+                        retained = output[name]
+                        retained.extend(chunk)
+                        if len(retained) > OUTPUT_LIMIT:
+                            del retained[OUTPUT_HALF:-OUTPUT_HALF]
+                            truncated[name] = True
         finally:
             # Reap the direct child and terminate any surviving descendants still
             # in the command's process group, including those retaining a pipe.
@@ -103,12 +107,21 @@ def capture(argv, timeout, env):
         if status == "timeout" and detail is None:
             detail = "Host deadline expired"
 
+    decoded = {}
+    for name, data in output.items():
+        if truncated[name]:
+            # Decode the retained regions separately so bytes across the gap
+            # cannot combine into a character that was absent from the stream.
+            decoded[name] = data[:OUTPUT_HALF].decode("utf-8", errors="replace")
+            decoded[name] += data[OUTPUT_HALF:].decode("utf-8", errors="replace")
+        else:
+            decoded[name] = data.decode("utf-8", errors="replace")
     return {
         "status": status,
         "returncode": returncode,
         "elapsed_seconds": round(time.monotonic() - started, 6),
         "detail": detail,
-        **{name: data.decode("utf-8", errors="replace") for name, data in output.items()},
+        **decoded,
         **{f"{name}_truncated": value for name, value in truncated.items()},
     }
 
@@ -263,6 +276,45 @@ def report(result):
             print(f"  {stage['name']}: {stage['status']}{suffix}")
 
 
+def report_markdown(result):
+    metadata = result.get("context", {})
+    commit = metadata.get("commit", {})
+    revision = commit["stdout"].strip() if commit.get("status") == "passed" else ""
+    commit_label = "unavailable"
+    if re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", revision):
+        commit_label = revision
+
+    worktree = metadata.get("worktree_status")
+    worktree_label = "unavailable"
+    if isinstance(worktree, dict) and worktree.get("status") == "passed":
+        status_output = worktree.get("stdout")
+        if isinstance(status_output, str):
+            worktree_label = "dirty" if status_output else "clean"
+
+    print("# Xenora fixture report\n")
+    print(f"- Commit: {commit_label}")
+    print(f"- Worktree: {worktree_label}\n")
+    print("The fixture-command status describes the host test command as a whole.\n")
+    print("| Workload | Stage | Status | Host exit code | Timeout (s) |")
+    print("| --- | --- | --- | ---: | ---: |")
+    for workload in result["workloads"]:
+        workload_id = workload["id"]
+        workload_label = "unavailable"
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", workload_id):
+            workload_label = f"`{workload_id}`"
+        for stage in workload["stages"]:
+            returncode = stage.get("returncode")
+            exit_label = "unavailable" if returncode is None else str(returncode)
+            timeout = stage.get("timeout_seconds")
+            timeout_label = "unavailable"
+            if type(timeout) in (float, int) and 0 < timeout <= 3600:
+                timeout_label = str(timeout)
+            print(
+                f"| {workload_label} | {stage['name']} | {stage['status']} "
+                f"| {exit_label} | {timeout_label} |"
+            )
+
+
 def compare(baseline, candidate):
     def statuses(result):
         return {
@@ -317,6 +369,7 @@ def main(argv=None):
     run.add_argument("--output", type=Path, metavar="FILE")
     summary = actions.add_parser("report", help="summarize a saved result")
     summary.add_argument("result", type=Path)
+    summary.add_argument("--format", choices=("text", "markdown"), default="text")
     comparison = actions.add_parser("compare", help="compare stage outcomes")
     comparison.add_argument("baseline", type=Path)
     comparison.add_argument("candidate", type=Path)
@@ -324,7 +377,11 @@ def main(argv=None):
 
     try:
         if args.action == "report":
-            report(read_result(args.result))
+            result = read_result(args.result)
+            if args.format == "markdown":
+                report_markdown(result)
+            else:
+                report(result)
             return 0
         if args.action == "compare":
             return compare(read_result(args.baseline), read_result(args.candidate))

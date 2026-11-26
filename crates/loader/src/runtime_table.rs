@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 211] = [
+pub static SERVICES: [ServiceMetadata; 214] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -543,7 +543,7 @@ pub static SERVICES: [ServiceMetadata; 211] = [
         parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "offset", kind: "i32" }, Parameter { name: "origin", kind: "i32" }],
         result: "i32",
         status: ServiceStatus::Implemented,
-        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
         failure: "-1 with errno EBADF for a descriptor that is not open, EINVAL for an unknown origin, a position before the start or one no 32-bit long holds",
         reference: "io.h _lseek",
         tests: &["descriptors_share_files_with_streams"],
@@ -569,6 +569,39 @@ pub static SERVICES: [ServiceMetadata; 211] = [
         failure: "0 always, as nothing here is a character device; errno EBADF for a descriptor that is not open",
         reference: "io.h _isatty",
         tests: &["descriptors_share_files_with_streams"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_lseeki64",
+        parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "offset", kind: "u64" }, Parameter { name: "origin", kind: "i32" }],
+        result: "u64",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start",
+        reference: "io.h _lseeki64",
+        tests: &["legacy_descriptor_seek_and_tell_positions"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_telli64",
+        parameters: &[Parameter { name: "fd", kind: "i32" }],
+        result: "u64",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EBADF for a descriptor that is not open or a standard one",
+        reference: "io.h _telli64",
+        tests: &["legacy_descriptor_seek_and_tell_positions"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_setmode",
+        parameters: &[Parameter { name: "fd", kind: "i32" }, Parameter { name: "mode", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "-1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented",
+        reference: "io.h _setmode",
+        tests: &["legacy_descriptor_seek_and_tell_positions"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2790,6 +2823,33 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.i32(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::_isatty(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_lseeki64", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.i32(2)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_lseeki64(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_telli64", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_telli64(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_setmode", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.i32(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_setmode(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

@@ -446,6 +446,7 @@ service ucrtbase.dll _lseek(fd: i32, offset: i32, origin: i32) -> i32
     handler _lseek
     status implemented
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails -1 with errno EBADF for a descriptor that is not open, EINVAL for an unknown origin, a position before the start or one no 32-bit long holds
     ref io.h _lseek
     test descriptors_share_files_with_streams
@@ -467,6 +468,33 @@ service ucrtbase.dll _isatty(fd: i32) -> i32
     fails 0 always, as nothing here is a character device; errno EBADF for a descriptor that is not open
     ref io.h _isatty
     test descriptors_share_files_with_streams
+service ucrtbase.dll _lseeki64(fd: i32, offset: u64, origin: i32) -> u64
+    handler _lseeki64
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start
+    ref io.h _lseeki64
+    test legacy_descriptor_seek_and_tell_positions
+
+service ucrtbase.dll _telli64(fd: i32) -> u64
+    handler _telli64
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or a standard one
+    ref io.h _telli64
+    test legacy_descriptor_seek_and_tell_positions
+
+service ucrtbase.dll _setmode(fd: i32, mode: i32) -> i32
+    handler _setmode
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented
+    ref io.h _setmode
+    test legacy_descriptor_seek_and_tell_positions
+
 
 service ucrtbase.dll _access(name: ptr, mode: i32) -> i32
     handler _access

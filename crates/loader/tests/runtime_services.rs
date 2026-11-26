@@ -6527,3 +6527,43 @@ fn legacy_time_pid_mask_and_random_services_run() {
     guest.call("srand", &[1]);
     assert_eq!(guest.call("rand", &[]), 41);
 }
+
+#[test]
+fn legacy_descriptor_seek_and_tell_positions() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    // Open a file in binary, write eight bytes, and measure with the 64-bit
+    // forms: the position after the write is 8.
+    guest.memory.write_bytes(NAME, b"fd64.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    guest.memory.write_bytes(buf, b"abcdefgh").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf, 8]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_telli64", &[fd]), 8);
+    // A negative offset from the end reaches position 6, and a positive one
+    // from the start reaches past the end, as seeking permits.
+    assert_eq!(guest.call("_lseeki64", &[fd, (-2i64) as u64, 2]), 6);
+    assert_eq!(guest.call("_telli64", &[fd]), 6);
+    assert_eq!(guest.call("_lseeki64", &[fd, 20, 0]), 20);
+    // A position before the start and an unknown origin are -1 with EINVAL.
+    assert_eq!(guest.call("_lseeki64", &[fd, (-40i64) as u64, 0]), u64::MAX);
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.call("_lseeki64", &[fd, 0, 9]), u64::MAX);
+    // The standard descriptors cannot be sought.
+    assert_eq!(guest.call("_lseeki64", &[0, 0, 1]), u64::MAX);
+    assert_eq!(guest.errno(), EBADF);
+    // `_setmode` answers the previous translation: the file opened binary.
+    assert_eq!(guest.call("_setmode", &[fd, 0x4000]), 0x8000);
+    assert_eq!(guest.call("_setmode", &[fd, 0x8000]), 0x4000);
+    // A bad descriptor and a bad mode are -1 with their errnos.
+    assert_eq!(
+        guest.call("_setmode", &[77, 0x4000]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(
+        guest.call("_setmode", &[fd, 0x2000]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    assert_eq!(guest.errno(), EINVAL);
+}

@@ -1521,6 +1521,49 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _lseeki64(
+        context: &mut ServiceContext<'_>,
+        fd: i32,
+        offset: u64,
+        origin: i32,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.seek_descriptor64(&drive, fd, offset as i64, origin)
+        };
+        let outcome =
+            outcome.map(|inner| {
+                inner.map(|position| position as u64).map_err(
+                    |crt_streams::Failed(value, errno)| crt_streams::Failed(value as u64, errno),
+                )
+            });
+        or_errno(context, outcome)
+    }
+
+    pub fn _telli64(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.tell_descriptor64(&drive, fd)
+        };
+        let outcome =
+            outcome.map(|inner| {
+                inner.map(|position| position as u64).map_err(
+                    |crt_streams::Failed(value, errno)| crt_streams::Failed(value as u64, errno),
+                )
+            });
+        or_errno(context, outcome)
+    }
+
+    pub fn _setmode(context: &mut ServiceContext<'_>, fd: i32, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.set_descriptor_mode(fd, mode)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _fileno(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
         let outcome = context.state.crt_streams().descriptor_of(stream);
         or_errno(context, outcome)

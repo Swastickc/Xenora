@@ -953,6 +953,48 @@ impl StandardStreams {
             .map(|position| position as i32)
             .map_err(|errno| Failed(-1, errno)))
     }
+    /// `_lseeki64` (#459). The 64-bit form of the seek above: positions no
+    /// 32-bit `long` need hold, the same rejection of the standard
+    /// descriptors.
+    pub(super) fn seek_descriptor64(
+        &mut self,
+        drive: &ObjectState,
+        fd: i32,
+        offset: i64,
+        origin: i32,
+    ) -> Outcome<i64> {
+        if fd < 3 {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        if origin < 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        Ok(self
+            .opened
+            .descriptor_seek64(drive, fd as u32, offset, origin as u32)
+            .map_err(|errno| Failed(-1, errno)))
+    }
+
+    /// `_telli64` (#459): the descriptor's position, a seek of zero from the
+    /// current one, with the same rejection of the standard descriptors.
+    pub(super) fn tell_descriptor64(&mut self, drive: &ObjectState, fd: i32) -> Outcome<i64> {
+        self.seek_descriptor64(drive, fd, 0, 1)
+    }
+
+    /// `_setmode` (#459): the text or binary translation of the descriptor's
+    /// stream, answering the previous one. The hosted streams are
+    /// byte-oriented, so the wide forms are `EINVAL` here, and a descriptor
+    /// that is not open is `EBADF`.
+    pub(super) fn set_descriptor_mode(&mut self, fd: i32, mode: i32) -> Outcome<i32> {
+        if fd < 0 {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(self
+            .opened
+            .descriptor_set_mode(fd as u32, mode as u32)
+            .map(|previous| previous as i32)
+            .map_err(|errno| Failed(-1, errno)))
+    }
 
     /// `_fileno`. The descriptor of a stream: 0, 1 or 2 for the standard
     /// ones, a shared descriptor for one `fopen` returned. -1 with

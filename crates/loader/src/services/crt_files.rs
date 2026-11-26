@@ -750,6 +750,56 @@ impl FileStreams {
         Ok(target as i64)
     }
 
+    /// `_lseeki64`. What `_lseek` does, with a 64-bit offset and positions
+    /// no 32-bit `long` need hold: the file model's positions are the
+    /// drive's bytes, so the limit is the signed range itself.
+    pub(super) fn descriptor_seek64(
+        &mut self,
+        drive: &ObjectState,
+        fd: u32,
+        offset: i64,
+        origin: u32,
+    ) -> Result<i64, u32> {
+        if origin > 2 {
+            return Err(EINVAL);
+        }
+        if let Some(Descriptor::Shared(file)) = self.descriptors.get(&fd) {
+            let file = *file;
+            self.seek(drive, file, offset, origin)?;
+            return self.tell(file).map(|position| position as i64);
+        }
+        let path = self.descriptor_stream(fd)?.path.clone();
+        let stream = self.descriptor_stream(fd)?;
+        let base = match origin {
+            0 => 0,
+            1 => stream.position,
+            2 => drive.drive_file(&path).ok_or(EBADF)?.len() as u64,
+            _ => return Err(EINVAL),
+        };
+        let target = i128::from(base) + i128::from(offset);
+        if !(0..=i128::from(i64::MAX)).contains(&target) {
+            return Err(EINVAL);
+        }
+        drive.drive_file(&stream.path).ok_or(EBADF)?;
+        stream.position = target as u64;
+        Ok(target as i64)
+    }
+
+    /// `_setmode`: the text or binary translation of the descriptor's
+    /// stream, answering the previous one. The modes are the `<fcntl.h>`
+    /// values `_O_TEXT` 0x4000 and `_O_BINARY` 0x8000; anything else is
+    /// `EINVAL`, the wide forms included — the hosted runtime's streams are
+    /// byte-oriented, as `_open` already refuses them.
+    pub(super) fn descriptor_set_mode(&mut self, fd: u32, mode: u32) -> Result<u32, u32> {
+        if mode != 0x4000 && mode != 0x8000 {
+            return Err(EINVAL);
+        }
+        let stream = self.descriptor_stream(fd)?;
+        let previous = if stream.text { 0x4000 } else { 0x8000 };
+        stream.text = mode == 0x4000;
+        Ok(previous)
+    }
+
     /// `_close`. Closing a shared descriptor closes the underlying file, so
     /// the stream it came from fails afterwards, as it does in the CRT.
     pub(super) fn descriptor_close(

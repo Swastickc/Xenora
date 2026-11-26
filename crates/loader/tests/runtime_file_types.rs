@@ -49,6 +49,16 @@ const IMPORTS: &[(&str, &str)] = &[
     ("msvcrt.dll", "_stricmp"),
     ("msvcrt.dll", "_strnicmp"),
     ("msvcrt.dll", "strcpy"),
+    (KERNEL32, "GetFileAttributesExW"),
+    (KERNEL32, "GetFileAttributesExA"),
+    (KERNEL32, "LockFile"),
+    (KERNEL32, "UnlockFile"),
+    (KERNEL32, "IsDBCSLeadByteEx"),
+    (KERNEL32, "SetFileTime"),
+    (KERNEL32, "DeviceIoControl"),
+    (KERNEL32, "LoadLibraryExA"),
+    (KERNEL32, "SetEnvironmentVariableA"),
+    (KERNEL32, "SetEnvironmentVariableW"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -460,4 +470,111 @@ fn string_search_and_tokenizing_through_the_legacy_aliases() {
     let mut verify = [0u8; 8];
     guest.memory.read_bytes(OTHER, &mut verify).unwrap();
     assert_eq!(&verify[..7], b"copied\0");
+}
+
+fn wide_at2(guest: &mut Guest, address: u64, text: &str) {
+    for (index, unit) in text.encode_utf16().chain(std::iter::once(0)).enumerate() {
+        guest
+            .memory
+            .write_u16(address + index as u64 * 2, unit)
+            .unwrap();
+    }
+}
+
+/// The extended attributes pack the attribute word, zero times the drive
+/// does not track, and the size.
+#[test]
+fn the_extended_attributes_pack_attributes_times_and_size() {
+    const NAME7: u64 = SCRATCH;
+    const OUT7: u64 = SCRATCH + 0x400;
+    const DATA7: u64 = SCRATCH + 0x900;
+    const GOT7: u64 = SCRATCH + 0x808;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "sized.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(OUT7, b"123456789").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT7, 9, GOT7, 0]), 1);
+    // LockFile takes the byte range, and UnlockFile releases exactly it.
+    assert_eq!(guest.call("LockFile", &[handle, 0, 0, 9, 0]), 1);
+    assert_eq!(guest.call("UnlockFile", &[handle, 0, 0, 9, 0]), 1);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    wide_at2(&mut guest, NAME7, "sized.bin");
+    assert_eq!(guest.call("GetFileAttributesExW", &[NAME7, 0, DATA7]), 1);
+    assert_eq!(guest.u32_at(DATA7), 0x80, "FILE_ATTRIBUTE_NORMAL");
+    assert_eq!(
+        guest.u64_at(DATA7 + 4),
+        0,
+        "the drive tracks no creation time"
+    );
+    assert_eq!(
+        guest.u64_at(DATA7 + 20),
+        0,
+        "the drive tracks no write time"
+    );
+    assert_eq!(guest.u32_at(DATA7 + 32), 9, "size low word");
+    assert_eq!(guest.u32_at(DATA7 + 28), 0, "size high word");
+    // An absent file fails.
+    wide_at2(&mut guest, NAME7, "absent.bin");
+    assert_eq!(guest.call("GetFileAttributesExA", &[NAME7, 0, DATA7]), 0);
+    // UnlockFile rejects a bad handle.
+    assert_eq!(guest.call("UnlockFile", &[0xDEAD, 0, 0, 1, 0]), 0);
+}
+
+/// No served code page has DBCS lead bytes, and setting file times is
+/// honestly unsupported rather than a silent no-op.
+#[test]
+fn dbcs_is_always_false_and_file_times_are_unsupported() {
+    let mut guest = Guest::new(IMPORTS, &[]);
+    for byte in [0u64, 0x41, 0x81, 0xFF] {
+        assert_eq!(guest.call("IsDBCSLeadByteEx", &[65001, byte]), 0);
+        assert_eq!(guest.call("IsDBCSLeadByteEx", &[437, byte]), 0);
+    }
+    assert_eq!(guest.call("SetFileTime", &[1, 0, 0, 0]), 0);
+    assert_eq!(
+        guest.call("GetLastError", &[]) & 0xFFFF_FFFF,
+        50,
+        "ERROR_NOT_SUPPORTED"
+    );
+}
+
+/// DeviceIoControl validates the handle and honestly refuses every control
+/// code, the Ex library form resolves built-ins, and the environment is
+/// honestly immutable.
+#[test]
+fn device_control_library_ex_and_the_fixed_environment() {
+    const MODNAME: u64 = SCRATCH + 0x200;
+    const VAR: u64 = SCRATCH + 0x280;
+    const VALUE: u64 = SCRATCH + 0x2C0;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    // A bad handle is a bad handle; a valid one is honestly unsupported.
+    assert_eq!(
+        guest.call("DeviceIoControl", &[0xDEAD, 0, 0, 0, 0, 0, 0, 0]),
+        0
+    );
+    assert_eq!(
+        guest.call("GetLastError", &[]) & 0xFFFF_FFFF,
+        6,
+        "ERROR_INVALID_HANDLE"
+    );
+    let handle = create_file(&mut guest, "ioctl.bin", GENERIC_WRITE);
+    assert_eq!(
+        guest.call("DeviceIoControl", &[handle, 0, 0, 0, 0, 0, 0, 0]),
+        0
+    );
+    assert_eq!(
+        guest.call("GetLastError", &[]) & 0xFFFF_FFFF,
+        50,
+        "ERROR_NOT_SUPPORTED"
+    );
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    // LoadLibraryExA resolves a built-in module with a null file parameter.
+    narrow_at(&mut guest, MODNAME, "kernel32.dll");
+    let module = guest.call("LoadLibraryExA", &[MODNAME, 0, 0]);
+    assert_ne!(module, 0);
+    // The fixed environment refuses mutation honestly.
+    narrow_at(&mut guest, VAR, "PATH");
+    narrow_at(&mut guest, VALUE, "C:\\x");
+    assert_eq!(guest.call("SetEnvironmentVariableA", &[VAR, VALUE]), 0);
+    assert_eq!(guest.call("SetEnvironmentVariableW", &[VAR, VALUE]), 0);
+    assert_eq!(guest.call("GetLastError", &[]) & 0xFFFF_FFFF, 50);
 }

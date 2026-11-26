@@ -7,11 +7,13 @@
 // number and the program exits with it. With CRT_WINLOCKS_BREAK one
 // expectation is wrong on purpose.
 
+#include <direct.h>
 #include <errno.h>
 #include <io.h>
 #include <process.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <windows.h>
 
@@ -40,6 +42,16 @@ static BOOL unlock_ex(HANDLE file, DWORD offset, DWORD length) {
     OVERLAPPED overlapped = {0};
     overlapped.Offset = offset;
     return UnlockFileEx(file, 0, length, 0, &overlapped);
+}
+
+static volatile unsigned worker_done;
+static volatile unsigned worker_value;
+
+static unsigned __stdcall beginthread_worker(void *argument) {
+    worker_value = argument == (void *)0xfeed ? 77 : 0;
+    worker_done = 1;
+    _endthreadex(42);
+    return 0; /* not reached */
 }
 
 int main(void) {
@@ -129,6 +141,56 @@ int main(void) {
 
     CHECK("process id", (DWORD)_getpid() == GetCurrentProcessId());
     CHECK("close", CloseHandle(first) && CloseHandle(second));
+
+    // The wide CRT file operations sqlite uses for most of its file names.
+    FILE *wide = _wfopen(L"c:\\wops.txt", L"w");
+    CHECK("wfopen write", wide != NULL && fwrite("wide", 1, 4, wide) == 4 && fclose(wide) == 0);
+
+    struct _stat64i32 st;
+    memset(&st, 0, sizeof st);
+    CHECK("wstat regular file",
+          _wstat64i32(L"c:\\wops.txt", &st) == 0 && (st.st_mode & _S_IFREG) != 0
+              && (st.st_mode & _S_IWRITE) != 0 && st.st_size == 4);
+    CHECK("wstat missing fails", _wstat64i32(L"c:\\wops-missing.txt", &st) == -1);
+
+    CHECK("access exists", _access("c:\\wops.txt", 0) == 0 && _waccess(L"c:\\wops.txt", 6) == 0);
+    CHECK("access missing fails", _waccess(L"c:\\wops-missing.txt", 0) == -1);
+
+    CHECK("chmod readonly", _wchmod(L"c:\\wops.txt", _S_IREAD) == 0);
+    CHECK("readonly write access fails", _waccess(L"c:\\wops.txt", 2) == -1);
+    CHECK("readonly write open fails", _wfopen(L"c:\\wops.txt", L"w") == NULL);
+    CHECK("readonly unlink fails", _wunlink(L"c:\\wops.txt") == -1);
+    errno = 0;
+    memset(&st, 0, sizeof st);
+    CHECK("readonly stat mode",
+          _wstat64i32(L"c:\\wops.txt", &st) == 0 && (st.st_mode & _S_IWRITE) == 0);
+    CHECK("chmod writable", _wchmod(L"c:\\wops.txt", _S_IREAD | _S_IWRITE) == 0);
+    CHECK("unlink narrow", _unlink("c:\\wops.txt") == 0);
+    CHECK("wstat unlinked fails", _wstat64i32(L"c:\\wops.txt", &st) == -1);
+
+    CHECK("wmkdir", _wmkdir(L"c:\\wdir") == 0);
+    CHECK("wmkdir existing fails", _wmkdir(L"c:\\wdir") == -1);
+    FILE *inner = _wfopen(L"c:\\wdir\\in.txt", L"w");
+    CHECK("file inside new directory", inner != NULL && fclose(inner) == 0);
+    CHECK("wmkdir missing parent fails", _wmkdir(L"c:\\nope\\dir") == -1);
+    CHECK("wunlink inner", _wunlink(L"c:\\wdir\\in.txt") == 0);
+
+    // sqlite runs its background work through CRT threads: _beginthreadex is
+    // the CRT spelling of CreateThread, and _endthreadex the one of ExitThread.
+    uintptr_t thread = _beginthreadex(NULL, 0, beginthread_worker, (void *)0xfeed, 0, NULL);
+    CHECK("beginthreadex creates", thread != 0);
+    if (thread) {
+        CHECK("wait for the worker", WaitForSingleObject((HANDLE)thread, INFINITE) == WAIT_OBJECT_0);
+        DWORD exit_code = 0;
+        CHECK("worker exit code",
+              GetExitCodeThread((HANDLE)thread, &exit_code) && exit_code == 42);
+        CloseHandle((HANDLE)thread);
+    }
+    CHECK("worker wrote shared memory", worker_done == 1 && worker_value == 77);
+
+    errno = 0;
+    CHECK("beginthreadex null start fails",
+          _beginthreadex(NULL, 0, NULL, NULL, 0, NULL) == 0 && errno == EINVAL);
 
 #ifdef CRT_WINLOCKS_BREAK
     CHECK("the control fails", sectors == 999);

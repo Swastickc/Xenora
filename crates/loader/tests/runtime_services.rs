@@ -7467,3 +7467,115 @@ fn filbuf_and_flsbuf_move_single_bytes() {
     assert_eq!(guest.call("_filbuf", &[TEXT]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
     assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
 }
+
+
+#[test]
+fn an_assertion_prints_and_ends_the_process() {
+    let (mut guest, _) = stdio_guest();
+    let expression = place(&mut guest, NAME, b"x == 42");
+    let file = place(&mut guest, MODE, b"sqlite3.c");
+    let (_, exit) = guest.run("_assert", &[expression, file, 1337]);
+    assert_eq!(exit, xenora_loader::cpu::ExitReason::ProcessExit(3));
+    // stderr is the third captured stream: the message went there.
+    assert_eq!(
+        guest.state.standard_error(),
+        b"Assertion failed: x == 42, file sqlite3.c, line 1337\r\n"
+    );
+}
+
+
+#[test]
+fn beginthreadex_starts_a_thread_like_createthread() {
+    let mut guest = stdio_guest().0;
+    // The CRT form refuses what CreateThread refuses: security descriptors,
+    // unknown flags and a null start, with EINVAL instead of a last error.
+    let start = TEXT; // any non-null guest address
+    assert_eq!(guest.call("_beginthreadex", &[1, 0, start, 0]), 0);
+    assert_eq!(guest.errno(), 22);
+    assert_eq!(guest.call("_beginthreadex", &[0, 0, 0, 0]), 0);
+    assert_eq!(guest.errno(), 22);
+    guest.memory.write_u64(STACK_TOP + 32, 8).unwrap(); // unknown initflag bit
+    assert_eq!(guest.call("_beginthreadex", &[0, 0, start, 0]), 0);
+    assert_eq!(guest.errno(), 22);
+    // Without an attached scheduler the machine has no threads: ENOMEM.
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    assert_eq!(guest.call("_beginthreadex", &[0, 0, start, 0]), 0);
+    assert_eq!(guest.errno(), 12);
+
+    // Thread creation itself is proven end to end by the hosted fixture:
+    // `xenora run` attaches the scheduler, and a thread the fixture starts
+    // with _beginthreadex writes the shared memory the main thread reads
+    // after waiting on its handle.
+}
+
+
+#[test]
+fn the_wide_file_operations_follow_the_drive() {
+    let (mut guest, _streams) = stdio_guest();
+    // _wfopen opens the same files as fopen, with a wide name and mode.
+    let name = place_wide(&mut guest, NAME, "c:\\wide.txt");
+    let mode = place_wide(&mut guest, MODE, "w");
+    let file = guest.call("_wfopen", &[name, mode]);
+    assert_ne!(file, 0);
+    write(&mut guest, file, b"wide");
+    close(&mut guest, file);
+
+    // _wstat64i32 answers the 48-byte block: regular file, read and write,
+    // one link, the size, times of -1.
+    let stat = TEXT + 0x3800;
+    assert_eq!(guest.call("_wstat64i32", &[name, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.memory.read_u16(stat + 6).unwrap(),
+        0x8000 | 0x100 | 0x80
+    );
+    assert_eq!(guest.memory.read_u16(stat + 8).unwrap(), 1);
+    assert_eq!(guest.memory.read_u32(stat + 20).unwrap(), 4);
+    assert_eq!(guest.memory.read_u64(stat + 24).unwrap(), u64::MAX);
+
+    // _access: the file exists, in every mode, until it is read-only.
+    let narrow = place(&mut guest, TEXT + 0x2000, b"c:\\wide.txt");
+    assert_eq!(guest.call("_access", &[narrow, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_waccess", &[name, 6]) & 0xFFFF_FFFF, 0);
+    // _wchmod without the write bit makes the file read-only.
+    assert_eq!(guest.call("_wchmod", &[name, 0x100]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("_waccess", &[name, 2]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), 13);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0x80, 0x80); // unchanged: not stat'd again
+    assert_eq!(guest.call("_wstat64i32", &[name, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0x80, 0);
+    // A read-only file cannot be written or unlinked.
+    assert_eq!(guest.call("_wunlink", &[name]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), 13);
+    // Making it writable again restores both.
+    assert_eq!(guest.call("_wchmod", &[name, 0x180]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_unlink", &[narrow]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("_wstat64i32", &[name, stat]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), 2);
+
+    // _wmkdir creates directories files can live in, once.
+    let dir = place_wide(&mut guest, NAME, "c:\\wdir");
+    assert_eq!(guest.call("_wmkdir", &[dir]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_wmkdir", &[dir]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    let inner = place_wide(&mut guest, NAME + 0x40, "c:\\wdir\\in.txt");
+    let wmode = place_wide(&mut guest, MODE, "w");
+    let file = guest.call("_wfopen", &[inner, wmode]);
+    assert_ne!(file, 0);
+    close(&mut guest, file);
+    // A missing parent fails with ENOENT.
+    let deep = place_wide(&mut guest, NAME + 0x80, "c:\\nope\\dir");
+    assert_eq!(guest.call("_wmkdir", &[deep]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), 2);
+    // Invalid modes fail with EINVAL.
+    let dir_narrow = place(&mut guest, TEXT + 0x2000, b"c:\\wdir");
+    assert_eq!(
+        guest.call("_access", &[dir_narrow, 8]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), 22);
+}

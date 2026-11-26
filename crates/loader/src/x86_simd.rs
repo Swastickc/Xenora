@@ -8,6 +8,7 @@
 
 use crate::cpu::{CpuState, ExitReason, Mxcsr, RFlags};
 use crate::memory::GuestMemory;
+use crate::x86_avx;
 use crate::x86_decode::{Encoding, Insn, RegOperand, RmOperand};
 use crate::x86_exec::{
     address, canonical_access, read_mem, read_reg, rm_operand, write_mem, write_reg,
@@ -179,6 +180,20 @@ fn blend(old: u128, source: u128, bits: u32, imm: u64) -> u128 {
     })
 }
 
+/// Lanes of `source` where the sign bit of the same lane of `control` is set, else
+/// of `old`, for the blends by a register.
+pub(crate) fn select(op: Op, old: u128, source: u128, control: u128) -> u128 {
+    let bits = match op {
+        Op::Pblendvb => 8,
+        Op::Blendvps => 32,
+        _ => 64,
+    };
+    build(bits, |index| {
+        let chosen = lane(control, bits, index) >> (bits - 1) != 0;
+        lane(if chosen { source } else { old }, bits, index)
+    })
+}
+
 /// INSERTPS: `value` in the lane of bits 5:4, then zeros by bits 3:0.
 fn insert_single(old: u128, value: u64, imm: u64) -> u128 {
     build(32, |index| {
@@ -201,7 +216,7 @@ fn smallest_word(value: u128) -> u128 {
 }
 
 /// Result of a two-source packed operation.
-fn packed(op: Op, a: u128, b: u128) -> u128 {
+pub(crate) fn packed(op: Op, a: u128, b: u128) -> u128 {
     match op {
         Op::Pand => a & b,
         Op::Pandn => !a & b,
@@ -316,6 +331,54 @@ fn packed(op: Op, a: u128, b: u128) -> u128 {
     }
 }
 
+/// Result of a shuffle, blend or similar operation controlled by an immediate.
+pub(crate) fn controlled(op: Op, old: u128, source: u128, imm: u64) -> u128 {
+    match op {
+        Op::Pshufd => shuffle_32(source, source, imm),
+        Op::Pshuflw => shuffle_16(source, imm, 0),
+        Op::Pshufhw => shuffle_16(source, imm, 4),
+        Op::Shufps => shuffle_32(old, source, imm),
+        Op::Palignr => align_right(old, source, imm),
+        Op::Pblendw => blend(old, source, 16, imm),
+        Op::Blendps => blend(old, source, 32, imm),
+        Op::Blendpd => blend(old, source, 64, imm),
+        Op::Insertps => insert_single(old, lane(source, 32, imm as u32 >> 6 & 3), imm),
+        Op::Mpsadbw => sums_of_differences(old, source, imm),
+        _ => build(64, |index| {
+            let from = if index == 0 { old } else { source };
+            lane(from, 64, (imm >> index & 1) as u32)
+        }),
+    }
+}
+
+/// Result of a shift by an immediate.
+pub(crate) fn shift_by(op: Op, value: u128, count: u64) -> u128 {
+    match op {
+        Op::Psrldq => shift_bytes(value, count, false),
+        Op::Pslldq => shift_bytes(value, count, true),
+        op => shift(op, value, count),
+    }
+}
+
+/// `old` with the lane that the immediate selects, modulo their number, taken from a
+/// general register or memory.
+pub(crate) fn insert_general(
+    cpu: &CpuState,
+    memory: &GuestMemory,
+    insn: &Insn,
+    old: u128,
+) -> Result<u128, ExitReason> {
+    let width = insn.rm_size;
+    let value = match rm_operand(insn)? {
+        RmOperand::Reg(source) => read_reg(cpu, source, width.max(4)),
+        RmOperand::Mem(operand) => read_mem(memory, address(cpu, &operand), width)?,
+    };
+    let bits = 8 * u64::from(width);
+    let shift = bits * (insn.imm & (128 / bits - 1));
+    let mask = low_mask(width);
+    Ok(old & !(mask << shift) | (u128::from(value) & mask) << shift)
+}
+
 fn low_mask(size: u8) -> u128 {
     if size == 16 {
         u128::MAX
@@ -385,8 +448,29 @@ pub(crate) fn read_rm(
     }
 }
 
+/// The immediate. INSERTPS ignores its source lane for memory, which has one lane.
+pub(crate) fn lane_immediate(insn: &Insn) -> u64 {
+    if insn.op == Op::Insertps && insn.memory().is_some() {
+        insn.imm & 0x3F
+    } else {
+        insn.imm
+    }
+}
+
 /// Execute a vector instruction. RIP is advanced by the caller.
 pub(crate) fn execute(
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+    insn: &Insn,
+) -> Result<(), ExitReason> {
+    match insn.vex {
+        Some(vex) => x86_avx::execute(cpu, memory, insn, vex),
+        None => execute_legacy(cpu, memory, insn),
+    }
+}
+
+/// Execute a legacy instruction, or a VEX-encoded one whose result is not a vector.
+pub(crate) fn execute_legacy(
     cpu: &mut CpuState,
     memory: &mut GuestMemory,
     insn: &Insn,
@@ -425,18 +509,8 @@ pub(crate) fn execute(
                 }
             }
         }
-        // The immediate selects a lane of the operand's width, modulo their number.
         (_, Encoding::XmmGprImm) => {
-            let width = insn.rm_size;
-            let value = match rm_operand(insn)? {
-                RmOperand::Reg(source) => read_reg(cpu, source, width.max(4)),
-                RmOperand::Mem(operand) => read_mem(memory, address(cpu, &operand), width)?,
-            };
-            let bits = 8 * u64::from(width);
-            let shift = bits * (insn.imm & (128 / bits - 1));
-            let mask = low_mask(width);
-            let value = (u128::from(value) & mask) << shift;
-            cpu.xmm[reg] = cpu.xmm[reg] & !(mask << shift) | value;
+            cpu.xmm[reg] = insert_general(cpu, memory, insn, cpu.xmm[reg])?;
         }
         (_, Encoding::GprXmmImm) => {
             let width = insn.rm_size;
@@ -464,17 +538,8 @@ pub(crate) fn execute(
         }
         // The sign bits of XMM0's lanes select the source.
         (Op::Pblendvb | Op::Blendvps | Op::Blendvpd, _) => {
-            let bits = match insn.op {
-                Op::Pblendvb => 8,
-                Op::Blendvps => 32,
-                _ => 64,
-            };
             let source = read_rm(cpu, memory, insn)?;
-            let (old, control) = (cpu.xmm[reg], cpu.xmm[0]);
-            cpu.xmm[reg] = build(bits, |index| {
-                let chosen = lane(control, bits, index) >> (bits - 1) != 0;
-                lane(if chosen { source } else { old }, bits, index)
-            });
+            cpu.xmm[reg] = select(insn.op, cpu.xmm[reg], source, cpu.xmm[0]);
         }
         (Op::Pextrw, _) => {
             let value = lane(read_rm(cpu, memory, insn)?, 16, (insn.imm & 7) as u32);
@@ -545,37 +610,12 @@ pub(crate) fn execute(
         (_, Encoding::RmImmXmm) => {
             if let RmOperand::Reg(target) = rm_operand(insn)? {
                 let target = &mut cpu.xmm[xmm(target)];
-                *target = match insn.op {
-                    Op::Psrldq => shift_bytes(*target, insn.imm, false),
-                    Op::Pslldq => shift_bytes(*target, insn.imm, true),
-                    op => shift(op, *target, insn.imm),
-                };
+                *target = shift_by(insn.op, *target, insn.imm);
             }
         }
         (_, Encoding::XmmRmImm) => {
             let source = read_rm(cpu, memory, insn)?;
-            let old = cpu.xmm[reg];
-            let imm = insn.imm;
-            cpu.xmm[reg] = match insn.op {
-                Op::Pshufd => shuffle_32(source, source, imm),
-                Op::Pshuflw => shuffle_16(source, imm, 0),
-                Op::Pshufhw => shuffle_16(source, imm, 4),
-                Op::Shufps => shuffle_32(old, source, imm),
-                Op::Palignr => align_right(old, source, imm),
-                Op::Pblendw => blend(old, source, 16, imm),
-                Op::Blendps => blend(old, source, 32, imm),
-                Op::Blendpd => blend(old, source, 64, imm),
-                Op::Insertps => {
-                    // A memory source has one lane.
-                    let from = if in_memory { 0 } else { imm as u32 >> 6 & 3 };
-                    insert_single(old, lane(source, 32, from), imm)
-                }
-                Op::Mpsadbw => sums_of_differences(old, source, imm),
-                _ => build(64, |index| {
-                    let from = if index == 0 { old } else { source };
-                    lane(from, 64, (imm >> index & 1) as u32)
-                }),
-            };
+            cpu.xmm[reg] = controlled(insn.op, cpu.xmm[reg], source, lane_immediate(insn));
         }
         (op, _) => {
             let source = read_rm(cpu, memory, insn)?;

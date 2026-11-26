@@ -18,7 +18,10 @@ mod crt_math;
 mod crt_startup;
 mod crt_streams;
 mod cxx;
+mod environment;
+mod errors;
 mod events;
+mod file_mapping;
 mod files;
 mod gdk_queue;
 mod graphics;
@@ -26,6 +29,7 @@ mod heap;
 mod modules;
 mod platform_fixture;
 mod process;
+mod registry;
 mod startup_info;
 mod static_cxx;
 mod synch;
@@ -166,6 +170,9 @@ enum GuestObject {
         state: Arc<Mutex<events::Waitable>>,
         access: u32,
     },
+    FileMapping {
+        size: u64,
+    },
 }
 
 #[derive(Default)]
@@ -175,6 +182,7 @@ struct ObjectState {
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
     directories: BTreeSet<String>,
+    next_temp: u32,
 }
 
 impl ObjectState {
@@ -213,6 +221,7 @@ pub struct ServicesState {
     pub guest_profile: sysinfo::GuestSystemProfile,
     objects: Mutex<ObjectState>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
+    error_mode: Mutex<u32>,
     crt_arguments: Mutex<crt_arguments::CrtArguments>,
     startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
@@ -249,6 +258,7 @@ impl ServicesState {
             guest_profile: sysinfo::GuestSystemProfile::default(),
             objects: Mutex::new(ObjectState::default()),
             last_errors: Mutex::default(),
+            error_mode: Mutex::new(0),
             crt_arguments: Mutex::default(),
             startup: Mutex::default(),
             synch: Mutex::default(),
@@ -291,6 +301,17 @@ impl ServicesState {
 
     fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
         self.crt_arguments.lock().expect("program arguments")
+    }
+
+    /// Exchange the process error mode, returning the previous one. The
+    /// mode controls error dialogs that do not exist here; it is stored so
+    /// programs that propagate it - a parent passing it to children, say -
+    /// behave coherently.
+    pub(crate) fn exchange_error_mode(&self, mode: u32) -> u32 {
+        let mut guard = self.error_mode.lock().expect("error mode");
+        let previous = *guard;
+        *guard = mode;
+        previous
     }
 
     fn uptime_millis(&self) -> u64 {
@@ -530,7 +551,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                     },
                 ),
                 Some(GuestObject::File(file)) => (file.access, GuestObject::File(file.clone())),
-                Some(GuestObject::Search(_)) => return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0),
+                Some(GuestObject::Search(_) | GuestObject::FileMapping { .. }) => {
+                    return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+                }
                 None => return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
             }
         };
@@ -552,7 +575,9 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                 *rights = access
             }
             GuestObject::File(file) => file.access = access,
-            GuestObject::Search(_) => unreachable!("search handles cannot be duplicated"),
+            GuestObject::Search(_) | GuestObject::FileMapping { .. } => {
+                unreachable!("these handles cannot be duplicated")
+            }
         }
         thread.insert_handle(handle, object);
         Ok(1)
@@ -569,7 +594,12 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_heap(registry);
     crt::register_errno(registry);
     crt::register_conversions(registry);
+    crt::register_utilities(registry);
     crt_callbacks::register(registry, &state);
+    environment::register(registry, &state);
+    errors::register(registry, &state);
+    registry::register(registry, &state);
+    file_mapping::register(registry, &state);
     heap::register(registry, &state);
     cxx::register(registry, &state);
 
@@ -1101,6 +1131,17 @@ pub(crate) mod handlers {
             let mut streams = context.state.crt_streams();
             let mut drive = context.state.objects.lock().expect("guest object state");
             streams.put_string(context.memory, &mut drive, text, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `puts`: the string and a newline to stdout. Returns a nonnegative
+    /// value, or `EOF` with `errno` set.
+    pub fn puts(context: &mut ServiceContext<'_>, text: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.put_line_stdout(context.memory, &mut drive, text)
         };
         or_errno(context, outcome)
     }

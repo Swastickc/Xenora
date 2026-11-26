@@ -1,13 +1,12 @@
 # gfx1030 Wave32 arithmetic right shift
 
-[`tools/rdna2spirv.py:200`](https://github.com/ItsNotRexed/Leonida/blob/2d3369a4c82e6f36c5190c4c534d3df600e135ec/tools/rdna2spirv.py#L200),
-identified the arithmetic shift as a candidate. Xenora uses the public
+The arithmetic shift was selected as a candidate. Xenora uses the public
 [AMD RDNA 2 ISA](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture)
 and its existing pinned AMD XML generator for the VOP2 encoding. The lowering
 uses signed integer shift from the
 [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification).
-The implementation and fixture were authored in Xenora. No Leonida code, tables,
-dependencies or game material were imported.
+The implementation and fixture were authored in Xenora. No code, tables, dependencies
+or game material from other emulator projects were imported.
 
 The decoder accepts the VOP2 VGPR/VGPR form. The shader lifter retains the synthetic
 buffer ABI and emits a signed shift with an explicit five-bit count mask. The

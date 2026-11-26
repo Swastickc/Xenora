@@ -516,7 +516,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
             pc = usize::from(insn.len);
             if mnemonic.is_empty() || mnemonic.contains("opcode_0x") || mnemonic.starts_with("0f_")
             {
-                mnemonic = insn.op.name().to_string();
+                mnemonic = insn.name().to_string();
                 notes.clear();
             }
             if !is_translatable(&insn) {

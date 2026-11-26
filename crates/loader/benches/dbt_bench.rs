@@ -5,7 +5,14 @@
 //! Set `XENORA_DBT_BENCH_JSON=<path>` to also write the results as one JSON
 //! document (format version 1). The text output does not change. Values the
 //! benchmark cannot determine, such as the git revision outside a checkout,
-//! are written as `null`.
+//! are written as `null`. The benchmark cannot see build settings such as LTO,
+//! so `XENORA_DBT_BENCH_BUILD_LABEL=<text>` records a label of your choosing
+//! for them.
+//!
+//! Set `XENORA_DBT_BENCH_COMPARE=<baseline.json>,<candidate.json>` to compare
+//! two such documents instead of running the benchmark. The comparison is
+//! refused, with exit status 1, unless both runs used the same host, workload,
+//! build settings and sample counts.
 //!
 //! The benchmark target disables Cargo's test harness. To run the percentile
 //! unit tests, build with
@@ -154,6 +161,7 @@ struct RunInfo {
     revision: Option<String>,
     dirty: Option<bool>,
     debug_assertions: bool,
+    build_label: Option<String>,
     guest_code_bytes: usize,
     warmup: usize,
 }
@@ -187,6 +195,7 @@ fn run_info(guest_code_bytes: usize, warmup: usize) -> RunInfo {
         dirty: command_output("git", &["status", "--porcelain", "--untracked-files=no"])
             .map(|status| !status.is_empty()),
         debug_assertions: cfg!(debug_assertions),
+        build_label: non_empty(std::env::var("XENORA_DBT_BENCH_BUILD_LABEL").ok()),
         guest_code_bytes,
         warmup,
     }
@@ -274,7 +283,10 @@ fn json_document(
         ),
         (
             "build",
-            json_object(&[("debug_assertions", info.debug_assertions.to_string())]),
+            json_object(&[
+                ("debug_assertions", info.debug_assertions.to_string()),
+                ("label", json_option(info.build_label.as_ref(), string)),
+            ]),
         ),
         (
             "workload",
@@ -319,7 +331,471 @@ fn json_document(
     ])
 }
 
+/// A parsed JSON value. Numbers keep their source text, so integers compare exactly.
+#[derive(Clone, Debug, PartialEq)]
+enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    /// The value at a dotted path such as `host.cpu`, if every step is an object key.
+    fn get(&self, path: &str) -> Option<&Json> {
+        path.split('.').try_fold(self, |value, key| match value {
+            Json::Object(fields) => fields.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        })
+    }
+}
+
+const MAX_JSON_DEPTH: usize = 32;
+
+/// Reads one JSON document (RFC 8259) and rejects anything after it.
+fn parse_json(text: &str) -> Result<Json, String> {
+    let mut reader = JsonReader {
+        bytes: text.as_bytes(),
+        pos: 0,
+    };
+    let value = reader.value(0)?;
+    reader.skip_whitespace();
+    if reader.pos != reader.bytes.len() {
+        return reader.error("unexpected data after the document");
+    }
+    Ok(value)
+}
+
+struct JsonReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl JsonReader<'_> {
+    fn error<T>(&self, what: &str) -> Result<T, String> {
+        Err(format!("{what} at byte {}", self.pos))
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+
+    fn expect(&mut self, byte: u8) -> Result<(), String> {
+        if self.peek() == Some(byte) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            self.error(&format!("expected '{}'", byte as char))
+        }
+    }
+
+    fn value(&mut self, depth: usize) -> Result<Json, String> {
+        if depth > MAX_JSON_DEPTH {
+            return self.error("nesting too deep");
+        }
+        self.skip_whitespace();
+        match self.peek() {
+            None => self.error("unexpected end of input"),
+            Some(b'n') => self.literal("null", Json::Null),
+            Some(b't') => self.literal("true", Json::Bool(true)),
+            Some(b'f') => self.literal("false", Json::Bool(false)),
+            Some(b'"') => Ok(Json::String(self.string()?)),
+            Some(b'[') => self.array(depth),
+            Some(b'{') => self.object(depth),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            Some(_) => self.error("unexpected character"),
+        }
+    }
+
+    fn literal(&mut self, word: &str, value: Json) -> Result<Json, String> {
+        if self.bytes[self.pos..].starts_with(word.as_bytes()) {
+            self.pos += word.len();
+            Ok(value)
+        } else {
+            self.error("invalid literal")
+        }
+    }
+
+    fn array(&mut self, depth: usize) -> Result<Json, String> {
+        self.expect(b'[')?;
+        let mut items = Vec::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Ok(Json::Array(items));
+        }
+        loop {
+            items.push(self.value(depth + 1)?);
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(Json::Array(items));
+                }
+                _ => return self.error("expected ',' or ']'"),
+            }
+        }
+    }
+
+    fn object(&mut self, depth: usize) -> Result<Json, String> {
+        self.expect(b'{')?;
+        let mut fields: Vec<(String, Json)> = Vec::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(Json::Object(fields));
+        }
+        loop {
+            self.skip_whitespace();
+            let key = self.string()?;
+            if fields.iter().any(|(k, _)| *k == key) {
+                return self.error(&format!("duplicate key `{key}`"));
+            }
+            self.skip_whitespace();
+            self.expect(b':')?;
+            let value = self.value(depth + 1)?;
+            fields.push((key, value));
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(Json::Object(fields));
+                }
+                _ => return self.error("expected ',' or '}'"),
+            }
+        }
+    }
+
+    fn digits(&mut self) -> usize {
+        let start = self.pos;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.pos += 1;
+        }
+        self.pos - start
+    }
+
+    fn number(&mut self) -> Result<Json, String> {
+        let start = self.pos;
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                self.digits();
+            }
+            _ => return self.error("invalid number"),
+        }
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            if self.digits() == 0 {
+                return self.error("invalid number");
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            if self.digits() == 0 {
+                return self.error("invalid number");
+            }
+        }
+        // Only ASCII digits and signs were consumed.
+        Ok(Json::Number(
+            String::from_utf8_lossy(&self.bytes[start..self.pos]).into_owned(),
+        ))
+    }
+
+    fn hex4(&mut self) -> Result<u32, String> {
+        let digits = self.bytes.get(self.pos..self.pos + 4);
+        let value = digits
+            .and_then(|d| std::str::from_utf8(d).ok())
+            .and_then(|d| u32::from_str_radix(d, 16).ok());
+        match value {
+            Some(value) if digits.is_some_and(|d| d.iter().all(u8::is_ascii_hexdigit)) => {
+                self.pos += 4;
+                Ok(value)
+            }
+            _ => self.error("invalid \\u escape"),
+        }
+    }
+
+    fn unicode_escape(&mut self) -> Result<char, String> {
+        let first = self.hex4()?;
+        let code = match first {
+            0xD800..=0xDBFF => {
+                if !self.bytes[self.pos..].starts_with(b"\\u") {
+                    return self.error("unpaired surrogate");
+                }
+                self.pos += 2;
+                let second = self.hex4()?;
+                if !(0xDC00..=0xDFFF).contains(&second) {
+                    return self.error("unpaired surrogate");
+                }
+                0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00)
+            }
+            0xDC00..=0xDFFF => return self.error("unpaired surrogate"),
+            code => code,
+        };
+        char::from_u32(code).map_or_else(|| self.error("invalid code point"), Ok)
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        self.expect(b'"')?;
+        let mut out = String::new();
+        loop {
+            // Copy the run up to the next quote, backslash or control byte. Those
+            // are ASCII, so the run never ends inside a multi-byte character.
+            let start = self.pos;
+            while matches!(self.peek(), Some(b) if b != b'"' && b != b'\\' && b >= 0x20) {
+                self.pos += 1;
+            }
+            match std::str::from_utf8(&self.bytes[start..self.pos]) {
+                Ok(run) => out.push_str(run),
+                Err(_) => return self.error("invalid UTF-8"),
+            }
+            match self.peek() {
+                Some(b'"') => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.pos += 1;
+                    let escaped = self.peek();
+                    self.pos += 1;
+                    out.push(match escaped {
+                        Some(b'"') => '"',
+                        Some(b'\\') => '\\',
+                        Some(b'/') => '/',
+                        Some(b'b') => '\u{8}',
+                        Some(b'f') => '\u{c}',
+                        Some(b'n') => '\n',
+                        Some(b'r') => '\r',
+                        Some(b't') => '\t',
+                        Some(b'u') => self.unicode_escape()?,
+                        _ => {
+                            self.pos -= 1;
+                            return self.error("invalid escape");
+                        }
+                    });
+                }
+                Some(_) => return self.error("control character in string"),
+                None => return self.error("unterminated string"),
+            }
+        }
+    }
+}
+
+/// Fields that must be equal for two runs to be compared. A field listed in
+/// `OPTIONAL_FIELDS` counts as `null` when a document does not have it.
+const MATCHING_FIELDS: [&str; 15] = [
+    "format_version",
+    "benchmark",
+    "host.cpu",
+    "host.os",
+    "host.arch",
+    "build.debug_assertions",
+    "build.label",
+    "workload.name",
+    "workload.guest_instructions",
+    "workload.guest_code_bytes",
+    "workload.instruction_budget",
+    "workload.warmup_rounds",
+    "timings.interpreter.samples",
+    "timings.cold_dbt.samples",
+    "timings.warm_dbt.samples",
+];
+
+/// Older version 1 documents predate the build label.
+const OPTIONAL_FIELDS: [&str; 1] = ["build.label"];
+
+/// Host fields that must be known: two unknown CPUs are not the same CPU.
+const KNOWN_FIELDS: [&str; 3] = ["host.cpu", "host.os", "host.arch"];
+
+const SERIES: [(&str, &str); 3] = [
+    ("interpreter", "Interpreter"),
+    ("cold_dbt", "Cold DBT"),
+    ("warm_dbt", "Warm DBT"),
+];
+
+const COUNTERS: [&str; 8] = [
+    "blocks_compiled",
+    "cache_hits",
+    "cache_misses",
+    "native_bytes_emitted",
+    "dbt_dispatches",
+    "instructions_executed",
+    "interpreter_fallbacks",
+    "service_calls",
+];
+
+fn field<'a>(doc: &'a Json, path: &str) -> Result<&'a Json, String> {
+    match doc.get(path) {
+        Some(value) => Ok(value),
+        None if OPTIONAL_FIELDS.contains(&path) => Ok(&Json::Null),
+        None => Err(format!("missing field `{path}`")),
+    }
+}
+
+fn integer(doc: &Json, path: &str) -> Result<u128, String> {
+    match field(doc, path)? {
+        Json::Number(text) => text
+            .parse()
+            .map_err(|_| format!("`{path}` is not a non-negative integer")),
+        _ => Err(format!("`{path}` is not a number")),
+    }
+}
+
+fn text(doc: &Json, path: &str) -> String {
+    match doc.get(path) {
+        Some(Json::String(value)) => value.clone(),
+        Some(Json::Bool(value)) => value.to_string(),
+        Some(Json::Number(value)) => value.clone(),
+        // The build label is optional, so its absence is not an unknown value.
+        _ if OPTIONAL_FIELDS.contains(&path) => "none".to_owned(),
+        _ => "unknown".to_owned(),
+    }
+}
+
+fn duration(ns: u128) -> Duration {
+    Duration::from_nanos(u64::try_from(ns).unwrap_or(u64::MAX))
+}
+
+fn change(before: u128, after: u128) -> String {
+    if before == 0 {
+        return "n/a".to_owned();
+    }
+    format!(
+        "{:+.2}%",
+        (after as f64 - before as f64) / before as f64 * 100.0
+    )
+}
+
+fn source(doc: &Json) -> String {
+    let dirty = match doc.get("source.dirty") {
+        Some(Json::Bool(true)) => " with local changes",
+        Some(Json::Bool(false)) => "",
+        _ => ", local changes unknown",
+    };
+    format!("{}{dirty}", text(doc, "source.revision"))
+}
+
+/// Compares two exported documents. Returns the report lines, or why the runs
+/// cannot be compared.
+fn compare_documents(baseline: &Json, candidate: &Json) -> Result<Vec<String>, String> {
+    for doc in [baseline, candidate] {
+        if field(doc, "format_version")? != &Json::Number("1".to_owned()) {
+            return Err("only format version 1 is supported".to_owned());
+        }
+    }
+    for path in KNOWN_FIELDS {
+        for (name, doc) in [("baseline", baseline), ("candidate", candidate)] {
+            if field(doc, path)? == &Json::Null {
+                return Err(format!(
+                    "`{path}` is unknown in the {name}, so the hosts cannot be shown to match"
+                ));
+            }
+        }
+    }
+    for path in MATCHING_FIELDS {
+        if field(baseline, path)? != field(candidate, path)? {
+            return Err(format!(
+                "`{path}` differs: baseline {}, candidate {}",
+                text(baseline, path),
+                text(candidate, path)
+            ));
+        }
+    }
+
+    let mut lines = vec![
+        format!("Baseline:  {}", source(baseline)),
+        format!("Candidate: {}", source(candidate)),
+        format!(
+            "Host: {}, {} {}; debug assertions {}; build label {}",
+            text(baseline, "host.cpu"),
+            text(baseline, "host.os"),
+            text(baseline, "host.arch"),
+            text(baseline, "build.debug_assertions"),
+            text(baseline, "build.label"),
+        ),
+    ];
+    if field(baseline, "host.os_version")? != field(candidate, "host.os_version")? {
+        lines.push(format!(
+            "Note: OS version differs: baseline {}, candidate {}",
+            text(baseline, "host.os_version"),
+            text(candidate, "host.os_version")
+        ));
+    }
+    for (key, label) in SERIES {
+        let path = |stat: &str| format!("timings.{key}.{stat}");
+        let before = integer(baseline, &path("median_ns"))?;
+        let after = integer(candidate, &path("median_ns"))?;
+        let spread = integer(baseline, &path("iqr_ns"))?.max(integer(candidate, &path("iqr_ns"))?);
+        let verdict = if before.abs_diff(after) > spread {
+            "larger than"
+        } else {
+            "within"
+        };
+        lines.push(format!(
+            "{label}: median {:?} -> {:?} ({}), {verdict} the larger IQR {:?}",
+            duration(before),
+            duration(after),
+            change(before, after),
+            duration(spread)
+        ));
+    }
+    let mut counters_changed = false;
+    for counter in COUNTERS {
+        let path = format!("cold_dbt_metrics.{counter}");
+        let (before, after) = (integer(baseline, &path)?, integer(candidate, &path)?);
+        if before != after {
+            counters_changed = true;
+            lines.push(format!(
+                "Cold DBT {counter}: {before} -> {after} ({})",
+                change(before, after)
+            ));
+        }
+    }
+    if !counters_changed {
+        lines.push("Cold DBT counters are identical".to_owned());
+    }
+    Ok(lines)
+}
+
+fn compare_files(spec: &str) -> Result<Vec<String>, String> {
+    let (baseline, candidate) = spec
+        .split_once(',')
+        .ok_or("expected <baseline.json>,<candidate.json>")?;
+    let read = |path: &str| {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        parse_json(&text).map_err(|e| format!("{path}: {e}"))
+    };
+    compare_documents(&read(baseline)?, &read(candidate)?)
+}
+
 fn main() {
+    if let Ok(spec) = std::env::var("XENORA_DBT_BENCH_COMPARE") {
+        match compare_files(&spec) {
+            Ok(lines) => lines.iter().for_each(|line| println!("{line}")),
+            Err(reason) => {
+                eprintln!("dbt_bench: cannot compare: {reason}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let sample_count = std::env::var("XENORA_DBT_BENCH_SAMPLES")
         .map_or(101, |value| value.parse::<usize>().expect("sample count"));
     assert!(sample_count > 0);
@@ -494,6 +970,7 @@ mod tests {
                 revision: Some("0123abcd".to_owned()),
                 dirty: Some(false),
                 debug_assertions: false,
+                build_label: Some("fat-lto".to_owned()),
                 guest_code_bytes: 40_011,
                 warmup: 10,
             }
@@ -503,6 +980,7 @@ mod tests {
 
         let metrics = DbtMetrics {
             blocks_compiled: 626,
+            blocks_invalidated: 0,
             cache_hits: 0,
             cache_misses: 626,
             native_bytes_emitted: 245_168,
@@ -528,7 +1006,7 @@ mod tests {
                 r#"{{"format_version":1,"benchmark":"dbt_bench","unix_time":1700000000,"#,
                 r#""host":{{"cpu":"Test \"CPU\"\\1","os":"macos","os_version":null,"arch":"aarch64"}},"#,
                 r#""source":{{"revision":"0123abcd","dirty":false}},"#,
-                r#""build":{{"debug_assertions":false}},"#,
+                r#""build":{{"debug_assertions":false,"label":"fat-lto"}},"#,
                 r#""workload":{{"name":"add_rax_chain","guest_instructions":{},"guest_code_bytes":40011,"instruction_budget":20000,"warmup_rounds":10}},"#,
                 r#""timings":{{"interpreter":{},"cold_dbt":{},"warm_dbt":{}}},"#,
                 r#""cold_dbt_metrics":{{"blocks_compiled":626,"cache_hits":0,"cache_misses":626,"native_bytes_emitted":245168,"dbt_dispatches":626,"instructions_executed":10002,"interpreter_fallbacks":1,"service_calls":0}}}}"#,
@@ -579,5 +1057,303 @@ mod tests {
         assert_eq!(s.p99, Duration::from_nanos(97_900));
         assert_eq!(s.iqr, Duration::from_micros(30));
         assert_eq!(s.mips, INSTRUCTIONS as f64 / 25e-6 / 1e6);
+    }
+
+    // `cargo bench` builds this target with `--cfg test` but without `--test`,
+    // so this module is compiled with its #[test] functions removed and shared
+    // helpers look unused there.
+    #[allow(dead_code)]
+    fn comparable_document() -> super::Json {
+        super::parse_json(concat!(
+            r#"{"format_version":1,"benchmark":"dbt_bench","unix_time":1,"#,
+            r#""host":{"cpu":"Apple M5","os":"macos","os_version":"27.2.1","arch":"aarch64"},"#,
+            r#""source":{"revision":"aaaa","dirty":false},"#,
+            r#""build":{"debug_assertions":false,"label":null},"#,
+            r#""workload":{"name":"add_rax_chain","guest_instructions":10002,"guest_code_bytes":40011,"instruction_budget":20000,"warmup_rounds":10},"#,
+            r#""timings":{"#,
+            r#""interpreter":{"samples":101,"median_ns":900000,"min_ns":1,"max_ns":2,"p95_ns":1,"p99_ns":1,"iqr_ns":20000,"median_mips":11.1},"#,
+            r#""cold_dbt":{"samples":101,"median_ns":1100000,"min_ns":1,"max_ns":2,"p95_ns":1,"p99_ns":1,"iqr_ns":40000,"median_mips":9.1},"#,
+            r#""warm_dbt":{"samples":101,"median_ns":22000,"min_ns":1,"max_ns":2,"p95_ns":1,"p99_ns":1,"iqr_ns":500,"median_mips":454.6}},"#,
+            r#""cold_dbt_metrics":{"blocks_compiled":626,"cache_hits":0,"cache_misses":626,"native_bytes_emitted":245168,"dbt_dispatches":626,"instructions_executed":10002,"interpreter_fallbacks":0,"service_calls":0}}"#,
+        ))
+        .expect("fixture parses")
+    }
+
+    /// Replaces the value at a dotted path, which must exist except for its last key.
+    #[allow(dead_code)]
+    fn set(doc: &mut super::Json, path: &str, value: super::Json) {
+        let (parent, key) = path.rsplit_once('.').map_or(("", path), |(p, k)| (p, k));
+        let mut node = doc;
+        for step in parent.split('.').filter(|s| !s.is_empty()) {
+            let super::Json::Object(fields) = node else {
+                panic!("{step} is not in an object")
+            };
+            node = &mut fields.iter_mut().find(|(k, _)| k == step).expect(step).1;
+        }
+        let super::Json::Object(fields) = node else {
+            panic!("{path} has no parent object")
+        };
+        match fields.iter_mut().find(|(k, _)| k == key) {
+            Some(entry) => entry.1 = value,
+            None => fields.push((key.to_owned(), value)),
+        }
+    }
+
+    #[test]
+    fn reader_accepts_json_values() {
+        use super::{Json, parse_json};
+
+        let doc = parse_json(
+            r#" { "a" : [1, -0.5, 2e3, 3E-2, true, false, null, {}, []], "s": "q\"b\\s\/n\n\té😀 Zażółć" } "#,
+        )
+        .unwrap();
+        assert_eq!(
+            doc.get("a"),
+            Some(&Json::Array(vec![
+                Json::Number("1".to_owned()),
+                Json::Number("-0.5".to_owned()),
+                Json::Number("2e3".to_owned()),
+                Json::Number("3E-2".to_owned()),
+                Json::Bool(true),
+                Json::Bool(false),
+                Json::Null,
+                Json::Object(vec![]),
+                Json::Array(vec![]),
+            ]))
+        );
+        assert_eq!(
+            doc.get("s"),
+            Some(&Json::String("q\"b\\s/n\n\té😀 Zażółć".to_owned()))
+        );
+        assert_eq!(doc.get("a.b"), None);
+        assert_eq!(doc.get("missing"), None);
+    }
+
+    #[test]
+    fn reader_rejects_malformed_json() {
+        use super::parse_json;
+
+        let deep = "[".repeat(40) + &"]".repeat(40);
+        for bad in [
+            "",
+            "{",
+            r#"{"a":1,}"#,
+            r#"{"a" 1}"#,
+            r#"{"a":1,"a":2}"#,
+            "[1 2]",
+            "01",
+            "1.",
+            "-",
+            "1e",
+            "+1",
+            "tru",
+            r#""open"#,
+            "\"tab\tinside\"",
+            r#""\x""#,
+            r#""\u12g4""#,
+            r#""\u+123""#,
+            r#""\ud83d""#,
+            r#""\ude00""#,
+            r#""\ud83dA""#,
+            "{} {}",
+            deep.as_str(),
+        ] {
+            assert!(parse_json(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn exported_document_reads_back() {
+        use super::{DbtMetrics, Duration, Json, RunInfo, Summary, json_document, parse_json};
+
+        let summary = Summary {
+            samples: 7,
+            median: Duration::from_nanos(1_234_567),
+            min: Duration::from_nanos(1),
+            max: Duration::from_nanos(9),
+            p95: Duration::from_nanos(8),
+            p99: Duration::from_nanos(9),
+            iqr: Duration::from_nanos(3),
+            mips: 8.25,
+        };
+        let info = RunInfo {
+            unix_time: None,
+            cpu: Some("CPU \"x\" \\ \u{1}".to_owned()),
+            os: "macos",
+            os_version: None,
+            arch: "aarch64",
+            revision: None,
+            dirty: Some(true),
+            debug_assertions: true,
+            build_label: Some("é label".to_owned()),
+            guest_code_bytes: 5,
+            warmup: 2,
+        };
+        let metrics = DbtMetrics {
+            native_bytes_emitted: 42,
+            ..DbtMetrics::default()
+        };
+        let doc = parse_json(&json_document(
+            &info, &summary, &summary, &summary, &metrics,
+        ))
+        .unwrap();
+        let string = |s: &str| Some(Json::String(s.to_owned()));
+        assert_eq!(doc.get("host.cpu").cloned(), string("CPU \"x\" \\ \u{1}"));
+        assert_eq!(doc.get("build.label").cloned(), string("é label"));
+        assert_eq!(doc.get("host.os_version"), Some(&Json::Null));
+        assert_eq!(doc.get("source.dirty"), Some(&Json::Bool(true)));
+        assert_eq!(
+            doc.get("timings.cold_dbt.median_ns"),
+            Some(&Json::Number("1234567".to_owned()))
+        );
+        assert_eq!(
+            doc.get("cold_dbt_metrics.native_bytes_emitted"),
+            Some(&Json::Number("42".to_owned()))
+        );
+    }
+
+    #[test]
+    fn comparison_reports_changes_against_the_spread() {
+        use super::{Json, compare_documents};
+
+        let baseline = comparable_document();
+        let mut candidate = comparable_document();
+        set(
+            &mut candidate,
+            "source.revision",
+            Json::String("bbbb".to_owned()),
+        );
+        set(&mut candidate, "source.dirty", Json::Bool(true));
+        // 900 µs -> 846 µs is 54 µs, beyond the larger IQR of 20 µs.
+        set(
+            &mut candidate,
+            "timings.interpreter.median_ns",
+            Json::Number("846000".to_owned()),
+        );
+        // 1.1 ms -> 1.12 ms is 20 µs, within the larger IQR of 45 µs.
+        set(
+            &mut candidate,
+            "timings.cold_dbt.median_ns",
+            Json::Number("1120000".to_owned()),
+        );
+        set(
+            &mut candidate,
+            "timings.cold_dbt.iqr_ns",
+            Json::Number("45000".to_owned()),
+        );
+        set(
+            &mut candidate,
+            "cold_dbt_metrics.native_bytes_emitted",
+            Json::Number("290184".to_owned()),
+        );
+        set(
+            &mut candidate,
+            "host.os_version",
+            Json::String("27.3".to_owned()),
+        );
+
+        let lines = compare_documents(&baseline, &candidate).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "Baseline:  aaaa",
+                "Candidate: bbbb with local changes",
+                "Host: Apple M5, macos aarch64; debug assertions false; build label none",
+                "Note: OS version differs: baseline 27.2.1, candidate 27.3",
+                "Interpreter: median 900µs -> 846µs (-6.00%), larger than the larger IQR 20µs",
+                "Cold DBT: median 1.1ms -> 1.12ms (+1.82%), within the larger IQR 45µs",
+                "Warm DBT: median 22µs -> 22µs (+0.00%), within the larger IQR 500ns",
+                "Cold DBT native_bytes_emitted: 245168 -> 290184 (+18.36%)",
+            ]
+        );
+
+        let same = compare_documents(&baseline, &baseline).unwrap();
+        assert_eq!(same.last().unwrap(), "Cold DBT counters are identical");
+    }
+
+    #[test]
+    fn comparison_rejects_every_mismatching_field() {
+        use super::{Json, compare_documents};
+
+        // Written out independently of MATCHING_FIELDS, so dropping a field
+        // there fails this test.
+        for path in [
+            "format_version",
+            "benchmark",
+            "host.cpu",
+            "host.os",
+            "host.arch",
+            "build.debug_assertions",
+            "build.label",
+            "workload.name",
+            "workload.guest_instructions",
+            "workload.guest_code_bytes",
+            "workload.instruction_budget",
+            "workload.warmup_rounds",
+            "timings.interpreter.samples",
+            "timings.cold_dbt.samples",
+            "timings.warm_dbt.samples",
+        ] {
+            let mut candidate = comparable_document();
+            let other = match path {
+                "build.debug_assertions" => Json::Bool(true),
+                "build.label" => Json::String("fat-lto".to_owned()),
+                // A valid but different version is refused as unsupported first.
+                "format_version" => Json::Number("2".to_owned()),
+                p if p.contains("samples")
+                    || p.starts_with("workload.") && p != "workload.name" =>
+                {
+                    Json::Number("7".to_owned())
+                }
+                _ => Json::String("other".to_owned()),
+            };
+            set(&mut candidate, path, other);
+            let error = compare_documents(&comparable_document(), &candidate).expect_err(path);
+            assert!(
+                error.contains(path) || path == "format_version" && error.contains("version"),
+                "{path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn comparison_needs_known_hosts_and_matching_labels() {
+        use super::{Json, compare_documents};
+
+        for path in ["host.cpu", "host.os", "host.arch"] {
+            let mut unknown = comparable_document();
+            set(&mut unknown, path, Json::Null);
+            let error = compare_documents(&unknown, &unknown).expect_err(path);
+            assert!(error.contains("unknown in the baseline"), "{error}");
+        }
+
+        // A document written before the label existed counts as having no label.
+        let mut old = comparable_document();
+        let Json::Object(fields) = &mut old else {
+            unreachable!()
+        };
+        let build = &mut fields.iter_mut().find(|(k, _)| k == "build").unwrap().1;
+        let Json::Object(build) = build else {
+            unreachable!()
+        };
+        build.retain(|(k, _)| k != "label");
+        assert!(compare_documents(&old, &comparable_document()).is_ok());
+
+        let mut labelled = comparable_document();
+        set(
+            &mut labelled,
+            "build.label",
+            Json::String("fat-lto".to_owned()),
+        );
+        assert!(compare_documents(&old, &labelled).is_err());
+        assert!(compare_documents(&labelled, &labelled).is_ok());
+
+        let mut missing = comparable_document();
+        let Json::Object(fields) = &mut missing else {
+            unreachable!()
+        };
+        fields.retain(|(k, _)| k != "workload");
+        let error = compare_documents(&comparable_document(), &missing).unwrap_err();
+        assert!(error.contains("missing field `workload.name`"), "{error}");
     }
 }

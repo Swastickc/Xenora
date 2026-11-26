@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 234] = [
+pub static SERVICES: [ServiceMetadata; 236] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -635,6 +635,28 @@ pub static SERVICES: [ServiceMetadata; 234] = [
         failure: "-1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included",
         reference: "io.h _get_osfhandle",
         tests: &["osfhandle_interop_wraps_a_kernel_pipe"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_filbuf",
+        parameters: &[Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here",
+        reference: "stdio.h _filbuf",
+        tests: &["filbuf_and_flsbuf_move_single_bytes"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_flsbuf",
+        parameters: &[Parameter { name: "c", kind: "i32" }, Parameter { name: "stream", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "EOF with EBADF for a stream that is not open and writable",
+        reference: "stdio.h _flsbuf",
+        tests: &["filbuf_and_flsbuf_move_single_bytes"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -3113,6 +3135,23 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.i32(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::_get_osfhandle(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_filbuf", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_filbuf(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_flsbuf", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_flsbuf(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

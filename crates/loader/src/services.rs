@@ -1933,6 +1933,27 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    /// `_filbuf`. The byte read as an unsigned char, or EOF at the end of
+    /// the stream or for one that is not open and readable. The streams
+    /// here are unbuffered, so the byte is simply the next one.
+    pub fn _filbuf(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let drive = context.state.objects.lock().expect("guest object state");
+            context.state.crt_streams().filbuf(&drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `_flsbuf`. The byte written, or EOF for a stream that is not open
+    /// and writable.
+    pub fn _flsbuf(context: &mut ServiceContext<'_>, c: i32, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            context.state.crt_streams().flsbuf(&mut drive, c, stream)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _access(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let outcome = {
             let streams = context.state.crt_streams();

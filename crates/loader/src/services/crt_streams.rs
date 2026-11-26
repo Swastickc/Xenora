@@ -1406,6 +1406,31 @@ impl StandardStreams {
         })
     }
 
+    /// `_filbuf`. The byte as an unsigned char, or EOF at the end or for a
+    /// stream that is not open and readable.
+    pub(super) fn filbuf(&mut self, drive: &ObjectState, file: u64) -> Outcome<i32> {
+        if !self.opened.contains(file) {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(match self.opened.read_one(drive, file) {
+            std::result::Result::Ok(Some(byte)) => Ok(i32::from(byte)),
+            std::result::Result::Ok(None) => Ok(-1),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_flsbuf`. The byte written, or EOF for a stream that is not open
+    /// and writable.
+    pub(super) fn flsbuf(&mut self, drive: &mut ObjectState, c: i32, file: u64) -> Outcome<i32> {
+        if !self.opened.contains(file) {
+            return Ok(Err(Failed(-1, EBADF)));
+        }
+        Ok(match self.opened.write_one(drive, file, c as u8) {
+            std::result::Result::Ok(()) => Ok(i32::from(c as u8)),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
     /// `_access`. 0 when the name is a file or a directory; the files the
     /// drive holds are always readable and writable, so the mode only
     /// decides the answer for what is missing. -1 with `ENOENT` then, or

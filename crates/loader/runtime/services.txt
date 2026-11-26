@@ -564,6 +564,24 @@ service ucrtbase.dll _get_osfhandle(fd: i32) -> u64
     ref io.h _get_osfhandle
     test osfhandle_interop_wraps_a_kernel_pipe
 
+service ucrtbase.dll _filbuf(stream: ptr) -> i32
+    handler _filbuf
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here
+    ref stdio.h _filbuf
+    test filbuf_and_flsbuf_move_single_bytes
+
+service ucrtbase.dll _flsbuf(c: i32, stream: ptr) -> i32
+    handler _flsbuf
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with EBADF for a stream that is not open and writable
+    ref stdio.h _flsbuf
+    test filbuf_and_flsbuf_move_single_bytes
+
 service ucrtbase.dll ungetc(c: i32, stream: ptr) -> i32
     handler ungetc
     status implemented

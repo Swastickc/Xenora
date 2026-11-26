@@ -1035,6 +1035,25 @@ impl FileStreams {
 
     /// `_close`. Closing a shared descriptor closes the underlying file, so
     /// the stream it came from fails afterwards, as it does in the CRT.
+    /// `_filbuf`: one byte read off the stream, as the legacy macro
+    /// support reads it — the streams here are unbuffered, so the byte is
+    /// the next one, or nothing at the end.
+    pub(super) fn read_one(&mut self, drive: &ObjectState, file: u64) -> Result<Option<u8>, u32> {
+        let bytes = self.read_bytes(drive, file, 1)?;
+        Ok(bytes.first().copied())
+    }
+
+    /// `_flsbuf`: one byte written onto the stream. `EOF` for a stream that
+    /// cannot take it, as the write failure answers.
+    pub(super) fn write_one(
+        &mut self,
+        drive: &mut ObjectState,
+        file: u64,
+        byte: u8,
+    ) -> Result<(), u32> {
+        self.write(drive, file, &[byte])
+    }
+
     /// `_open_osfhandle`: the descriptor wrapping a kernel object handle,
     /// which the CRT takes ownership of. `EBADF` for a handle that is no
     /// pipe end — the only kernel object this interop knows so far.

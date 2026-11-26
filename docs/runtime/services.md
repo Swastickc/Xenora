@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 234 |
-| Generated adapters | 234 |
-| Unique handler implementations | 224 |
-| Implemented | 83 |
+| Services with a declared ABI | 236 |
+| Generated adapters | 236 |
+| Unique handler implementations | 226 |
+| Implemented | 85 |
 | Partial | 149 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 234 |
-| API-set aliases (not services) | 277 |
+| Conformance-tested through guest dispatch | 236 |
+| API-set aliases (not services) | 281 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -75,6 +75,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_lseeki64` | `(fd: i32, offset: u64, origin: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start |
 | `ucrtbase.dll!_open_osfhandle` | `(osfhandle: handle, flags: i32) -> i32` | implemented | -1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one |
 | `ucrtbase.dll!_get_osfhandle` | `(fd: i32) -> u64` | implemented | -1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included |
+| `ucrtbase.dll!_filbuf` | `(stream: ptr) -> i32` | implemented | EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here |
+| `ucrtbase.dll!_flsbuf` | `(c: i32, stream: ptr) -> i32` | implemented | EOF with EBADF for a stream that is not open and writable |
 | `ucrtbase.dll!ungetc` | `(c: i32, stream: ptr) -> i32` | implemented | EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream |
 | `ucrtbase.dll!_telli64` | `(fd: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one |
 | `ucrtbase.dll!_setmode` | `(fd: i32, mode: i32) -> i32` | partial | -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented |

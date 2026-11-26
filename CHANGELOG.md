@@ -44,6 +44,7 @@ loader: _assert prints its message and ends the process)
 
 ### Added
 
+- Documented AMD FidelityFX licensing and native Metal compatibility boundaries at a pinned public SDK revision, including the default binary-only license, exact-file MIT-list review requirement, temporal-upscaling input contracts and independent fixture requirements. No AMD implementation source, shader or asset was copied, and no upscaling implementation or compatibility is claimed.
 - Added an original Scarlett-style Gaming Runtime fixture (#713) with static import and startup diagnostics.
 - The interpreter and ARM64 dynamic binary translator accept 73 additional 256-bit AVX2 packed integer forms through shared semantics (#711).
 - Synthetic guest applications can query a saved slot's exact byte length before reading it, including after reopening the platform service (#765).

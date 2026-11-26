@@ -108,7 +108,6 @@ fn image(main: &str) -> Vec<u8> {
     put(&mut pe, optional + 60, &0x200u32.to_le_bytes());
     put(&mut pe, optional + 108, &16u32.to_le_bytes());
     put(&mut pe, optional + 120, &IDATA_RVA.to_le_bytes());
-    put(&mut pe, optional + 124, &0x100u32.to_le_bytes());
     for (index, (name, rva, raw, len, flags)) in [
         (b".text", TEXT_RVA, TEXT_RAW, TEXT_LEN, 0x6000_0020u32),
         (b".idat", IDATA_RVA, IDATA_RAW, IDATA_LEN, 0xC000_0040),
@@ -138,7 +137,9 @@ fn image(main: &str) -> Vec<u8> {
     if implicit_fls_exit {
         names.retain(|name| *name != "ExitThread");
     }
-    let mut next = IDATA_RVA + 20 * (names.len() as u32 + 1);
+    let descriptor_size = 20 * (names.len() as u32 + 1);
+    put(&mut pe, optional + 124, &descriptor_size.to_le_bytes());
+    let mut next = IDATA_RVA + descriptor_size;
     let mut take = |len: usize| {
         let rva = next;
         next = (next + len as u32 + 7) & !7;

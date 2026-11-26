@@ -69,7 +69,8 @@ fn build(imports: &[(&str, Symbol)]) -> Image {
     put(&mut pe, optional + 60, &0x200u32.to_le_bytes());
     put(&mut pe, optional + 108, &16u32.to_le_bytes());
     put(&mut pe, optional + 120, &IDATA_RVA.to_le_bytes());
-    put(&mut pe, optional + 124, &0x100u32.to_le_bytes());
+    let descriptor_size = 20 * (imports.len() as u32 + 1);
+    put(&mut pe, optional + 124, &descriptor_size.to_le_bytes());
     for (index, (name, rva, raw, len, flags)) in [
         (b".text", CODE_RVA, 0x200, 0x2000, 0x6000_0020u32),
         (b".idat", IDATA_RVA, IDATA_RAW, IDATA_LEN, 0xC000_0040),
@@ -87,7 +88,7 @@ fn build(imports: &[(&str, Symbol)]) -> Image {
     }
 
     let file = |rva: u32| IDATA_RAW + (rva - IDATA_RVA) as usize;
-    let mut next = IDATA_RVA + 20 * (imports.len() as u32 + 1);
+    let mut next = IDATA_RVA + descriptor_size;
     let mut take = |len: usize| {
         let rva = next;
         next = (next + len as u32 + 7) & !7;
@@ -5369,7 +5370,7 @@ fn endless_tables_are_bounded() {
     bytes[0x80] = 0x60;
 
     // Lookup entries repeat from 0x80 on.
-    let (entries, error) = parse_imports(&bytes, 0, |rva| {
+    let (entries, error) = parse_imports(&bytes, 0, 20, |rva| {
         let rva = rva as usize;
         Some(if rva < 0x80 { rva } else { 0x80 + rva % 8 })
     });
@@ -5378,7 +5379,7 @@ fn endless_tables_are_bounded() {
 
     // Descriptors repeat from 0x1000 on; each has one symbol.
     bytes.extend([0; 8]);
-    let (entries, error) = parse_imports(&bytes, 0x1000, |rva| {
+    let (entries, error) = parse_imports(&bytes, 0x1000, 0x10000, |rva| {
         let rva = rva as usize;
         Some(if rva < 0x1000 {
             rva

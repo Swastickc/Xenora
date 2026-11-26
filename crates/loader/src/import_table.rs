@@ -104,6 +104,9 @@ pub enum ImportTableError {
     DelayDirectoryEnd {
         rva: u32,
     },
+    ImportDirectoryEnd {
+        rva: u32,
+    },
     TooManyDescriptors,
     TooManyImports,
 }
@@ -140,6 +143,10 @@ impl fmt::Display for ImportTableError {
             Self::DelayDirectoryEnd { rva } => write!(
                 f,
                 "delay-load directory ends at RVA 0x{rva:08x} before its empty descriptor"
+            ),
+            Self::ImportDirectoryEnd { rva } => write!(
+                f,
+                "import directory ends at RVA 0x{rva:08x} before its empty descriptor"
             ),
             Self::TooManyDescriptors => write!(f, "more than {MAX_DESCRIPTORS} import descriptors"),
             Self::TooManyImports => write!(f, "more than {MAX_IMPORTS} imported symbols"),
@@ -194,13 +201,14 @@ impl<F: Fn(u32) -> Option<usize>> Reader<'_, F> {
     }
 }
 
-/// Parse the import directory at `directory_rva`.
+/// Parse the import descriptors within the declared directory extent.
 ///
 /// Returns every import before the first problem, and the problem. Callers that
 /// execute an image must refuse it if there is one; inspection may report both.
 pub fn parse_imports(
     bytes: &[u8],
     directory_rva: u32,
+    directory_size: u32,
     rva_to_offset: impl Fn(u32) -> Option<usize>,
 ) -> (Vec<ImportEntry>, Option<ImportTableError>) {
     let reader = Reader {
@@ -208,17 +216,24 @@ pub fn parse_imports(
         rva_to_offset,
     };
     let mut entries = Vec::new();
-    let error = collect(&reader, directory_rva, &mut entries).err();
+    let error = collect(&reader, directory_rva, directory_size, &mut entries).err();
     (entries, error)
 }
 
 fn collect<F: Fn(u32) -> Option<usize>>(
     reader: &Reader<'_, F>,
     directory_rva: u32,
+    directory_size: u32,
     entries: &mut Vec<ImportEntry>,
 ) -> Result<(), ImportTableError> {
+    let end = directory_rva
+        .checked_add(directory_size)
+        .ok_or(ImportTableError::OutOfBounds { rva: directory_rva })?;
     let mut descriptor = directory_rva;
     for _ in 0..MAX_DESCRIPTORS {
+        if end - descriptor < DESCRIPTOR_LEN {
+            return Err(ImportTableError::ImportDirectoryEnd { rva: end });
+        }
         let fields = reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
         // The timestamp and forwarder chain are part of the zero terminator.
         if fields == [0; DESCRIPTOR_LEN as usize] {

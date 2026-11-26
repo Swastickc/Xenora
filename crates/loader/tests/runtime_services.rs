@@ -1448,9 +1448,9 @@ fn sscanf_returns_eof_only_for_an_input_failure_before_any_conversion() {
     );
     assert_eq!(guest.errno(), STDIO_EINVAL);
 
-    // The msvcrt compatibility bit and unknown bits, and a locale object,
-    // are not modelled.
-    for options in [0x4, 0x8, 1 << 40] {
+    // Unknown bits and a locale object are not modelled. The msvcrt
+    // compatibility bit is accepted, as the merged string adapter does.
+    for options in [0x8, 1 << 40] {
         let mut guest = buffer_guest();
         let (_, exit) =
             scan_string_with(&mut guest, options, Some(b"1"), u64::MAX, b"%d", &[SCANNED]);

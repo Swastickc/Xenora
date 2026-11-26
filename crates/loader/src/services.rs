@@ -1442,7 +1442,7 @@ pub(crate) mod handlers {
         locale: u64,
         arguments: u64,
     ) -> Outcome<i32> {
-        crt_scan::vsscanf(
+        let outcome = crt_scan::scan_string(
             context.memory,
             options,
             buffer,
@@ -1450,7 +1450,8 @@ pub(crate) mod handlers {
             format,
             locale,
             arguments,
-        )
+        );
+        or_errno(context, outcome)
     }
 
     pub fn vsprintf(
@@ -1532,7 +1533,6 @@ pub(crate) mod handlers {
 
     // Formatted input (#605): `crt_scan.rs` holds the rules. The string form
     // needs no stream state; the stream form reads `stdin` or a file.
-
 
     pub fn vfscanf(
         context: &mut ServiceContext<'_>,

@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 216] = [
+pub static SERVICES: [ServiceMetadata; 218] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -1034,6 +1034,17 @@ pub static SERVICES: [ServiceMetadata; 216] = [
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
+        symbol: "_strdup",
+        parameters: &[Parameter { name: "text", kind: "ptr" }],
+        result: "ptr",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "a string longer than 65536 bytes or an allocation failure answers null; errno is not set",
+        reference: "string.h _strdup",
+        tests: &["legacy_strdup_and_ldexp_run"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
         symbol: "perror",
         parameters: &[Parameter { name: "message", kind: "ptr" }],
         result: "void",
@@ -1900,6 +1911,17 @@ pub static SERVICES: [ServiceMetadata; 216] = [
         failure: "stops the guest with a memory fault when exponent is not writable",
         reference: "math.h frexp (ISO C, IEC 60559 logB and scaleB)",
         tests: &["crt_math_frexp_and_modf_store_through_guest_pointers", "crt_math_special_values_follow_annex_f"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "ldexp",
+        parameters: &[Parameter { name: "x", kind: "f64" }, Parameter { name: "exponent", kind: "i32" }],
+        result: "f64",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-math-l1-1-0.dll", "msvcrt.dll"],
+        failure: "errno is not set; the host C library computes the exact IEC 60559 scaling",
+        reference: "math.h ldexp (ISO C, IEC 60559 scalbn)",
+        tests: &["legacy_strdup_and_ldexp_run"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -3217,6 +3239,14 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         Ok(result.place(cpu))
     });
     let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_strdup", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::_strdup(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
     registry.register_with_status("ucrtbase.dll", "perror", ServiceStatus::Partial, move |args, cpu, memory| {
         let call = Call::new(args, cpu, memory);
         let a0 = call.u64(0)?;
@@ -3918,6 +3948,15 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a1 = call.out::<4>(1)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: crate::runtime::Float64 = handlers::frexp(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "ldexp", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.f64(0)?;
+        let a1 = call.i32(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: crate::runtime::Float64 = handlers::ldexp(&mut context, a0, a1)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

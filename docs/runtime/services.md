@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 216 |
-| Generated adapters | 216 |
-| Unique handler implementations | 207 |
+| Services with a declared ABI | 218 |
+| Generated adapters | 218 |
+| Unique handler implementations | 209 |
 | Implemented | 75 |
-| Partial | 139 |
+| Partial | 141 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 216 |
-| API-set aliases (not services) | 243 |
+| Conformance-tested through guest dispatch | 218 |
+| API-set aliases (not services) | 247 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -111,6 +111,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!towupper` | `(wide: u32) -> u32` | implemented | never |
 | `ucrtbase.dll!wcsncat` | `(start: ptr, end: ptr, count: u64) -> ptr` | implemented | never; stops the guest for memory it cannot write |
 | `ucrtbase.dll!_wcsdup` | `(text: ptr) -> ptr` | implemented | null when the copy cannot be allocated |
+| `ucrtbase.dll!_strdup` | `(text: ptr) -> ptr` | partial | a string longer than 65536 bytes or an allocation failure answers null; errno is not set |
 | `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |
 | `ucrtbase.dll!fputc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!strerror` | `(code: i32) -> ptr` | partial | never; the message is valid until the next call |
@@ -190,6 +191,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fmod` | `(x: f64, y: f64) -> f64` | partial | NaN for a domain error; errno is not set |
 | `ucrtbase.dll!fmodf` | `(x: f32, y: f32) -> f32` | partial | NaN for a domain error; errno is not set |
 | `ucrtbase.dll!frexp` | `(x: f64, exponent: out<4>) -> f64` | implemented | stops the guest with a memory fault when exponent is not writable |
+| `ucrtbase.dll!ldexp` | `(x: f64, exponent: i32) -> f64` | partial | errno is not set; the host C library computes the exact IEC 60559 scaling |
 | `ucrtbase.dll!hypot` | `(x: f64, y: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
 | `ucrtbase.dll!llround` | `(x: f64) -> u64` | partial | LLONG_MIN for a NaN or an out-of-range result; errno is not set |
 | `ucrtbase.dll!log` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |

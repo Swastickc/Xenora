@@ -820,6 +820,15 @@ service ucrtbase.dll _wcsdup(text: ptr) -> ptr
     fails null when the copy cannot be allocated
     ref wchar.h _wcsdup
     test wide_characters_convert_in_the_c_locale
+service ucrtbase.dll _strdup(text: ptr) -> ptr
+    handler _strdup
+    status partial
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails a string longer than 65536 bytes or an allocation failure answers null; errno is not set
+    ref string.h _strdup
+    test legacy_strdup_and_ldexp_run
+
 
 service ucrtbase.dll perror(message: ptr) -> void
     handler perror
@@ -1510,6 +1519,15 @@ service ucrtbase.dll frexp(x: f64, exponent: out<4>) -> f64
     ref math.h frexp (ISO C, IEC 60559 logB and scaleB)
     test crt_math_frexp_and_modf_store_through_guest_pointers
     test crt_math_special_values_follow_annex_f
+service ucrtbase.dll ldexp(x: f64, exponent: i32) -> f64
+    handler ldexp
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    alias msvcrt.dll
+    fails errno is not set; the host C library computes the exact IEC 60559 scaling
+    ref math.h ldexp (ISO C, IEC 60559 scalbn)
+    test legacy_strdup_and_ldexp_run
+
 
 service ucrtbase.dll hypot(x: f64, y: f64) -> f64
     handler hypot

@@ -6599,3 +6599,30 @@ fn legacy_descriptor_duplication_shares_the_position() {
     assert_eq!(guest.errno(), EBADF);
     assert_eq!(guest.call("_dup2", &[77, 10]) & 0xFFFF_FFFF, MINUS_ONE);
 }
+
+#[test]
+fn legacy_strdup_and_ldexp_run() {
+    let mut guest = Guest::new();
+    let text = guest.call("malloc", &[32]);
+    guest.memory.write_bytes(text, b"copy me\0").unwrap();
+    let copy = guest.call("_strdup", &[text]);
+    assert_ne!(copy, 0);
+    assert_ne!(copy, text);
+    let mut bytes = [0u8; 8];
+    guest.memory.read_bytes(copy, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"copy me\0");
+    // The copy is a heap allocation `free` releases.
+    assert_eq!(guest.call("free", &[copy]), 0);
+    // `ldexp` takes its exponent in RDX and the value in XMM0: the scaling is
+    // exact, 1.5 * 2^4 = 24 and the minimum subnormal is 1.0 scaled by -1074.
+    let mut scaled = |bits: u64, exponent: i32| {
+        guest.xmm[0] = u128::from(bits);
+        let (cpu, exit) = guest.run("ldexp", &[0xDEAD_BEEF, exponent as u64]);
+        assert_eq!(exit, ExitReason::Halt);
+        cpu.xmm[0] as u64
+    };
+    assert_eq!(scaled(0x3FF8_0000_0000_0000, 4), 0x4038_0000_0000_0000); // 1.5 -> 24
+    assert_eq!(scaled(0x3FF0_0000_0000_0000, -1074), 1); // 1.0 -> min subnormal
+    assert_eq!(scaled(0x3FF0_0000_0000_0000, -1075), 0); // underflows to zero
+    assert_eq!(scaled(0x7FF0_0000_0000_0000, -5), 0x7FF0_0000_0000_0000); // inf stays
+}

@@ -37,6 +37,7 @@ mod host {
     unsafe extern "C" {
         pub safe fn erf(x: f64) -> f64;
         pub safe fn tgamma(x: f64) -> f64;
+        pub safe fn scalbn(x: f64, n: i32) -> f64;
     }
 }
 
@@ -246,6 +247,13 @@ fn split_exponent(bits: u64) -> (u64, i32) {
 }
 
 /// Splits `x` into integral and fractional parts, both with the sign of `x`.
+/// `ldexp` scales by a power of two, exactly as IEC 60559 `scalbn` fixes it:
+/// no rounding, a subnormal result where the scaling underflows gradually.
+/// The host C library's `scalbn` is that operation.
+pub fn ldexp(_: &mut ServiceContext<'_>, x: Float64, exponent: i32) -> Outcome<Float64> {
+    Ok(result64(&[x], host::scalbn(value64(x), exponent)))
+}
+
 pub fn modf(context: &mut ServiceContext<'_>, x: Float64, integral: OutPtr<8>) -> Outcome<Float64> {
     let value = value64(x);
     let whole = result64(&[x], value.trunc());

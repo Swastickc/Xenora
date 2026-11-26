@@ -3064,6 +3064,38 @@ pub(crate) mod handlers {
         crt_wide::wcsncat(context.memory, context.teb, start, end, count)
     }
 
+    /// `_strdup` is the narrow form of `_wcsdup`: a copy of the string the
+    /// CRT heap owns, as the CRT hands out.
+    pub fn _strdup(context: &mut ServiceContext<'_>, text: u64) -> Outcome<u64> {
+        let mut bytes = Vec::new();
+        let mut at = text;
+        loop {
+            let byte = context
+                .memory
+                .read_u8(at)
+                .map_err(ExitReason::MemoryFault)?;
+            bytes.push(byte);
+            if byte == 0 {
+                break;
+            }
+            at = at.checked_add(1).ok_or(ExitReason::MemoryFault(
+                crate::memory::MemoryError::Overflow,
+            ))?;
+            if bytes.len() > 65_536 {
+                return Ok(0);
+            }
+        }
+        let copy = context
+            .memory
+            .map_heap_allocation(crate::memory::PROCESS_HEAP, bytes.len())
+            .map_err(ExitReason::MemoryFault)?;
+        context
+            .memory
+            .write_bytes(copy, &bytes)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(copy)
+    }
+
     pub fn _wcsdup(context: &mut ServiceContext<'_>, text: u64) -> Outcome<u64> {
         crt_wide::wcsdup(context.memory, context.teb, text)
     }
@@ -3071,8 +3103,8 @@ pub(crate) mod handlers {
     // The rest of math.h (#468); `crt_math.rs` says which are exact.
     pub use super::crt_math::{
         acos, asin, atan, atan2, atan2f, cbrt, ceil, ceilf, copysign, cos, cosf, cosh, erf, exp,
-        exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, llround,
-        log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder, rint, round,
-        roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
+        exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, ldexp,
+        llround, log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder,
+        rint, round, roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
     };
 }

@@ -25,19 +25,96 @@ REQUIRED_TICKS = (
 )
 ISSUE_LINK = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+", re.I)
 NO_ISSUE = re.compile(r"^\s*No linked issue:\s*\S", re.I | re.M)
-COMMENT = re.compile(r"<!--.*?-->", re.S)
 EMPTY_LINK = re.compile(r"^\s*(?:close|fix|resolve)\w*\s*#\s*$", re.I)
-HEADING = re.compile(r"^##\s+(.+?)\s*$", re.M)
+HEADING = re.compile(r"##[ \t]+(.+?)[ \t]*")
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+
+
+def strip_comments_outside_fences(body):
+    """Remove HTML comments that are not inside a top-level code fence.
+
+    A comment inside a fenced block is evidence text, not Markdown. A fence
+    marker inside an HTML comment is part of that comment and does not open a
+    fence. Removed comment characters are replaced by their line breaks so the
+    remaining heading offsets stay stable.
+    """
+    text = body.replace("\r\n", "\n")
+    out = []
+    fence = ""
+    in_comment = False
+    for raw in text.splitlines(keepends=True):
+        line = raw.removesuffix("\n")
+        newline = "\n" if raw.endswith("\n") else ""
+        if in_comment:
+            end = line.find("-->")
+            if end == -1:
+                out.append(newline)
+                continue
+            in_comment = False
+            line = line[end + 3:]
+        if fence:
+            out.append(line + newline)
+            marker = FENCE.fullmatch(line)
+            if marker:
+                run, rest = marker.groups()
+                if run.startswith(fence) and not rest.strip(" \t"):
+                    fence = ""
+            continue
+        cleaned = []
+        start = 0
+        while True:
+            comment = line.find("<!--", start)
+            if comment == -1:
+                cleaned.append(line[start:])
+                break
+            cleaned.append(line[start:comment])
+            end = line.find("-->", comment + 4)
+            if end == -1:
+                in_comment = True
+                break
+            start = end + 3
+        cleaned_line = "".join(cleaned)
+        out.append(cleaned_line + newline)
+        marker = FENCE.fullmatch(cleaned_line)
+        if marker:
+            run, rest = marker.groups()
+            if run[0] == "~" or "`" not in rest:
+                fence = run
+    return "".join(out)
+
+
+def section_headings(text):
+    """Yield heading offsets and names outside top-level code fences."""
+    fence = ""
+    offset = 0
+    for raw in text.splitlines(keepends=True):
+        start, offset = offset, offset + len(raw)
+        line = raw.rstrip("\n")
+        marker = FENCE.fullmatch(line)
+        if fence:
+            if marker:
+                run, rest = marker.groups()
+                if run.startswith(fence) and not rest.strip(" \t"):
+                    fence = ""
+            continue
+        if marker:
+            run, rest = marker.groups()
+            if run[0] == "~" or "`" not in rest:
+                fence = run
+                continue
+        heading = HEADING.fullmatch(line)
+        if heading:
+            yield start, offset, heading[1].strip().lower()
 
 
 def sections(body):
-    """Map each level-2 heading to its text, with HTML comments removed."""
-    text = COMMENT.sub("", body.replace("\r\n", "\n"))
+    """Map each level-2 heading to its text, with outside comments removed."""
+    text = strip_comments_outside_fences(body)
     found = {}
-    marks = list(HEADING.finditer(text))
-    for i, m in enumerate(marks):
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        found[m.group(1).strip().lower()] = text[m.end():end].strip()
+    marks = list(section_headings(text))
+    for i, (_, content_start, name) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
+        found[name] = text[content_start:end].strip()
     return text, found
 
 

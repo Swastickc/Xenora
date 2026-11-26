@@ -1197,6 +1197,44 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
+    let info = Arc::clone(state);
+    registry.register(KERNEL32, "SetHandleInformation", move |args, cpu, _| {
+        // The inheritance and protect-from-close flags are accepted and not
+        // stored: there is no child process to inherit into, and closing is
+        // the guest's own choice. What the call can still do is refuse an
+        // unknown handle, as documented.
+        let objects = info.objects.lock().expect("guest object state");
+        if objects.handles.contains_key(&args.rcx) {
+            Ok(1)
+        } else {
+            info.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0)
+        }
+    });
+
+    let size = Arc::clone(state);
+    registry.register(KERNEL32, "GetFileSize", move |args, cpu, memory| {
+        let objects = size.objects.lock().expect("guest object state");
+        let Some(GuestObject::File(file)) = objects.handles.get(&args.rcx) else {
+            // The documented failure value is 0xFFFFFFFF, like a 4 GiB low
+            // word: the last error tells the two apart.
+            return size.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0xFFFF_FFFF);
+        };
+        let length = objects
+            .files
+            .get(&file.path)
+            .map(Vec::len)
+            .unwrap_or_default() as u64;
+        if args.rdx != 0 {
+            if memory.check_write(args.rdx, 4).is_err() {
+                return size.fail(cpu.gs_base, ERROR_NOACCESS, 0xFFFF_FFFF);
+            }
+            memory
+                .write_u32(args.rdx, (length >> 32) as u32)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(length & 0xFFFF_FFFF)
+    });
+
     let flush = Arc::clone(state);
     registry.register(KERNEL32, "FlushFileBuffers", move |args, cpu, _| {
         let objects = flush.objects.lock().expect("guest object state");

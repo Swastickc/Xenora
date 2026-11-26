@@ -27,6 +27,9 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "GetLogicalDrives"),
     (KERNEL32, "GetDriveTypeA"),
     (KERNEL32, "GetDiskFreeSpaceExW"),
+    (KERNEL32, "SetHandleInformation"),
+    (KERNEL32, "GetFileSize"),
+    (KERNEL32, "WriteFile"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -139,4 +142,28 @@ fn the_volume_queries_describe_the_one_disk() {
     assert_eq!(guest.u64_at(FREE), gig);
     assert_eq!(guest.u64_at(TOTAL), gig);
     assert_eq!(guest.u64_at(TOTAL_FREE), gig);
+}
+
+/// SetHandleInformation accepts a valid handle and refuses an unknown one;
+/// GetFileSize answers the low word with the high word through its pointer.
+#[test]
+fn handle_information_and_the_size_form() {
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "sized.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    // The inheritance flag is accepted: there is no child to inherit into.
+    assert_eq!(guest.call("SetHandleInformation", &[handle, 1, 1]), 1);
+    assert_eq!(guest.call("SetHandleInformation", &[0xDEAD, 1, 1]), 0);
+    assert_eq!(last_error(&mut guest), ERROR_INVALID_HANDLE);
+    // Write ten bytes and read the size back through the legacy form.
+    const OUT: u64 = SCRATCH + 0x400;
+    const WRITTEN: u64 = SCRATCH + 0x800;
+    guest.memory.write_bytes(OUT, b"0123456789").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT, 10, WRITTEN, 0]), 1);
+    const HIGH: u64 = SCRATCH + 0x810;
+    assert_eq!(guest.call("GetFileSize", &[handle, HIGH]), 10);
+    assert_eq!(guest.u32_at(HIGH), 0, "ten bytes need no high word");
+    assert_eq!(guest.call("GetFileSize", &[0xDEAD, 0]), 0xFFFF_FFFF);
+    assert_eq!(last_error(&mut guest), ERROR_INVALID_HANDLE);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
 }

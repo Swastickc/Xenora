@@ -40,6 +40,24 @@ pub enum SamplingError {
     BufferTooSmall,
     /// Input coordinates contained NaN or infinity.
     NonFiniteCoordinates,
+    /// Resource descriptor type is not the bounded 2D image.
+    InvalidResourceType,
+    /// Resource descriptor data format is not RGBA8 unorm.
+    InvalidResourceFormat,
+    /// Resource descriptor level, channel select or base level is unsupported.
+    InvalidResourceLevel,
+    /// Resource descriptor width-1 or height-1 sets a reserved high bit.
+    InvalidResourceExtent,
+    /// Resource descriptor swizzle/tiling mode is not linear (zero).
+    UnsupportedSwizzleMode,
+    /// Resource descriptor minimum LOD is nonzero.
+    InvalidResourceMinLod,
+    /// Resource descriptor last level is below its base level.
+    InvalidResourceLevelRange,
+    /// Sampler descriptor does not select point filtering and clamp addressing.
+    InvalidSampler,
+    /// Explicit level of detail is not a representable integer mip level.
+    InvalidLod,
 }
 
 impl fmt::Display for SamplingError {
@@ -52,6 +70,23 @@ impl fmt::Display for SamplingError {
             Self::InvalidOffset => write!(f, "invalid buffer offset"),
             Self::BufferTooSmall => write!(f, "buffer is too small for texture layout"),
             Self::NonFiniteCoordinates => write!(f, "non-finite texture coordinates"),
+            Self::InvalidResourceType => write!(f, "resource descriptor is not a 2D image"),
+            Self::InvalidResourceFormat => write!(f, "resource descriptor is not RGBA8 unorm"),
+            Self::InvalidResourceLevel => write!(
+                f,
+                "unsupported resource level, channel select or base level"
+            ),
+            Self::InvalidResourceExtent => {
+                write!(f, "resource width or height sets a reserved high bit")
+            }
+            Self::UnsupportedSwizzleMode => write!(f, "resource swizzle mode is not linear"),
+            Self::InvalidResourceMinLod => write!(f, "resource minimum LOD is nonzero"),
+            Self::InvalidResourceLevelRange => write!(f, "resource last level is below base level"),
+            Self::InvalidSampler => write!(
+                f,
+                "sampler is not point filtering with clamp addressing and an explicit mip level"
+            ),
+            Self::InvalidLod => write!(f, "explicit LOD is not a representable integer mip level"),
         }
     }
 }
@@ -227,6 +262,137 @@ pub fn sample_rgba8_2d(
         .ok_or(SamplingError::BufferTooSmall)?;
 
     Ok([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// The RDNA 2 image resource descriptor (T#) type value for a 2D texture.
+pub const T_TYPE_2D: u32 = 9;
+/// The RDNA 2 data format value for `8_8_8_8_UNORM` (RGBA8 unorm).
+pub const T_FORMAT_RGBA8_UNORM: u32 = 56;
+/// The sampler clamp mode for clamp-to-last-texel (guide Table 46).
+pub const S_CLAMP_LAST_TEXEL: u32 = 2;
+
+fn pack_words(words: [u32; 4]) -> u128 {
+    let mut value = 0u128;
+    for (index, word) in words.into_iter().enumerate() {
+        value |= u128::from(word) << (32 * index);
+    }
+    value
+}
+
+fn field(packed: u128, lo: u32, hi: u32) -> u32 {
+    ((packed >> lo) & ((1u128 << (hi - lo + 1)) - 1)) as u32
+}
+
+/// Parse and validate a 128-bit image resource descriptor (T#, guide Table 45,
+/// printed page 75) held in four consecutive SGPRs, low word first.
+///
+/// Returns the packed mip-chain description and the base byte offset of the
+/// texture data in the synthetic input buffer. The base-address field (39:0)
+/// represents address bits 47:8, so the byte offset is `field << 8` and is
+/// therefore always 256-byte aligned. The bounded scope accepts only a linear
+/// (unswizzled) 2D RGBA8 unorm resource with an identity RGBA channel select,
+/// a zero minimum LOD and base level zero; the 256-bit extension words (a
+/// further four SGPRs) are not read.
+pub fn parse_resource_descriptor(
+    words: [u32; 4],
+) -> Result<(Rgba8TextureDesc, usize), SamplingError> {
+    let packed = pack_words(words);
+    // 127:124 type, 120:116 swizzle mode, 60:52 format, 51:40 minimum LOD,
+    // 95 resource level, 96-107 channel select, 108-111 base level,
+    // 112-115 last level, 62-77 width-1, 78-93 height-1, 39:0 base address
+    // (address bits 47:8, a byte offset into the synthetic input buffer).
+    if field(packed, 124, 127) != T_TYPE_2D {
+        return Err(SamplingError::InvalidResourceType);
+    }
+    if field(packed, 52, 60) != T_FORMAT_RGBA8_UNORM {
+        return Err(SamplingError::InvalidResourceFormat);
+    }
+    // The 2 most significant bits of width-1 and height-1 must be zero
+    // (guide Table 45, printed page 75).
+    let width1 = field(packed, 62, 77);
+    let height1 = field(packed, 78, 93);
+    if width1 & 0xC000 != 0 || height1 & 0xC000 != 0 {
+        return Err(SamplingError::InvalidResourceExtent);
+    }
+    if field(packed, 116, 120) != 0 {
+        return Err(SamplingError::UnsupportedSwizzleMode);
+    }
+    if field(packed, 40, 51) != 0 {
+        return Err(SamplingError::InvalidResourceMinLod);
+    }
+    let base_level = field(packed, 108, 111);
+    let last_level = field(packed, 112, 115);
+    if last_level < base_level {
+        return Err(SamplingError::InvalidResourceLevelRange);
+    }
+    let levels_ok = field(packed, 95, 95) == 1
+        && [
+            field(packed, 96, 98),
+            field(packed, 99, 101),
+            field(packed, 102, 104),
+            field(packed, 105, 107),
+        ] == [4, 5, 6, 7]
+        && base_level == 0;
+    if !levels_ok {
+        return Err(SamplingError::InvalidResourceLevel);
+    }
+    let width = usize::try_from(width1 + 1).map_err(|_| SamplingError::InvalidDimensions)?;
+    let height = usize::try_from(height1 + 1).map_err(|_| SamplingError::InvalidDimensions)?;
+    let mips = last_level - base_level + 1;
+    let base = usize::try_from(field(packed, 0, 39))
+        .ok()
+        .and_then(|address| address.checked_mul(256))
+        .ok_or(SamplingError::InvalidOffset)?;
+    let desc = Rgba8TextureDesc::new_packed(width, height, mips)?;
+    Ok((desc, base))
+}
+
+/// Validate a 128-bit sampler descriptor (S#, guide Table 46, printed page 76)
+/// held in four consecutive SGPRs, low word first, for point filtering,
+/// clamp-to-last-texel addressing with normalized coordinates and an explicit
+/// mip level.
+///
+/// `last_level` is the resource descriptor's last level, used to check the
+/// sampler's 4.8 fixed-point maximum LOD. A mip filter of none (0) is refused
+/// because it disables mipmapping and could not select the explicit level.
+pub fn validate_sampler_descriptor(words: [u32; 4], last_level: u32) -> Result<(), SamplingError> {
+    let packed = pack_words(words);
+    // 2:0 / 5:3 / 8:6 clamp x/y/z are ClampLastTexel (2) and z matches x;
+    // bit 15 forces unnormalized coordinates (0); 85:84 and 87:86 select point
+    // xy filtering and 89:88 point z filtering; 91:90 must be point mip
+    // filtering (1) so an explicit LOD selects a level; 77:64 LOD bias is
+    // zero; 43:32 minimum LOD is zero; 55:44 maximum LOD is at least the last
+    // level in 4.8 fixed point.
+    let addressing = field(packed, 0, 2) == S_CLAMP_LAST_TEXEL
+        && field(packed, 3, 5) == S_CLAMP_LAST_TEXEL
+        && field(packed, 6, 8) == field(packed, 0, 2)
+        && field(packed, 15, 15) == 0;
+    let filtering =
+        field(packed, 84, 85) == 0 && field(packed, 86, 87) == 0 && field(packed, 88, 89) == 0;
+    let mip = field(packed, 90, 91) == 1;
+    let bias = field(packed, 64, 75) == 0 && field(packed, 76, 77) == 0;
+    let lod = field(packed, 32, 43) == 0 && field(packed, 44, 55) >= last_level << 8;
+    if addressing && filtering && mip && bias && lod {
+        Ok(())
+    } else {
+        Err(SamplingError::InvalidSampler)
+    }
+}
+
+/// Convert an explicit level of detail to the integer mip level it names.
+///
+/// Point mip filtering selects a single mip level, so the LOD must be an exact
+/// integer within `[0, last_level]`.
+pub fn lod_to_mip(lod_bits: u32, desc: &Rgba8TextureDesc) -> Result<u32, SamplingError> {
+    let lod = f32::from_bits(lod_bits);
+    if !lod.is_finite() || lod < 0.0 || lod.fract() != 0.0 {
+        return Err(SamplingError::InvalidLod);
+    }
+    let mip = lod as u32;
+    if mip >= desc.mips {
+        return Err(SamplingError::InvalidLod);
+    }
+    Ok(mip)
 }
 
 #[cfg(test)]
@@ -475,5 +641,160 @@ mod tests {
             sample_rgba8_2d(&data, &desc, 0, 0.5, f32::NEG_INFINITY).unwrap_err(),
             SamplingError::NonFiniteCoordinates
         );
+    }
+
+    /// Build a valid T#: linear 2D RGBA8 unorm, identity channel select, base
+    /// level zero, `mips` levels and a 40-bit base-address field `base`.
+    fn resource_words(width: u32, height: u32, mips: u32, base: u32) -> [u32; 4] {
+        let width1 = width - 1;
+        let height1 = height - 1;
+        [
+            base,
+            (T_FORMAT_RGBA8_UNORM << 20) | ((width1 & 3) << 30),
+            ((width1 >> 2) & 0x3fff) | (height1 << 14) | (1 << 31),
+            0x0fac | ((mips - 1) << 16) | (T_TYPE_2D << 28),
+        ]
+    }
+
+    /// Build an S# with the given clamp modes, mip filter, LOD range (4.8 fixed
+    /// point) and LOD bias.
+    fn sampler_words(
+        clamp_x: u32,
+        clamp_y: u32,
+        clamp_z: u32,
+        mip_filter: u32,
+        min_lod: u32,
+        max_lod: u32,
+        bias: u32,
+    ) -> [u32; 4] {
+        [
+            clamp_x | (clamp_y << 3) | (clamp_z << 6),
+            (min_lod & 0xfff) | ((max_lod & 0xfff) << 12),
+            (bias & 0xfff) | (((bias >> 12) & 3) << 12) | (mip_filter << 26),
+            0,
+        ]
+    }
+
+    #[test]
+    fn resource_descriptor_base_field_is_a_256_byte_unit() {
+        let (desc, base) = parse_resource_descriptor(resource_words(4, 4, 2, 1)).unwrap();
+        assert_eq!((desc.width, desc.height, desc.mips), (4, 4, 2));
+        assert_eq!(base, 0x100);
+        let (_, base) = parse_resource_descriptor(resource_words(4, 4, 2, 0)).unwrap();
+        assert_eq!(base, 0);
+        let (_, base) = parse_resource_descriptor(resource_words(4, 4, 2, 7)).unwrap();
+        assert_eq!(base, 7 * 256);
+    }
+
+    #[test]
+    fn resource_descriptor_rejects_width_or_height_high_bits() {
+        let mut words = resource_words(4, 4, 2, 1);
+        words[2] |= 1 << 12; // width-1 bit 14 is reserved and must be zero.
+        assert_eq!(
+            parse_resource_descriptor(words).unwrap_err(),
+            SamplingError::InvalidResourceExtent
+        );
+        let mut words = resource_words(4, 4, 2, 1);
+        words[2] |= 1 << 28; // height-1 bit 14 is reserved and must be zero.
+        assert_eq!(
+            parse_resource_descriptor(words).unwrap_err(),
+            SamplingError::InvalidResourceExtent
+        );
+    }
+
+    #[test]
+    fn resource_descriptor_rejects_nonlinear_swizzle() {
+        let mut words = resource_words(4, 4, 2, 1);
+        words[3] |= 1 << 20; // SW mode 116:120 must be zero (linear).
+        assert_eq!(
+            parse_resource_descriptor(words).unwrap_err(),
+            SamplingError::UnsupportedSwizzleMode
+        );
+    }
+
+    #[test]
+    fn resource_descriptor_rejects_nonzero_min_lod() {
+        let mut words = resource_words(4, 4, 2, 1);
+        words[1] |= 1 << 8; // minimimum LOD 51:40.
+        assert_eq!(
+            parse_resource_descriptor(words).unwrap_err(),
+            SamplingError::InvalidResourceMinLod
+        );
+    }
+
+    #[test]
+    fn resource_descriptor_rejects_last_level_below_base_level() {
+        let mut words = resource_words(4, 4, 2, 1);
+        // Base level 1, last level 0: the range is inverted.
+        words[3] = (words[3] & !(0xf << 16)) | (1 << 12);
+        assert_eq!(
+            parse_resource_descriptor(words).unwrap_err(),
+            SamplingError::InvalidResourceLevelRange
+        );
+    }
+
+    #[test]
+    fn sampler_descriptor_accepts_valid_point_clamp_state() {
+        // 2 mips: the last level is 1, so the maximum LOD must be at least
+        // 1.0 in 4.8 fixed point (0x100).
+        validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x100, 0), 1).unwrap();
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_mip_filter_none() {
+        assert_eq!(
+            validate_sampler_descriptor(sampler_words(2, 2, 2, 0, 0, 0x100, 0), 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_nonzero_z_filter() {
+        let mut words = sampler_words(2, 2, 2, 1, 0, 0x100, 0);
+        words[2] |= 1 << 24; // z filter 89:88 = point (0) only.
+        assert_eq!(
+            validate_sampler_descriptor(words, 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_clamp_z_different_from_clamp_x() {
+        assert_eq!(
+            validate_sampler_descriptor(sampler_words(2, 2, 0, 1, 0, 0x100, 0), 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_nonzero_lod_bias() {
+        assert_eq!(
+            validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x100, 1), 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+        let mut words = sampler_words(2, 2, 2, 1, 0, 0x100, 0);
+        words[2] |= 1 << 12; // LOD bias high bit (76:77).
+        assert_eq!(
+            validate_sampler_descriptor(words, 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_nonzero_min_lod() {
+        assert_eq!(
+            validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 1, 0x100, 0), 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_max_lod_below_last_level() {
+        // Last level 1 needs a maximum LOD of at least 0x100 (1.0).
+        assert_eq!(
+            validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x0ff, 0), 1).unwrap_err(),
+            SamplingError::InvalidSampler
+        );
+        validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x100, 0), 1).unwrap();
     }
 }

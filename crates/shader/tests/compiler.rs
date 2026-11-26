@@ -576,6 +576,105 @@ fn vop1_float_rounding_fixture_lowers_to_integer_bit_operations() {
 // RDNA2 guide / MSL templates in lib.rs, then checked against fold-on IR. Fold-off
 // (and default compile) must leave the op mnemonic in the IR.
 
+/// The three synthetic binding ABI descriptor loads of the image-sample
+/// fixtures: s[8:11] from offset 0x0, s[12:15] from 0x10, s[16:19] from 0x20.
+const IMAGE_SAMPLE_LOADS: [u32; 6] = [
+    0xf428_0200,
+    0xfa00_0000,
+    0xf428_0300,
+    0xfa00_0010,
+    0xf428_0400,
+    0xfa00_0020,
+];
+
+fn image_sample_program(loads: &[u32], extra: &[u32]) -> Vec<u8> {
+    let mut program: Vec<u32> = (0..12).map(|index| 0xbe88_0380 + (index << 16)).collect();
+    program.extend_from_slice(loads);
+    program.push(0xbf8c_c07f); // s_waitcnt lgkmcnt(0)
+    program.extend_from_slice(extra);
+    program.extend([
+        0x7e04_0280, // v_mov_b32_e32 v2, 0
+        0x7e06_0280, // v_mov_b32_e32 v3, 0
+        0xf09c_0108, // image_sample_lz v5, v[2:3], s[8:15], s[16:19]
+        0x0082_0502,
+        0xe070_2000, // buffer_store_dword v5, v0, s[4:7], 0 idxen
+        0x8001_0500,
+        0xbbfd_0000, // s_waitcnt_vscnt null, 0
+        0xbf81_0000, // s_endpgm
+    ]);
+    words(&program)
+}
+
+#[test]
+fn compiles_image_sample_with_the_three_descriptor_loads() {
+    compile(
+        Architecture::Gfx1030,
+        &image_sample_program(&IMAGE_SAMPLE_LOADS, &[]),
+    )
+    .expect("the synthetic descriptor loads satisfy the binding contract");
+}
+
+#[test]
+fn refuses_image_sample_without_descriptor_loads() {
+    let error = compile(Architecture::Gfx1030, &image_sample_program(&[], &[])).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance {
+                register: 8,
+                expected: "s_buffer_load_dwordx4 s[8:11], s[0:3], 0x0",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn refuses_image_sample_with_a_descriptor_load_at_the_wrong_offset() {
+    let mut loads = IMAGE_SAMPLE_LOADS;
+    loads[3] = 0xfa00_0000; // s[12:15] from offset 0x0 instead of 0x10
+    let error = compile(Architecture::Gfx1030, &image_sample_program(&loads, &[])).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance { register: 12, .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn refuses_image_sample_with_a_narrow_descriptor_load() {
+    let mut loads = IMAGE_SAMPLE_LOADS;
+    loads[4] = 0xf424_0400; // dwordx2 into s[16:17] instead of dwordx4
+    let error = compile(Architecture::Gfx1030, &image_sample_program(&loads, &[])).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance { register: 16, .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn refuses_image_sample_after_a_later_descriptor_write() {
+    // s_mov_b32 s8, 0 after the completed descriptor loads.
+    let error = compile(
+        Architecture::Gfx1030,
+        &image_sample_program(&IMAGE_SAMPLE_LOADS, &[0xbe88_0380]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance { register: 8, .. }
+        ),
+        "{error:?}"
+    );
+}
+
 fn words(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }

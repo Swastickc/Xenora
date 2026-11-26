@@ -277,6 +277,7 @@ fn lift(
                 coord,
                 resource,
                 sampler,
+                dmask: 0xf,
             } if stage == Stage::Pixel && dst >= 2 && !exporting => {
                 // In synthetic binding ABI:
                 // resource s[0:7] maps to texture(0)
@@ -449,6 +450,7 @@ mod tests {
                     coord,
                     resource,
                     sampler: 8,
+                    dmask: 0xf,
                 },
             },
             DecodedInstruction {

@@ -71,6 +71,13 @@ pub enum CompileError {
         offset: usize,
         reason: &'static str,
     },
+    /// An image sample must read descriptors that were loaded into s[8:19] by
+    /// the synthetic binding ABI's `s_buffer_load_dwordx4` sequence.
+    DescriptorProvenance {
+        offset: usize,
+        register: u8,
+        expected: &'static str,
+    },
 }
 
 impl fmt::Display for CompileError {
@@ -89,6 +96,14 @@ impl fmt::Display for CompileError {
                     "shader verification at byte 0x{offset:x}: {reason}"
                 )
             }
+            Self::DescriptorProvenance {
+                offset,
+                register,
+                expected,
+            } => write!(
+                formatter,
+                "shader verification at byte 0x{offset:x}: s{register} was not written by {expected}"
+            ),
         }
     }
 }
@@ -188,6 +203,16 @@ enum Op {
     /// The value is the earlier pure result `source`. The definition index stays
     /// so later operands do not need renumbering.
     Reuse(Value),
+    /// MIMG 2D texture sample: the selected channel of
+    /// `tex0.sample(samp0, float2(u, v), level(lod))` as float bits. The texture
+    /// and sampler are the synthetic ABI bindings, not register operands.
+    Sample {
+        u: Value,
+        v: Value,
+        lod: Value,
+        component: u8,
+        explicit_lod: bool,
+    },
 }
 
 impl Op {
@@ -224,6 +249,7 @@ impl Op {
                 ..
             } => vec![mask, fallthrough, taken],
             Self::Reuse(source) => vec![source],
+            Self::Sample { u, v, lod, .. } => vec![u, v, lod],
         }
     }
 
@@ -304,6 +330,21 @@ impl Op {
                 }
             }
             Self::Reuse(source) => name(source),
+            Self::Sample {
+                u,
+                v,
+                lod,
+                component,
+                explicit_lod: _,
+            } => {
+                let channel = ["r", "g", "b", "a"][usize::from(component)];
+                format!(
+                    "as_type<uint>(tex0.sample(samp0, float2(as_type<float>({}), as_type<float>({})), level(as_type<float>({}))).{channel})",
+                    name(u),
+                    name(v),
+                    name(lod),
+                )
+            }
             Self::ScalarTest {
                 relation,
                 signed,
@@ -580,17 +621,27 @@ pub fn compile_with(
     } else {
         ""
     };
+    let samples = operations
+        .iter()
+        .any(|(_, operation)| matches!(operation, Op::Sample { .. }));
+    // A texture and sampler pair must precede the grid attribute, so the
+    // parameter list is built in one piece instead of rewriting the signature.
+    let sampled = if samples {
+        "    texture2d<float, access::sample> tex0 [[texture(0)]],\n    sampler samp0 [[sampler(0)]],\n"
+    } else {
+        ""
+    };
     let mut msl = format!(
-        "#include <metal_stdlib>\nusing namespace metal;\nkernel void {ENTRY_POINT}(\n    device const uint* input [[buffer(0)]],\n    device uint* output [[buffer(1)]],\n    uint index [[thread_position_in_grid]]{grid}) {{\n"
+        "#include <metal_stdlib>\nusing namespace metal;\nkernel void {ENTRY_POINT}(\n    device const uint* input [[buffer(0)]],\n    device uint* output [[buffer(1)]],\n{sampled}    uint index [[thread_position_in_grid]]{grid}) {{\n"
     );
     if operations.iter().any(|(_, operation)| {
         matches!(
             operation,
             Op::Binary(
-                Binary::Vector(VectorBinary::AddF32 | VectorBinary::SubF32 | VectorBinary::MulF32),
+                Binary::Vector(VectorBinary::AddF32 | VectorBinary::SubF32 | VectorBinary::MulF32,),
                 _,
                 _
-            )
+            ) | Op::Sample { .. }
         )
     }) {
         msl.push_str("    #pragma clang fp contract(off)\n    #pragma clang fp reassociate(off)\n");
@@ -781,6 +832,24 @@ pub fn compile_with(
                 format!("{dest} = reuse.u32 {source}"),
                 format!("uint {dest} = {source};"),
             ),
+            Op::Sample {
+                u,
+                v,
+                lod: _,
+                component,
+                explicit_lod,
+            } => {
+                let channel = ["r", "g", "b", "a"][usize::from(component)];
+                let form = if explicit_lod {
+                    "sample_l.2d.f32"
+                } else {
+                    "sample_lz.2d.f32"
+                };
+                (
+                    format!("{form} tex0, samp0, ({u}, {v})[{channel}]"),
+                    format!("uint {dest} = {};", operation.expression(&thread, "", "")),
+                )
+            }
         };
         // Writing to a String is infallible.
         let _ = writeln!(ir, "{offset:04x}: {step}");
@@ -902,6 +971,43 @@ fn scalar_load_pending(scalars: &[ScalarValue]) -> bool {
         .any(|value| matches!(value, ScalarValue::Pending(_)))
 }
 
+/// The synthetic binding ABI load that may provide descriptor register `slot`.
+fn descriptor_load(slot: usize) -> Option<(usize, u32, &'static str)> {
+    match slot {
+        8..=11 => Some((8, 0x0, "s_buffer_load_dwordx4 s[8:11], s[0:3], 0x0")),
+        12..=15 => Some((12, 0x10, "s_buffer_load_dwordx4 s[12:15], s[0:3], 0x10")),
+        16..=19 => Some((16, 0x20, "s_buffer_load_dwordx4 s[16:19], s[0:3], 0x20")),
+        _ => None,
+    }
+}
+
+/// Forget the provenance of a descriptor register after any other write.
+fn clear_descriptor_origin(origins: &mut [Option<u32>; 128], register: usize) {
+    if (8..20).contains(&register) {
+        origins[register] = None;
+    }
+}
+
+/// Every image sample reads the three synthetic descriptor loads in order.
+fn verify_descriptor_provenance(
+    origins: &[Option<u32>; 128],
+    offset: usize,
+) -> Result<(), CompileError> {
+    for (slot, origin) in origins.iter().enumerate().take(20).skip(8) {
+        let (base, expected_offset, expected) =
+            descriptor_load(slot).expect("descriptor registers are contiguous");
+        debug_assert_eq!(base, 8 + ((slot - 8) / 4) * 4);
+        if *origin != Some(expected_offset) {
+            return Err(CompileError::DescriptorProvenance {
+                offset,
+                register: slot as u8,
+                expected,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, Op)>, CompileError> {
     let mut operations = Vec::new();
     let mut registers = [None::<Value>; 256];
@@ -910,6 +1016,10 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
     let mut stored = false;
     let mut store_pending = false;
     let mut scalars = [ScalarValue::Uninitialized; 128];
+    // For s8..s19, the byte offset of the `s_buffer_load_dwordx4` that last
+    // wrote the register, or `None` after any other write. The image sample
+    // requires the synthetic binding ABI's three descriptor loads.
+    let mut descriptor_origin = [None::<u32>; 128];
     let mut exec = u32::MAX; // The fixture starts with full Wave32 EXEC.
     scalars[126] = ScalarValue::Known(exec);
     let mut scc = Scc::Uninitialized;
@@ -943,10 +1053,18 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
             Instruction::ScalarBufferLoad { resource, .. } if resource != 0 => {
                 "unsupported resource or buffer index"
             }
-            Instruction::Export { .. }
-            | Instruction::Interpolate { .. }
-            | Instruction::ImageSampleLz { .. } => {
+            Instruction::Export { .. } | Instruction::Interpolate { .. } => {
                 "graphics instruction is unsupported in a compute fixture"
+            }
+            Instruction::ImageSampleLz {
+                resource, sampler, ..
+            } if (resource, sampler) != (8, 16) => {
+                "sampling outside synthetic resource binding ABI s[8:15] and s[16:19]"
+            }
+            Instruction::ImageSampleL {
+                resource, sampler, ..
+            } if (resource, sampler) != (8, 16) => {
+                "sampling outside synthetic resource binding ABI s[8:15] and s[16:19]"
             }
             Instruction::EndProgram if index + 1 != decoded.len() => {
                 return Err(CompileError::Verify {
@@ -1229,6 +1347,27 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 for (slot, value) in (usize::from(dst)..).zip(loaded) {
                     scalars[slot] = ScalarValue::Pending(value);
                 }
+                // A scalar load writes every destination register. Record the
+                // synthetic descriptor loads so an image sample cannot consume
+                // arbitrary SGPR content.
+                for slot in usize::from(dst)..usize::from(dst) + usize::from(dwords) {
+                    clear_descriptor_origin(&mut descriptor_origin, slot);
+                }
+                let expected = if soffset.is_none() && dwords == 4 {
+                    match (dst, immediate) {
+                        (8, 0x0) => Some(0x0),
+                        (12, 0x10) => Some(0x10),
+                        (16, 0x20) => Some(0x20),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(expected) = expected {
+                    for slot in &mut descriptor_origin[usize::from(dst)..usize::from(dst) + 4] {
+                        *slot = Some(expected);
+                    }
+                }
                 continue;
             }
             Instruction::WaitScalarLoad => {
@@ -1350,6 +1489,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = ScalarValue::Known(value);
+                clear_descriptor_origin(&mut descriptor_origin, usize::from(dst));
                 continue;
             }
             Instruction::ScalarUnary { op, dst, src } => {
@@ -1369,6 +1509,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = ScalarValue::Known(value);
+                clear_descriptor_origin(&mut descriptor_origin, usize::from(dst));
                 if let Some(flag) = flag {
                     scc = Scc::Known(flag);
                 }
@@ -1395,6 +1536,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
                 *slot = ScalarValue::Known(value);
+                clear_descriptor_origin(&mut descriptor_origin, usize::from(dst));
                 if let Some(flag) = flag {
                     scc = Scc::Known(flag);
                 }
@@ -1464,6 +1606,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 let (value, flag) = op.evaluate(old, simm16, scc_in);
                 if let Some(value) = value {
                     *slot = ScalarValue::Known(value);
+                    clear_descriptor_origin(&mut descriptor_origin, usize::from(dst));
                 }
                 if let Some(flag) = flag {
                     scc = Scc::Known(flag);
@@ -1527,6 +1670,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                         lane_vcc = None;
                     } else {
                         scalars[sdst] = ScalarValue::RuntimeMask;
+                        clear_descriptor_origin(&mut descriptor_origin, sdst);
                     }
                     continue;
                 }
@@ -1592,6 +1736,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                     lane_vcc = Some(mask);
                 } else {
                     scalars[sdst] = ScalarValue::RuntimeMask;
+                    clear_descriptor_origin(&mut descriptor_origin, sdst);
                 }
                 continue;
             }
@@ -1767,9 +1912,71 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 }
                 continue;
             }
-            Instruction::Export { .. }
-            | Instruction::Interpolate { .. }
-            | Instruction::ImageSampleLz { .. } => {
+            Instruction::ImageSampleLz {
+                dst, coord, dmask, ..
+            }
+            | Instruction::ImageSampleL {
+                dst, coord, dmask, ..
+            } => {
+                // The synthetic binding (resource s[8:15] -> texture(0), sampler
+                // s[16:19] -> sampler(0)) was already checked in the verify loop.
+                // The descriptors must be the three s_buffer_load_dwordx4 words
+                // of the synthetic input, with no later writes before the sample.
+                if scalar_load_pending(&scalars) {
+                    return Err(error("image sample before the scalar descriptor load wait"));
+                }
+                verify_descriptor_provenance(&descriptor_origin, offset)?;
+                let explicit_lod =
+                    matches!(instruction.instruction, Instruction::ImageSampleL { .. });
+                let u = read(coord)?;
+                let v = read(coord + 1)?;
+                let lod = if explicit_lod {
+                    read(coord + 2)?
+                } else {
+                    let zero = Value(operations.len());
+                    facts.push(KnownBits::constant(0.0f32.to_bits()));
+                    operations.push((offset, Op::Constant(0.0f32.to_bits())));
+                    zero
+                };
+                // Guide Table 41, printed page 69: DMASK bit 0 = red, bit 1 =
+                // green, bit 2 = blue, bit 3 = alpha; selected components are
+                // written to consecutive destination VGPRs in that order.
+                let mut next_dst = dst;
+                for component in 0..4u8 {
+                    if dmask & (1 << component) == 0 {
+                        continue;
+                    }
+                    let sample = Value(operations.len());
+                    facts.push(KnownBits::UNKNOWN);
+                    operations.push((
+                        offset,
+                        Op::Sample {
+                            u,
+                            v,
+                            lod,
+                            component,
+                            explicit_lod,
+                        },
+                    ));
+                    let slot = usize::from(next_dst);
+                    if next_dst == 0 || pending_load.is_some_and(|(register, _)| register == slot) {
+                        return Err(error(
+                            "instruction writes the index register or replaces a pending load",
+                        ));
+                    }
+                    registers[slot] = Some(merge_lanes(
+                        &mut operations,
+                        &mut facts,
+                        offset,
+                        exec,
+                        sample,
+                        registers[slot],
+                    )?);
+                    next_dst += 1;
+                }
+                continue;
+            }
+            Instruction::Export { .. } | Instruction::Interpolate { .. } => {
                 return Err(error(
                     "graphics instruction is unsupported in a compute fixture",
                 ));
@@ -1965,6 +2172,19 @@ fn map_uses(operation: Op, map: impl Fn(Value) -> Value) -> Op {
             taken: map(taken),
         },
         Op::Reuse(source) => Op::Reuse(map(source)),
+        Op::Sample {
+            u,
+            v,
+            lod,
+            component,
+            explicit_lod,
+        } => Op::Sample {
+            u: map(u),
+            v: map(v),
+            lod: map(lod),
+            component,
+            explicit_lod,
+        },
     }
 }
 

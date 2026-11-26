@@ -2558,6 +2558,30 @@ recognized = true
 decoded = true
 llvm = "three-way passed"
 
+[[instruction]]
+form = "image_sample_lz"
+encoding = "MIMG, Wave32, non-NSA, 2D RGBA8 unorm, explicit LOD 0, DMASK 1-15, point filter and clamp-to-last-texel addressing"
+representation = "8 B"
+lowering = "MSL texture sample at level zero"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
+[[instruction]]
+form = "image_sample_l"
+encoding = "MIMG, Wave32, non-NSA, 2D RGBA8 unorm, explicit LOD from the address tuple, DMASK 1-15, point filter and clamp-to-last-texel addressing"
+representation = "8 B"
+lowering = "MSL texture sample at an explicit level"
+reference = "implemented"
+cpu = "fixture verified"
+gpu = "fixture verified"
+recognized = true
+decoded = true
+llvm = "three-way passed"
+
 [guest_milestones]
 X1 = "accepted"
 X2 = "accepted"

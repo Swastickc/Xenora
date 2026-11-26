@@ -240,6 +240,47 @@ service ucrtbase.dll setvbuf(stream: ptr, buffer: ptr, mode: i32, size: u64) -> 
 
 # Files for a hosted C program, on the in-memory drive the handle services use.
 
+service ucrtbase.dll fread(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64
+    handler fread
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails 0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once
+    ref stdio.h fread
+    test fread_reads_whole_items_from_files_and_stdin
+service ucrtbase.dll fgetc(stream: ptr) -> i32
+    handler fgetc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with errno EINVAL for a null stream or EBADF for one open for writing
+    ref stdio.h fgetc
+    test fread_reads_whole_items_from_files_and_stdin
+service ucrtbase.dll fseek(stream: ptr, offset: i32, origin: i32) -> i32
+    handler fseek
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream
+    ref stdio.h fseek
+    test fseek_ftell_and_rewind_move_through_file_streams
+service ucrtbase.dll ftell(stream: ptr) -> i32
+    handler ftell
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EINVAL for a null stream or a position past what long holds; stops the guest for a standard stream
+    ref stdio.h ftell
+    test fseek_ftell_and_rewind_move_through_file_streams
+service ucrtbase.dll rewind(stream: ptr) -> void
+    handler rewind
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails errno EINVAL for a null stream; stops the guest for a standard stream
+    ref stdio.h rewind
+    test fseek_ftell_and_rewind_move_through_file_streams
+
 service ucrtbase.dll fopen(name: ptr, mode: ptr) -> ptr
     handler fopen
     status partial

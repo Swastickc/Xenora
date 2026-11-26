@@ -22,6 +22,7 @@ const SYNCH: &str = "api-ms-win-core-synch-l1-1-0.dll";
 const SYNCH_2: &str = "api-ms-win-core-synch-l1-2-0.dll";
 const SLIST: &str = "api-ms-win-core-interlocked-l1-1-0.dll";
 const THREADS: &str = "api-ms-win-core-processthreads-l1-1-0.dll";
+const THREADS_8: &str = "api-ms-win-core-processthreads-l1-1-8.dll";
 const FIBERS: &str = "api-ms-win-core-fibers-l1-1-0.dll";
 
 const IMPORTS: &[(&str, &str)] = &[
@@ -650,6 +651,59 @@ fn slists_push_and_pop_in_lifo_order_using_the_x64_header_layout() {
         RUNTIME_LIMIT
     );
     assert_eq!(guest.fails("QueryDepthSList", &[header + 8]), RUNTIME_LIMIT);
+}
+
+#[test]
+fn tls_get_value2_preserves_each_threads_last_error() {
+    const fn imports(module: &'static str) -> [(&'static str, &'static str); 7] {
+        [
+            (module, "TlsGetValue2"),
+            (KERNEL32, "TlsAlloc"),
+            (KERNEL32, "TlsSetValue"),
+            (KERNEL32, "TlsFree"),
+            (KERNEL32, "TlsGetValue"),
+            (KERNEL32, "SetLastError"),
+            (KERNEL32, "GetLastError"),
+        ]
+    }
+    const TABLES: [&[(&str, &str)]; 2] = [&imports(KERNEL32), &imports(THREADS_8)];
+
+    for imports in TABLES {
+        let mut guest = Guest::new(imports, &[]);
+        let index = guest.call("TlsAlloc", &[]);
+        assert!(index < 1088);
+        guest.on(THREAD_A).call("SetLastError", &[17]);
+        guest.on(THREAD_B).call("SetLastError", &[29]);
+
+        assert_eq!(guest.on(THREAD_B).call("TlsGetValue2", &[index]), 0);
+        assert_eq!(guest.error(), 29);
+        assert_eq!(guest.on(THREAD_A).call("TlsSetValue", &[index, 0xABC0]), 1);
+        assert_eq!(guest.on(THREAD_B).call("TlsSetValue", &[index, 0xDEF0]), 1);
+        assert_eq!(guest.on(THREAD_A).call("TlsGetValue2", &[index]), 0xABC0);
+        assert_eq!(guest.error(), 17);
+        assert_eq!(guest.on(THREAD_B).call("TlsGetValue2", &[index]), 0xDEF0);
+        assert_eq!(guest.error(), 29);
+
+        for missing in [index + 1, 1088, u64::from(u32::MAX)] {
+            assert_eq!(guest.call("TlsGetValue2", &[missing]), 0);
+            assert_eq!(guest.error(), 29);
+        }
+        assert_eq!(guest.call("TlsSetValue", &[index, 0]), 1);
+        assert_eq!(guest.call("TlsGetValue2", &[index]), 0);
+        assert_eq!(guest.error(), 29);
+        assert_eq!(guest.call("TlsFree", &[index]), 1);
+        assert_eq!(guest.on(THREAD_A).call("TlsGetValue2", &[index]), 0);
+        assert_eq!(guest.error(), 17);
+
+        assert_eq!(guest.call("TlsAlloc", &[]), index);
+        assert_eq!(guest.on(THREAD_A).call("TlsGetValue2", &[index]), 0);
+        assert_eq!(guest.error(), 17);
+        assert_eq!(guest.on(THREAD_B).call("TlsGetValue2", &[index]), 0);
+        assert_eq!(guest.error(), 29);
+        assert_eq!(guest.call("TlsGetValue", &[index]), 0);
+        assert_eq!(guest.error(), 0);
+        assert_eq!(guest.on(THREAD_A).error(), 17);
+    }
 }
 
 #[test]

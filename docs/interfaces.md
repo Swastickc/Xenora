@@ -814,8 +814,8 @@ terminating null. Request-header queries, custom names, raw-header queries,
 indexes and all other info levels remain unsupported. Bodies with
 `Content-Length` are bounded by
 that length; responses without one are read until close. `HEAD`, informational,
-204 and 304 responses have no body. Chunked transfer coding is rejected rather
-than decoded incorrectly.
+204 and 304 responses have no body. Chunked transfer coding is decoded incrementally; other transfer codings are
+rejected rather than decoded incorrectly.
 
 `WinHttpQueryDataAvailable` reports bytes available without consuming them,
 waiting for more cleartext body data in the synchronous subset when the end
@@ -823,6 +823,12 @@ has not been reached. `WinHttpReadData` zeroes its count output before other
 work, validates the destination span before consuming network data, returns a
 bounded partial read, reports EOF with a zero count and propagates malformed
 responses, timeouts and reset connections as documented WinHTTP errors.
+Responses whose only transfer coding is exactly `chunked` are decoded
+incrementally: chunk sizes and extensions are bounded and validated, chunk
+data is exposed without the framing bytes, trailers are validated and
+discarded, and malformed framing or premature EOF fails the request rather
+than being exposed as body data. Other transfer codings and combinations
+remain unsupported.
 Operations on one request handle are serialized by its transport lock;
 independent handles may proceed independently. Closing a handle while another
 thread is using it remains caller misuse, but the implementation retains the
@@ -839,8 +845,9 @@ process exits.
 
 TLS certificate validation, HTTPS, asynchronous callbacks, cancellation,
 redirects, authentication, proxy resolution, request streaming, connection
-reuse, response-header enumeration beyond the two status forms, chunked
-transfer coding and libcurl-compatible interfaces remain unsupported. Tests
+reuse, custom/raw response-header queries, duplicate-header enumeration,
+non-chunked or combined transfer codings and libcurl-compatible interfaces
+remain unsupported. Tests
 use independently authored controlled loopback servers and synthetic guest
 memory on Apple Silicon only. They are not Windows comparison evidence,
 independent review or proof of Internet connectivity.

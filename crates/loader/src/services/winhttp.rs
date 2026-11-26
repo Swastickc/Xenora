@@ -11,7 +11,7 @@
 use super::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ServicesState};
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::GuestMemory;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
@@ -100,6 +100,34 @@ enum BodyKind {
     Empty,
     Fixed(u64),
     UntilClose { eof: bool },
+    Chunked,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChunkedPosition {
+    SizeLine,
+    Data,
+    DataCrLf,
+    Trailers,
+    Eof,
+}
+
+struct ChunkedState {
+    position: ChunkedPosition,
+    chunk_remaining: u64,
+    queued: VecDeque<u8>,
+    trailer_bytes: usize,
+}
+
+impl ChunkedState {
+    fn new() -> Self {
+        Self {
+            position: ChunkedPosition::SizeLine,
+            chunk_remaining: 0,
+            queued: VecDeque::new(),
+            trailer_bytes: 0,
+        }
+    }
 }
 
 struct ResponseHead {
@@ -114,6 +142,7 @@ struct TransportState {
     stream: Option<BufReader<TcpStream>>,
     response: Option<ResponseHead>,
     body: BodyKind,
+    chunked: ChunkedState,
 }
 
 impl TransportState {
@@ -124,6 +153,7 @@ impl TransportState {
             stream: None,
             response: None,
             body: BodyKind::Empty,
+            chunked: ChunkedState::new(),
         }
     }
 }
@@ -580,7 +610,19 @@ fn parse_response(
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
     {
-        return Err(ERROR_NOT_SUPPORTED);
+        let transfer_encodings = head
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        if transfer_encodings.len() != 1 {
+            return Err(ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
+        }
+        if !transfer_encodings[0].eq_ignore_ascii_case("chunked") {
+            return Err(ERROR_NOT_SUPPORTED);
+        }
+        BodyKind::Chunked
     } else {
         let mut length = None;
         for (name, value) in &head.headers {
@@ -604,6 +646,87 @@ fn parse_response(
         }
     };
     Ok((head, body))
+}
+
+fn fill_chunked_queue(
+    reader: &mut BufReader<TcpStream>,
+    state: &mut ChunkedState,
+    target: usize,
+) -> Result<(), u32> {
+    while state.queued.len() < target {
+        match state.position {
+            ChunkedPosition::Eof => break,
+            ChunkedPosition::SizeLine => {
+                let line = read_crlf_line(reader)?;
+                let text =
+                    String::from_utf8(line).map_err(|_| ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
+                let size_text = text.split(';').next().unwrap_or("").trim();
+                if size_text.is_empty()
+                    || size_text.len() > 16
+                    || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
+                }
+                let size = u64::from_str_radix(size_text, 16)
+                    .map_err(|_| ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
+                state.chunk_remaining = size;
+                state.position = if size == 0 {
+                    ChunkedPosition::Trailers
+                } else {
+                    ChunkedPosition::Data
+                };
+            }
+            ChunkedPosition::Data => {
+                let wanted = (target - state.queued.len())
+                    .min(state.chunk_remaining as usize)
+                    .min(MAX_READ_CHUNK_BYTES);
+                if wanted == 0 {
+                    continue;
+                }
+                let mut bytes = vec![0; wanted];
+                let count = reader.read(&mut bytes).map_err(io_winhttp_error)?;
+                if count == 0 {
+                    return Err(ERROR_WINHTTP_CONNECTION_ERROR);
+                }
+                bytes.truncate(count);
+                state.queued.extend(bytes);
+                state.chunk_remaining -= count as u64;
+                if state.chunk_remaining == 0 {
+                    state.position = ChunkedPosition::DataCrLf;
+                }
+                break;
+            }
+            ChunkedPosition::DataCrLf => {
+                let mut crlf = [0; 2];
+                reader.read_exact(&mut crlf).map_err(io_winhttp_error)?;
+                if &crlf != b"\r\n" {
+                    return Err(ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
+                }
+                state.position = ChunkedPosition::SizeLine;
+            }
+            ChunkedPosition::Trailers => loop {
+                let line = read_crlf_line(reader)?;
+                state.trailer_bytes += line.len() + 2;
+                if state.trailer_bytes > MAX_RESPONSE_HEAD_BYTES {
+                    return Err(ERROR_WINHTTP_HEADER_SIZE_OVERFLOW);
+                }
+                if line.is_empty() {
+                    state.position = ChunkedPosition::Eof;
+                    break;
+                }
+                let line =
+                    String::from_utf8(line).map_err(|_| ERROR_WINHTTP_INVALID_SERVER_RESPONSE)?;
+                let Some((name, value)) = line.split_once(':') else {
+                    return Err(ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
+                };
+                let value = value.trim_matches(|byte| byte == ' ' || byte == '\t');
+                if !valid_header_name(name) || !valid_header_value(value) {
+                    return Err(ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
+                }
+            },
+        }
+    }
+    Ok(())
 }
 
 fn close_result(state: &ServicesState, teb: u64, closed: bool) -> u64 {
@@ -923,7 +1046,10 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             }
             let body = transport_guard.body;
             let mut mark_eof = false;
-            let result = match transport_guard.stream.as_mut() {
+            let TransportState {
+                stream, chunked, ..
+            } = &mut *transport_guard;
+            let result = match stream.as_mut() {
                 Some(reader) => match body {
                     BodyKind::Empty | BodyKind::Fixed(0) => Ok(0_usize),
                     BodyKind::Fixed(remaining) => match reader.fill_buf() {
@@ -941,6 +1067,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                         }
                         Err(error) => Err(io_winhttp_error(error)),
                     },
+                    BodyKind::Chunked => fill_chunked_queue(reader, chunked, MAX_READ_CHUNK_BYTES)
+                        .map(|()| chunked.queued.len()),
                 },
                 None => Err(ERROR_WINHTTP_INCORRECT_HANDLE_STATE),
             };
@@ -997,12 +1125,29 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     .min(MAX_READ_CHUNK_BYTES),
                 BodyKind::UntilClose { eof: true } => 0_usize,
                 BodyKind::UntilClose { eof: false } => (wanted as usize).min(MAX_READ_CHUNK_BYTES),
+                BodyKind::Chunked => (wanted as usize).min(MAX_READ_CHUNK_BYTES),
             };
             let mut bytes = vec![0; limit];
             let result = if limit == 0 {
                 Ok(0_usize)
             } else {
-                match transport_guard.stream.as_mut() {
+                let TransportState {
+                    stream, chunked, ..
+                } = &mut *transport_guard;
+                match stream.as_mut() {
+                    Some(reader) if matches!(body, BodyKind::Chunked) => {
+                        fill_chunked_queue(reader, chunked, limit).map(|()| {
+                            let mut count = 0;
+                            while count < limit {
+                                let Some(byte) = chunked.queued.pop_front() else {
+                                    break;
+                                };
+                                bytes[count] = byte;
+                                count += 1;
+                            }
+                            count
+                        })
+                    }
                     Some(reader) => reader.read(&mut bytes).map_err(io_winhttp_error),
                     None => Err(ERROR_WINHTTP_INCORRECT_HANDLE_STATE),
                 }
@@ -1678,6 +1823,86 @@ mod tests {
             fixture.state.last_error(0),
             ERROR_WINHTTP_INCORRECT_HANDLE_STATE
         );
+    }
+
+    #[test]
+    fn chunked_response_is_decoded_incrementally() {
+        let (port, _captured, server) = serve_once(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6;extension=yes\r\n WORLD\r\n0\r\nX-Checksum: yes\r\n\r\n",
+        );
+        let mut fixture = Fixture::new();
+        let request = open_loopback_request(&mut fixture, port);
+        assert_eq!(
+            fixture.call("WinHttpSendRequest", &[request, 0, 0, 0, 0, 0, 0]),
+            1
+        );
+        assert_eq!(fixture.call("WinHttpReceiveResponse", &[request, 0]), 1);
+        fixture.memory.write_u32(0x2958, 4).unwrap();
+        assert_eq!(
+            fixture.call(
+                "WinHttpQueryHeaders",
+                &[
+                    request,
+                    (WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER) as u64,
+                    0,
+                    0x3020,
+                    0x2958,
+                    0,
+                ]
+            ),
+            0
+        );
+        assert_eq!(fixture.state.last_error(0), ERROR_WINHTTP_HEADER_NOT_FOUND);
+        assert_eq!(
+            fixture.call("WinHttpQueryDataAvailable", &[request, 0x2910]),
+            1
+        );
+        assert!(fixture.memory.read_u32(0x2910).unwrap() > 0);
+        assert_eq!(
+            fixture.call("WinHttpReadData", &[request, 0x2a00, 4, 0x2914]),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x2914).unwrap(), 4);
+        let mut first = [0; 4];
+        fixture.memory.read_bytes(0x2a00, &mut first).unwrap();
+        assert_eq!(&first, b"hell");
+        assert_eq!(
+            fixture.call("WinHttpReadData", &[request, 0x2a10, 32, 0x2914]),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x2914).unwrap(), 7);
+        let mut rest = [0; 7];
+        fixture.memory.read_bytes(0x2a10, &mut rest).unwrap();
+        assert_eq!(&rest, b"o WORLD");
+        assert_eq!(
+            fixture.call("WinHttpReadData", &[request, 0x2a20, 8, 0x2914]),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x2914).unwrap(), 0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn malformed_chunked_response_fails_during_body_read() {
+        let (port, _captured, server) = serve_once(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nnot-hex\r\nhello\r\n0\r\n\r\n",
+        );
+        let mut fixture = Fixture::new();
+        let request = open_loopback_request(&mut fixture, port);
+        assert_eq!(
+            fixture.call("WinHttpSendRequest", &[request, 0, 0, 0, 0, 0, 0]),
+            1
+        );
+        assert_eq!(fixture.call("WinHttpReceiveResponse", &[request, 0]), 1);
+        assert_eq!(
+            fixture.call("WinHttpReadData", &[request, 0x2a00, 8, 0x2914]),
+            0
+        );
+        assert_eq!(
+            fixture.state.last_error(0),
+            ERROR_WINHTTP_INVALID_SERVER_RESPONSE
+        );
+        server.join().unwrap();
     }
 
     #[test]

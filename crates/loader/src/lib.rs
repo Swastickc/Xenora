@@ -28,6 +28,7 @@ pub mod startup;
 pub mod tasks;
 pub mod tls;
 pub mod triage;
+pub mod x86_avx;
 pub mod x86_decode;
 pub mod x86_exec;
 pub mod x86_float;

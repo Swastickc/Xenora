@@ -111,13 +111,14 @@ pub fn run_synthetic_startup_scheduled(
     state: std::sync::Arc<crate::services::ServicesState>,
     entry_budget: usize,
     quantum: usize,
+    observe: impl FnMut(StartupEvent),
 ) -> Result<StartupResult, Box<dyn std::error::Error>> {
     run_startup_with(
         bytes,
         layout,
         imports,
         entry_budget,
-        |_| {},
+        observe,
         #[cfg(test)]
         |_| {},
         move |engine, entry_cpu, memory, budget| match crate::scheduler::Scheduler::new(

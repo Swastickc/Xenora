@@ -34,7 +34,7 @@ Never introduce Rosetta 2, x86-64 host executables, MoltenVK, Vulkan runtime dep
 - Contributors who have seen leaked or confidential Xbox materials must not contribute. State this in CONTRIBUTING.md and require a DCO sign-off (Signed-off-by) on contributions.
 - Include a plain statement in docs/legal.md: Xenora does not circumvent console security or DRM, does not load encrypted or protected content, and is a research project built from public documentation. Add a note that this is not legal advice and that contributors should know their local laws, including anti-circumvention provisions such as DMCA section 1201.
 - Before copying or adapting any upstream code: verify the exact license of that file (not just the repo), check GPL-3.0-or-later compatibility, preserve copyright notices, record source repository and exact commit, document modifications, include required attribution. Never remove upstream copyright notices. If licensing is uncertain, stop using that code until resolved.
-- Keep Xenora's emulator implementation original. Never copy, port, translate or adapt emulator source from Leonida, KyTx, AnyPS5 or similar projects.
+- Keep Xenora's emulator implementation original. Never copy, port, translate or adapt emulator source from KyTx, AnyPS5 or other emulator projects.
 - Validate the technical compatibility and safety of user-provided files. Do not ask for ownership receipts, accounts or acquisition provenance as part of file loading. Contributor provenance and licensing obligations still apply.
 - Never place restricted material in the repository or its Git history.
 - Do not push, publish, or change remote visibility without explicit user authorization. Prepare locally and report readiness.

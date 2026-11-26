@@ -9,6 +9,7 @@ exact revision and known limitations.
 ### Fixed
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).
 - The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).
+- The native CI semantics test now distinguishes an unknown signedness from a valid category used on the wrong operation. This restores the check after binary32 rounding added the float category (#728).
 
 - PE startup and static inspection now keep ordinary import descriptors within the declared directory. Startup reports a missing in-range terminator at import binding, and static inspection retains the imports found before the error.
 

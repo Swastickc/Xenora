@@ -44,7 +44,8 @@ def disassemble_batch(llvm_bin, blobs):
     prints the words it consumed. That length is what the decoder read, not the
     length of a re-encoding (llvm-mc --disassemble re-encodes, which shortens
     inconsistent MIMG NSA probes). Returns (text, consumed bytes) or None when
-    LLVM cannot decode offset zero (it prints `.long`/`.short`/`.byte`).
+    the blob is empty or LLVM explicitly cannot decode offset zero (it prints
+    `.long`/`.short`/`.byte`). A missing record for a nonempty blob is an error.
     """
     source = []
     for index, blob in enumerate(blobs):
@@ -60,15 +61,18 @@ def disassemble_batch(llvm_bin, blobs):
             check=True, capture_output=True,
         )
         dump = subprocess.run(
-            [llvm_bin / "llvm-objdump", "-d", "--mcpu=gfx1030", "--mattr=+wavefrontsize32", object_path],
+            [
+                llvm_bin / "llvm-objdump", "-d", "--disassemble-zeroes",
+                "--mcpu=gfx1030", "--mattr=+wavefrontsize32", object_path,
+            ],
             check=True, capture_output=True, text=True,
         ).stdout
     first = {}
     section = None
     for line in dump.splitlines():
-        header = SECTION.match(line)
-        if header:
-            section = int(header.group(1))
+        if line.startswith("Disassembly of section "):
+            header = SECTION.fullmatch(line)
+            section = int(header.group(1)) if header else None
             continue
         instruction = INSTRUCTION.match(line)
         if section is None or section in first or not instruction:
@@ -84,6 +88,9 @@ def disassemble_batch(llvm_bin, blobs):
             if warning.startswith(";"):
                 text += f" [LLVM: {warning.lstrip('; ')}]"
             first[section] = (text, 4 * len(words.split()))
+    for index, blob in enumerate(blobs):
+        if blob and index not in first:
+            raise ValueError(f"llvm-objdump omitted an offset-zero record for .text.{index}")
     return [first.get(index) for index in range(len(blobs))]
 
 

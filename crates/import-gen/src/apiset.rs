@@ -50,6 +50,12 @@ pub fn get_api_sets_for_canonical(canonical: &str) -> &'static [&'static str] {
             "api-ms-win-core-file-l1-1-0.dll",
             "api-ms-win-core-file-l2-1-0.dll",
             "api-ms-win-core-errorhandling-l1-1-0.dll",
+            "api-ms-win-core-string-l1-1-0.dll",
+            "api-ms-win-core-localization-l1-2-0.dll",
+            "api-ms-win-core-console-l1-1-0.dll",
+            "api-ms-win-core-console-l1-2-0.dll",
+            "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "api-ms-win-core-processenvironment-l1-2-0.dll",
             "api-ms-win-core-debug-l1-1-0.dll",
             "api-ms-win-core-handle-l1-1-0.dll",
             "api-ms-win-core-interlocked-l1-1-0.dll",
@@ -58,6 +64,11 @@ pub fn get_api_sets_for_canonical(canonical: &str) -> &'static [&'static str] {
             "api-ms-win-core-timezone-l1-1-0.dll",
             "api-ms-win-core-realtime-l1-1-0.dll",
             "api-ms-win-core-memory-l1-1-0.dll",
+            // Both are on Microsoft's "Windows API sets" page: the string
+            // set carries the encoding conversions of stringapiset.h, the
+            // localization set the code pages of winnls.h.
+            "api-ms-win-core-string-l1-1-0.dll",
+            "api-ms-win-core-localization-l1-2-0.dll",
         ],
         "ucrtbase.dll" => &[
             "api-ms-win-crt-math-l1-1-0.dll",
@@ -79,6 +90,23 @@ pub fn get_api_sets_for_canonical(canonical: &str) -> &'static [&'static str] {
             // forwarders. No document naming this set was found.
             "api-ms-win-crt-private-l1-1-0.dll",
         ],
+        _ => &[],
+    }
+}
+
+/// Legacy modules Xenora serves with the same implementation as the canonical
+/// host, as a documented approximation. These are *not* API sets: on real
+/// Windows they are separate DLLs with their own CRT implementations and do
+/// not forward to the canonical module. `msvcrt.dll` is the legacy CRT that
+/// freestanding mingw-w64 binaries link against by default; the entry points
+/// it shares with the modern CRT carry the same ABI, and the behavioural
+/// differences (the legacy `printf` is not C99-exact, for example) sit in
+/// corners a correct implementation accepts, so programs written against the
+/// legacy module keep running. Where a real divergence is found, the entry
+/// point must grow its own implementation instead of relying on this mapping.
+pub fn get_compat_modules_for_canonical(canonical: &str) -> &'static [&'static str] {
+    match canonical {
+        "ucrtbase.dll" => &["msvcrt.dll"],
         _ => &[],
     }
 }
@@ -105,6 +133,16 @@ mod tests {
             resolve_api_set_canonical("API-MS-Win-Core-Memory-L1-1-0.DLL"),
             "kernel32.dll"
         );
+    }
+
+    #[test]
+    fn compat_modules_are_not_api_sets() {
+        assert_eq!(resolve_api_set_canonical("msvcrt.dll"), "unknown.dll");
+        assert_eq!(
+            get_compat_modules_for_canonical("ucrtbase.dll"),
+            &["msvcrt.dll"]
+        );
+        assert!(get_compat_modules_for_canonical("kernel32.dll").is_empty());
     }
 
     #[test]

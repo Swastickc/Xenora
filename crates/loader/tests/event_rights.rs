@@ -109,6 +109,7 @@ fn original_event_rights_guest_runs_under_the_cooperative_scheduler() {
             Arc::clone(&services),
             INSTRUCTION_LIMIT,
             quantum,
+            |_| {},
         )
         .unwrap_or_else(|error| {
             panic!("start original event rights PE at quantum {quantum}: {error}")

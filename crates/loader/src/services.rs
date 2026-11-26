@@ -9,14 +9,22 @@
 //! - Virtual memory: `VirtualAlloc`, `VirtualFree`
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
+mod codepages;
+mod compare;
+mod console;
 mod crt;
 mod crt_arguments;
 mod crt_callbacks;
+mod crt_clock;
 mod crt_files;
 mod crt_format;
+mod crt_legacy;
 mod crt_math;
+mod crt_scan;
 mod crt_startup;
 mod crt_streams;
+mod crt_wformat;
+mod crt_wide;
 mod cxx;
 mod environment;
 mod errors;
@@ -26,6 +34,7 @@ mod files;
 mod gdk_queue;
 mod graphics;
 mod heap;
+mod locale;
 mod modules;
 mod platform_fixture;
 mod process;
@@ -58,6 +67,9 @@ const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_INVALID_PARAMETER: u32 = 87;
+/// ERROR_ENVVAR_NOT_FOUND (winerror.h).
+const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_INVALID_ADDRESS: u32 = 487;
 const THREAD_QUERY_RIGHTS: u32 = 0x0040 | 0x0800;
 const THREAD_SET_RIGHTS: u32 = 0x0020 | 0x0400;
@@ -173,11 +185,20 @@ enum GuestObject {
     FileMapping {
         size: u64,
     },
+    Pipe {
+        state: Arc<Mutex<files::PipeState>>,
+        write: bool,
+    },
+    /// A toolhelp snapshot of the machine's one process: no data, the
+    /// enumeration reads the live state.
+    Snapshot,
+    ConsoleBuffer(Arc<Mutex<console::ScreenBuffer>>),
 }
 
 #[derive(Default)]
 struct ObjectState {
     priority: i32,
+    active_screen_buffer: u64,
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
@@ -223,9 +244,11 @@ pub struct ServicesState {
     last_errors: Mutex<BTreeMap<u64, u32>>,
     error_mode: Mutex<u32>,
     crt_arguments: Mutex<crt_arguments::CrtArguments>,
+    console: Mutex<ConsoleState>,
     startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
+    crt_clock: Mutex<crt_clock::ClockServices>,
     pub(crate) threads: Mutex<threads::ThreadTable>,
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
@@ -247,6 +270,46 @@ pub struct ServicesState {
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
 }
 
+/// The console state: the mode bits round-tripping per handle and the
+/// redirected standard handles, package 8 first part of #459. The defaults
+/// are the fixed pseudo-handles of `services/console.rs`.
+#[derive(Default)]
+struct ConsoleState {
+    input_handle: Option<u64>,
+    output_handle: Option<u64>,
+    error_handle: Option<u64>,
+    input_mode: u32,
+    output_mode: u32,
+    initialized: bool,
+    /// The console title as wide characters, empty until set. The narrow
+    /// forms convert with the console code page, which is UTF-8.
+    title: Vec<u16>,
+}
+
+impl ConsoleState {
+    fn handle(&mut self, kind: u32) -> Option<u64> {
+        self.initialize();
+        match kind {
+            console::STD_INPUT => Some(self.input_handle.unwrap()),
+            console::STD_OUTPUT => Some(self.output_handle.unwrap()),
+            console::STD_ERROR => Some(self.error_handle.unwrap()),
+            _ => None,
+        }
+    }
+
+    fn initialize(&mut self) {
+        if self.initialized {
+            return;
+        }
+        self.input_handle = Some(console::INPUT_HANDLE);
+        self.output_handle = Some(console::OUTPUT_HANDLE);
+        self.error_handle = Some(console::ERROR_HANDLE);
+        self.input_mode = console::DEFAULT_INPUT_MODE;
+        self.output_mode = console::DEFAULT_OUTPUT_MODE;
+        self.initialized = true;
+    }
+}
+
 impl ServicesState {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -263,6 +326,8 @@ impl ServicesState {
             startup: Mutex::default(),
             synch: Mutex::default(),
             crt_streams: Mutex::default(),
+            crt_clock: Mutex::default(),
+            console: Mutex::default(),
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
@@ -414,6 +479,10 @@ impl ServicesState {
         self.crt_streams.lock().expect("standard streams")
     }
 
+    fn console(&self) -> std::sync::MutexGuard<'_, ConsoleState> {
+        self.console.lock().expect("console state")
+    }
+
     /// Read the last-error value for a guest thread's TEB.
     pub fn last_error(&self, teb: u64) -> u32 {
         self.last_errors
@@ -479,6 +548,17 @@ impl ServicesState {
     }
 }
 
+/// Extract the memory error of a variable-cell operation. The cell providers
+/// only fail through memory faults, so any other exit reason is unreachable;
+/// it maps to `Overflow` rather than panic because a loader must not crash on
+/// guest state corruption.
+fn cell_memory(result: Result<u64, ExitReason>) -> Result<u64, MemoryError> {
+    result.map_err(|error| match error {
+        ExitReason::MemoryFault(memory) => memory,
+        _ => MemoryError::Overflow,
+    })
+}
+
 /// Register the services generated from `runtime/services.txt` and the
 /// hand-written fixture services.
 pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<ServicesState>) {
@@ -487,6 +567,45 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     threads::register(registry, &state);
     static_cxx::register(registry);
     crate::exceptions::register(registry);
+
+    // The legacy CRT variables a msvcrt.dll-linked image imports as data
+    // (#643). Each cell is the one the modern accessors maintain, so the
+    // legacy data view and the function view cannot disagree. `__initenv`
+    // shares the `_environ` cell: the environment never changes here, which
+    // keeps the two identical, as they start on Windows. `_timezone` stays
+    // zero with the documented UTC clock.
+    for (symbol, variable) in [
+        ("__argc", crt_arguments::Variable::Argc),
+        ("__argv", crt_arguments::Variable::Argv),
+        ("_environ", crt_arguments::Variable::Environ),
+        ("__initenv", crt_arguments::Variable::Environ),
+    ] {
+        let s = state.clone();
+        registry.register_data(
+            "msvcrt.dll",
+            symbol,
+            ServiceStatus::Partial,
+            move |memory| cell_memory(s.crt_arguments().address(memory, variable)),
+        );
+    }
+    for (symbol, index) in [("_fmode", 0_u64), ("_commode", 1_u64)] {
+        let s = state.clone();
+        registry.register_data(
+            "msvcrt.dll",
+            symbol,
+            ServiceStatus::Partial,
+            move |memory| cell_memory(s.crt_startup().file_mode_address(memory, index)),
+        );
+    }
+    {
+        let s = state.clone();
+        registry.register_data(
+            "msvcrt.dll",
+            "_timezone",
+            ServiceStatus::Partial,
+            move |memory| cell_memory(s.crt_startup().timezone_address(memory)),
+        );
+    }
 
     let s = state.clone();
     registry.register(KERNEL32, "GetThreadId", move |args, cpu, mem| {
@@ -551,7 +670,19 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                     },
                 ),
                 Some(GuestObject::File(file)) => (file.access, GuestObject::File(file.clone())),
-                Some(GuestObject::Search(_) | GuestObject::FileMapping { .. }) => {
+                Some(GuestObject::Pipe { state, write }) => (
+                    0,
+                    GuestObject::Pipe {
+                        state: Arc::clone(state),
+                        write: *write,
+                    },
+                ),
+                Some(
+                    GuestObject::Search(_)
+                    | GuestObject::FileMapping { .. }
+                    | GuestObject::Snapshot
+                    | GuestObject::ConsoleBuffer(_),
+                ) => {
                     return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
                 }
                 None => return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
@@ -575,7 +706,13 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                 *rights = access
             }
             GuestObject::File(file) => file.access = access,
-            GuestObject::Search(_) | GuestObject::FileMapping { .. } => {
+            // A pipe end's rights are positional: its read or write end decides
+            // what the handle can do, not the duplication rights.
+            GuestObject::Pipe { .. } => {}
+            GuestObject::Search(_)
+            | GuestObject::FileMapping { .. }
+            | GuestObject::Snapshot
+            | GuestObject::ConsoleBuffer(_) => {
                 unreachable!("these handles cannot be duplicated")
             }
         }
@@ -589,6 +726,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     synch::register(registry, &state);
     sysinfo::register(registry, &state);
     files::register(registry, &state);
+    console::register(registry, &state);
     graphics::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);
@@ -600,6 +738,10 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     errors::register(registry, &state);
     registry::register(registry, &state);
     file_mapping::register(registry, &state);
+    // The legacy CRT's printf family, which the variadic calling convention
+    // keeps out of the typed table (#459).
+    crt_streams::register_legacy(registry, &state);
+    crt_legacy::register(registry, &state);
     heap::register(registry, &state);
     cxx::register(registry, &state);
 
@@ -978,6 +1120,13 @@ pub(crate) mod handlers {
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
             return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
         }
+        if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
+            && *write
+        {
+            // The end-of-stream marker of an anonymous pipe is its write end
+            // closing: reads then drain what remains and answer empty.
+            state.lock().expect("pipe state").write_open = false;
+        }
         let closed = matches!(handle, CURRENT_PROCESS | CURRENT_THREAD)
             || objects.handles.remove(&handle).is_some();
         if closed {
@@ -1061,6 +1210,26 @@ pub(crate) mod handlers {
     // and `vfprintf_s`.
 
     #[allow(clippy::too_many_arguments)]
+    pub fn vsscanf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        crt_scan::vsscanf(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        )
+    }
+
     pub fn vsprintf(
         context: &mut ServiceContext<'_>,
         options: u64,
@@ -1071,6 +1240,27 @@ pub(crate) mod handlers {
         arguments: u64,
     ) -> Outcome<i32> {
         let outcome = crt_streams::print_to_buffer(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        );
+        or_errno(context, outcome)
+    }
+
+    pub fn vswprintf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = crt_streams::print_to_wide_buffer(
             context.memory,
             options,
             buffer,
@@ -1155,6 +1345,11 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn ferror(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().error_indicator(stream);
+        or_errno(context, outcome)
+    }
+
     pub fn fflush(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
         context.state.crt_streams().flush(stream)
     }
@@ -1220,6 +1415,53 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn fputws(context: &mut ServiceContext<'_>, text: u64, stream: u64) -> Outcome<u32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.write_wide_string(context.memory, &mut drive, text, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fgetws(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        count: i32,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.read_wide_line(
+                context.memory,
+                &mut drive,
+                buffer,
+                count as u32 as u64,
+                stream,
+            )
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn putwchar(context: &mut ServiceContext<'_>, unit: u32) -> Outcome<u32> {
+        let outcome = context.state.crt_streams().wide_character_stdout(unit);
+        or_errno(context, outcome)
+    }
+
+    pub fn fputwc(context: &mut ServiceContext<'_>, unit: u32, stream: u64) -> Outcome<u32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.write_wide_unit(&mut drive, unit, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn getwchar(context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(context.state.crt_streams().wide_character_stdin())
+    }
+
     pub fn _ftelli64(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<u64> {
         let outcome = context.state.crt_streams().tell(stream);
         or_errno(context, outcome).map(|position| position as u64)
@@ -1274,6 +1516,258 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _open(
+        context: &mut ServiceContext<'_>,
+        name: u64,
+        flags: i32,
+        mode: i32,
+    ) -> Outcome<i32> {
+        let _ = mode;
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open_descriptor(context.memory, &mut drive, name, flags as u32)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _close(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.close_descriptor(context.memory, &mut drive, fd)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _read(
+        context: &mut ServiceContext<'_>,
+        fd: i32,
+        buffer: u64,
+        count: u32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.read_descriptor(context.memory, &drive, fd, buffer, count)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _write(
+        context: &mut ServiceContext<'_>,
+        fd: i32,
+        buffer: u64,
+        count: u32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.write_descriptor(context.memory, &mut drive, fd, buffer, count)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _lseek(
+        context: &mut ServiceContext<'_>,
+        fd: i32,
+        offset: i32,
+        origin: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.seek_descriptor(&drive, fd, offset, origin)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _lseeki64(
+        context: &mut ServiceContext<'_>,
+        fd: i32,
+        offset: u64,
+        origin: i32,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.seek_descriptor64(&drive, fd, offset as i64, origin)
+        };
+        let outcome =
+            outcome.map(|inner| {
+                inner.map(|position| position as u64).map_err(
+                    |crt_streams::Failed(value, errno)| crt_streams::Failed(value as u64, errno),
+                )
+            });
+        or_errno(context, outcome)
+    }
+
+    pub fn _telli64(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.tell_descriptor64(&drive, fd)
+        };
+        let outcome =
+            outcome.map(|inner| {
+                inner.map(|position| position as u64).map_err(
+                    |crt_streams::Failed(value, errno)| crt_streams::Failed(value as u64, errno),
+                )
+            });
+        or_errno(context, outcome)
+    }
+
+    /// `_mkdir` and `_rmdir` are drive operations the descriptor layer is no
+    /// part of: the narrow path resolves as every drive path does.
+    pub fn _pipe(context: &mut ServiceContext<'_>, fds: u64, size: u32, mode: i32) -> Outcome<i32> {
+        let _ = (size, mode);
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.pipe_create(context.memory, fds)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _mkdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let bytes =
+            crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            match ObjectState::drive_path(&bytes) {
+                Some(path) => drive
+                    .drive_mkdir(&path)
+                    .map(|()| 0)
+                    .map_err(|errno| crt_streams::Failed(-1, errno)),
+                None => Err(crt_streams::Failed(-1, crt::EINVAL)),
+            }
+        };
+        or_errno(context, Ok(outcome))
+    }
+
+    pub fn _rmdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let bytes =
+            crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            match ObjectState::drive_path(&bytes) {
+                Some(path) => drive
+                    .drive_rmdir(&path)
+                    .map(|()| 0)
+                    .map_err(|errno| crt_streams::Failed(-1, errno)),
+                None => Err(crt_streams::Failed(-1, crt::EINVAL)),
+            }
+        };
+        or_errno(context, Ok(outcome))
+    }
+
+    pub fn _fstat64(context: &mut ServiceContext<'_>, fd: i32, buffer: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.stat_descriptor64(context.memory, &drive, fd, buffer)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _fdopen(context: &mut ServiceContext<'_>, fd: i32, mode: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.fdopen_stream(context.memory, fd, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _creat(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let _ = mode;
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.create_descriptor(context.memory, &mut drive, name)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _mktemp(context: &mut ServiceContext<'_>, template: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.make_temporary_name(context.memory, &drive, template)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _dup(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.duplicate_descriptor(fd)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _dup2(context: &mut ServiceContext<'_>, fd: i32, target: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.duplicate_descriptor2(context.memory, &mut drive, fd, target)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _setmode(context: &mut ServiceContext<'_>, fd: i32, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.set_descriptor_mode(fd, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _fileno(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().descriptor_of(stream);
+        or_errno(context, outcome)
+    }
+
+    pub fn _isatty(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().is_terminal(fd);
+        or_errno(context, outcome)
+    }
+
+    pub fn _access(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.access(context.memory, &drive, name, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _unlink(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        // `_unlink` is `remove` by another name, as Microsoft's page says.
+        remove(context, name)
+    }
+
+    pub fn fopen_s(
+        context: &mut ServiceContext<'_>,
+        file: u64,
+        name: u64,
+        mode: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open_secure(context.memory, &mut drive, file, name, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn clearerr(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<()> {
+        if stream == 0 {
+            // The invalid parameter handler is not modelled; `errno` is
+            // EINVAL, as the Microsoft page for `clearerr` says.
+            crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+        }
+        context.state.crt_streams().clear_errors(stream)
+    }
+
     pub fn perror(context: &mut ServiceContext<'_>, message: u64) -> Outcome<()> {
         let address = context
             .memory
@@ -1295,6 +1789,924 @@ pub(crate) mod handlers {
     pub fn set_last_error(context: &mut ServiceContext<'_>, code: u32) -> Outcome<()> {
         context.state.set_last_error(context.teb, code);
         Ok(())
+    }
+
+    // The encoding conversions: `services/codepages.rs` says which pages
+    // Xenora serves and how each converts.
+
+    fn wide_input(
+        memory: &crate::memory::GuestMemory,
+        address: u64,
+        count: i32,
+    ) -> Result<Vec<u16>, MemoryError> {
+        if count == 0 || address == 0 {
+            return Err(MemoryError::Overflow);
+        }
+        if count > 0 {
+            let mut units = Vec::with_capacity(count as usize);
+            for index in 0..count as u64 {
+                let at = address
+                    .checked_add(index * 2)
+                    .ok_or(MemoryError::Overflow)?;
+                units.push(memory.read_u16(at)?);
+            }
+            return Ok(units);
+        }
+        // -1: up to and including the terminating zero.
+        let mut units = Vec::new();
+        for index in 0..(u32::MAX as u64 + 1) {
+            let at = address
+                .checked_add(index * 2)
+                .ok_or(MemoryError::Overflow)?;
+            let unit = memory.read_u16(at)?;
+            units.push(unit);
+            if unit == 0 {
+                return Ok(units);
+            }
+        }
+        Err(MemoryError::Overflow)
+    }
+
+    pub fn multibyte_to_wide_char(
+        context: &mut ServiceContext<'_>,
+        codepage: u32,
+        flags: u32,
+        input: u64,
+        input_count: i32,
+        output: u64,
+        output_count: i32,
+    ) -> Outcome<i32> {
+        use crate::services::codepages as pages;
+        let state = context.state;
+        let teb = context.teb;
+        let memory = &mut *context.memory;
+        let Some(page) = pages::resolve(codepage) else {
+            return state.fail(teb, pages::ERROR_INVALID_PARAMETER, 0);
+        };
+        // MB_ERR_INVALID_CHARS is the only flag these pages take.
+        if flags & !0x8 != 0 {
+            return state.fail(teb, pages::ERROR_INVALID_FLAGS, 0);
+        }
+        if input_count == 0 || input_count < -1 || input == 0 {
+            return state.fail(teb, pages::ERROR_INVALID_PARAMETER, 0);
+        }
+        let bytes = if input_count > 0 {
+            let mut bytes = vec![0u8; input_count as usize];
+            memory
+                .read_bytes(input, &mut bytes)
+                .map_err(ExitReason::MemoryFault)?;
+            bytes
+        } else {
+            // -1: up to and including the terminating zero.
+            let mut bytes = Vec::new();
+            for offset in 0..(u32::MAX as u64 + 1) {
+                let at = input
+                    .checked_add(offset)
+                    .ok_or(MemoryError::Overflow)
+                    .map_err(ExitReason::MemoryFault)?;
+                let mut one = [0u8];
+                memory
+                    .read_bytes(at, &mut one)
+                    .map_err(ExitReason::MemoryFault)?;
+                bytes.push(one[0]);
+                if one[0] == 0 {
+                    break;
+                }
+            }
+            bytes
+        };
+        let (units, malformed) = pages::decode(page, &bytes);
+        if !malformed.is_empty() && flags & 0x8 != 0 {
+            return state.fail(teb, pages::ERROR_NO_UNICODE_TRANSLATION, 0);
+        }
+        if output_count == 0 {
+            return Ok(units.len() as i32);
+        }
+        if output == 0 || (output_count as usize) < units.len() {
+            return state.fail(teb, pages::ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        for (index, &unit) in units.iter().enumerate() {
+            memory
+                .write_u16(output + index as u64 * 2, unit)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(units.len() as i32)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn wide_char_to_multibyte(
+        context: &mut ServiceContext<'_>,
+        codepage: u32,
+        flags: u32,
+        input: u64,
+        input_count: i32,
+        output: u64,
+        output_count: i32,
+        default_char: u64,
+        used_default: u64,
+    ) -> Outcome<i32> {
+        use crate::services::codepages as pages;
+        let state = context.state;
+        let teb = context.teb;
+        let memory = &mut *context.memory;
+        let Some(page) = pages::resolve(codepage) else {
+            return state.fail(teb, pages::ERROR_INVALID_PARAMETER, 0);
+        };
+        // WC_ERR_INVALID_CHARS is the only flag these pages take. For UTF-8
+        // the default-character arguments must both be null, as Microsoft's
+        // page requires.
+        if flags & !0x80 != 0 {
+            return state.fail(teb, pages::ERROR_INVALID_FLAGS, 0);
+        }
+        if page == pages::CodePage::Utf8 && (default_char != 0 || used_default != 0) {
+            return state.fail(teb, pages::ERROR_INVALID_PARAMETER, 0);
+        }
+        if input_count == 0 || input_count < -1 || input == 0 {
+            return state.fail(teb, pages::ERROR_INVALID_PARAMETER, 0);
+        }
+        let units = wide_input(memory, input, input_count).map_err(ExitReason::MemoryFault)?;
+        let default = if default_char != 0 {
+            let mut one = [0u8];
+            memory
+                .read_bytes(default_char, &mut one)
+                .map_err(ExitReason::MemoryFault)?;
+            one[0]
+        } else {
+            b'?'
+        };
+        let (bytes, unrepresentable) = pages::encode(page, &units, default);
+        if !unrepresentable.is_empty() && flags & 0x80 != 0 {
+            return state.fail(teb, pages::ERROR_NO_UNICODE_TRANSLATION, 0);
+        }
+        if output_count == 0 {
+            return Ok(bytes.len() as i32);
+        }
+        if output == 0 || (output_count as usize) < bytes.len() {
+            return state.fail(teb, pages::ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        memory
+            .write_bytes(output, &bytes)
+            .map_err(ExitReason::MemoryFault)?;
+        if used_default != 0 {
+            let used = u32::from(!unrepresentable.is_empty());
+            memory
+                .write_u32(used_default, used)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(bytes.len() as i32)
+    }
+
+    pub fn get_ansi_codepage(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(crate::services::codepages::ansi_page())
+    }
+
+    pub fn get_oem_codepage(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(crate::services::codepages::oem_page())
+    }
+
+    pub fn is_valid_codepage(_context: &mut ServiceContext<'_>, codepage: u32) -> Outcome<bool> {
+        // `CP_ACP` and `CP_OEMCP` are pseudo-values, not pages: only the
+        // numbers themselves answer true.
+        Ok(matches!(
+            codepage,
+            1252 | 437 | crate::services::codepages::CP_UTF8
+        ))
+    }
+
+    pub fn get_codepage_info(
+        context: &mut ServiceContext<'_>,
+        codepage: u32,
+        info: OutPtr<18>,
+    ) -> Outcome<bool> {
+        use crate::services::codepages as pages;
+        let state = context.state;
+        let teb = context.teb;
+        let valid = matches!(codepage, 1252 | 437 | pages::CP_UTF8);
+        if !valid || info.0 == 0 {
+            return state.fail(teb, pages::ERROR_INVALID_PARAMETER, false);
+        }
+        // CPINFO: the widest character in bytes, the default character as a
+        // byte pair, and twelve zero lead-byte entries (none of these pages
+        // is a lead-byte page, UTF-8 included).
+        let widest = match codepage {
+            pages::CP_UTF8 => 4u32,
+            _ => 1,
+        };
+        let mut bytes = [0u8; 18];
+        bytes[..4].copy_from_slice(&widest.to_le_bytes());
+        bytes[4] = b'?';
+        if info.store(context.memory, bytes).is_err() {
+            return state.fail(teb, ERROR_NOACCESS, false);
+        }
+        Ok(true)
+    }
+
+    // The locale identity: `services/locale.rs` says why one locale and
+    // what it answers.
+
+    pub fn get_system_default_lcid(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(crate::services::locale::EN_US)
+    }
+
+    pub fn get_user_default_lcid(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(crate::services::locale::EN_US)
+    }
+
+    pub fn get_user_default_langid(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(crate::services::locale::EN_US)
+    }
+
+    pub fn get_user_default_locale_name(
+        context: &mut ServiceContext<'_>,
+        output: u64,
+        count: i32,
+    ) -> Outcome<i32> {
+        let state = context.state;
+        let teb = context.teb;
+        let name = crate::services::locale::EN_US_NAME;
+        if count == 0 {
+            return Ok(name.len() as i32);
+        }
+        if output == 0 || (count as usize) < name.len() {
+            return state.fail(teb, ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        let memory = &mut *context.memory;
+        for (index, &unit) in name.iter().enumerate() {
+            memory
+                .write_u16(output + index as u64 * 2, unit)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(name.len() as i32)
+    }
+
+    /// The shared body of the locale-info forms: the string for a type, or
+    /// the failure. `wide` chooses the output encoding; every string of the
+    /// table is ASCII, so the narrow form is the same bytes.
+    fn locale_info(
+        context: &mut ServiceContext<'_>,
+        kind: u32,
+        output: u64,
+        count: i32,
+        wide: bool,
+    ) -> Outcome<i32> {
+        let state = context.state;
+        let teb = context.teb;
+        let Some(text) = crate::services::locale::lookup(kind) else {
+            return state.fail(teb, ERROR_INVALID_PARAMETER, 0);
+        };
+        let len = text.len() + 1;
+        if count == 0 {
+            return Ok(len as i32);
+        }
+        if output == 0 || (count as usize) < len {
+            return state.fail(teb, ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        let memory = &mut *context.memory;
+        if wide {
+            for (index, &byte) in text.as_bytes().iter().chain(&[0]).enumerate() {
+                memory
+                    .write_u16(output + index as u64 * 2, u16::from(byte))
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+        } else {
+            memory
+                .write_bytes(output, text.as_bytes())
+                .map_err(ExitReason::MemoryFault)?;
+            memory
+                .write_bytes(output + text.len() as u64, &[0])
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(len as i32)
+    }
+
+    pub fn get_locale_info_w(
+        context: &mut ServiceContext<'_>,
+        lcid: u32,
+        kind: u32,
+        output: u64,
+        count: i32,
+    ) -> Outcome<i32> {
+        if lcid != crate::services::locale::EN_US {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        locale_info(context, kind, output, count, true)
+    }
+
+    pub fn get_locale_info_a(
+        context: &mut ServiceContext<'_>,
+        lcid: u32,
+        kind: u32,
+        output: u64,
+        count: i32,
+    ) -> Outcome<i32> {
+        if lcid != crate::services::locale::EN_US {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        locale_info(context, kind, output, count, false)
+    }
+
+    pub fn get_locale_info_ex(
+        context: &mut ServiceContext<'_>,
+        name: u64,
+        kind: u32,
+        output: u64,
+        count: i32,
+    ) -> Outcome<i32> {
+        let state = context.state;
+        let teb = context.teb;
+        // A null name is the user default, as the page documents; anything
+        // else must name the one locale, letter case aside.
+        if name != 0 {
+            let memory = &mut *context.memory;
+            let mut text = Vec::new();
+            for index in 0..64u64 {
+                let unit = memory
+                    .read_u16(name + index * 2)
+                    .map_err(ExitReason::MemoryFault)?;
+                if unit == 0 {
+                    break;
+                }
+                text.push(unit as u8);
+            }
+            if !text.is_empty() && !text.eq_ignore_ascii_case(b"en-us") {
+                return state.fail(teb, ERROR_INVALID_PARAMETER, 0);
+            }
+        }
+        locale_info(context, kind, output, count, true)
+    }
+
+    // String comparison, classification and case mapping for the one locale,
+    // package 7 third part of #459. `services/compare.rs` documents the scope.
+
+    fn read_narrow_string(
+        memory: &crate::memory::GuestMemory,
+        address: u64,
+    ) -> Result<Vec<u8>, crate::cpu::ExitReason> {
+        let mut bytes = Vec::new();
+        for index in 0..65536u64 {
+            let byte = memory
+                .read_u8(address + index)
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+            if byte == 0 {
+                return Ok(bytes);
+            }
+            bytes.push(byte);
+        }
+        Err(crate::cpu::ExitReason::MemoryFault(
+            crate::memory::MemoryError::UnmappedAddress(address),
+        ))
+    }
+
+    fn read_wide_units(
+        memory: &crate::memory::GuestMemory,
+        address: u64,
+        count: i32,
+    ) -> Result<Vec<u16>, crate::cpu::ExitReason> {
+        // count -1 reads up to and excluding the terminator; a positive count
+        // reads exactly that many units, including embedded nulls.
+        let mut units = Vec::new();
+        if count < 0 {
+            for index in 0..32768u64 {
+                let unit = memory
+                    .read_u16(address + index * 2)
+                    .map_err(crate::cpu::ExitReason::MemoryFault)?;
+                if unit == 0 {
+                    return Ok(units);
+                }
+                units.push(unit);
+            }
+            return Err(crate::cpu::ExitReason::MemoryFault(
+                crate::memory::MemoryError::UnmappedAddress(address),
+            ));
+        }
+        for index in 0..count as u64 {
+            units.push(
+                memory
+                    .read_u16(address + index * 2)
+                    .map_err(crate::cpu::ExitReason::MemoryFault)?,
+            );
+        }
+        Ok(units)
+    }
+
+    fn read_narrow_counted(
+        memory: &crate::memory::GuestMemory,
+        address: u64,
+        count: i32,
+    ) -> Result<Vec<u8>, crate::cpu::ExitReason> {
+        if count < 0 {
+            return read_narrow_string(memory, address);
+        }
+        let mut bytes = Vec::new();
+        for index in 0..count as u64 {
+            bytes.push(
+                memory
+                    .read_u8(address + index)
+                    .map_err(crate::cpu::ExitReason::MemoryFault)?,
+            );
+        }
+        Ok(bytes)
+    }
+
+    pub fn lstrlen_a(context: &mut ServiceContext<'_>, text: u64) -> Outcome<i32> {
+        let bytes = read_narrow_string(context.memory, text)?;
+        Ok(bytes.len() as i32)
+    }
+
+    pub fn lstrlen_w(context: &mut ServiceContext<'_>, text: u64) -> Outcome<i32> {
+        let units = read_wide_units(context.memory, text, -1)?;
+        Ok(units.len() as i32)
+    }
+
+    pub fn lstrcpy_a(
+        context: &mut ServiceContext<'_>,
+        destination: u64,
+        source: u64,
+    ) -> Outcome<u64> {
+        let memory = &mut *context.memory;
+        let mut bytes = read_narrow_string(memory, source)?;
+        bytes.push(0);
+        memory
+            .write_bytes(destination, &bytes)
+            .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        Ok(destination)
+    }
+
+    pub fn lstrcmp_a(context: &mut ServiceContext<'_>, left: u64, right: u64) -> Outcome<i32> {
+        let a = read_narrow_string(context.memory, left)?;
+        let b = read_narrow_string(context.memory, right)?;
+        Ok(compare::compare_bytes(&a, &b, false))
+    }
+
+    pub fn lstrcmpi_a(context: &mut ServiceContext<'_>, left: u64, right: u64) -> Outcome<i32> {
+        let a = read_narrow_string(context.memory, left)?;
+        let b = read_narrow_string(context.memory, right)?;
+        Ok(compare::compare_bytes(&a, &b, true))
+    }
+
+    const NORM_IGNORECASE: u32 = 0x1;
+    const CSTR_LESS_THAN: i32 = 1;
+    const CSTR_EQUAL: i32 = 2;
+    // Flags beyond the case fold are refused rather than silently ignored:
+    // the module documents that Xenora compares in byte order, not the
+    // linguistic order of Windows en-US.
+
+    fn compare_string(
+        context: &mut ServiceContext<'_>,
+        wide: bool,
+        flags: u32,
+        left: u64,
+        left_count: i32,
+        right: u64,
+        right_count: i32,
+    ) -> Outcome<i32> {
+        if flags & !NORM_IGNORECASE != 0 {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        let fold = flags & NORM_IGNORECASE != 0;
+        let order = if wide {
+            let a = read_wide_units(context.memory, left, left_count)?;
+            let b = read_wide_units(context.memory, right, right_count)?;
+            let narrow = |units: &[u16]| -> Vec<u8> {
+                units
+                    .iter()
+                    .map(|unit| {
+                        let byte = u8::try_from(*unit).unwrap_or(0xff);
+                        if fold { compare::fold(byte) } else { byte }
+                    })
+                    .collect()
+            };
+            compare::compare_bytes(&narrow(&a), &narrow(&b), false)
+        } else {
+            let a = read_narrow_counted(context.memory, left, left_count)?;
+            let b = read_narrow_counted(context.memory, right, right_count)?;
+            compare::compare_bytes(&a, &b, fold)
+        };
+        Ok(if order < 0 {
+            CSTR_LESS_THAN
+        } else if order > 0 {
+            CSTR_LESS_THAN + 2
+        } else {
+            CSTR_EQUAL
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn compare_string_a(
+        context: &mut ServiceContext<'_>,
+        lcid: u32,
+        flags: u32,
+        left: u64,
+        left_count: i32,
+        right: u64,
+        right_count: i32,
+    ) -> Outcome<i32> {
+        if lcid != 0x0409 {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        compare_string(context, false, flags, left, left_count, right, right_count)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn compare_string_w(
+        context: &mut ServiceContext<'_>,
+        lcid: u32,
+        flags: u32,
+        left: u64,
+        left_count: i32,
+        right: u64,
+        right_count: i32,
+    ) -> Outcome<i32> {
+        if lcid != 0x0409 {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        compare_string(context, true, flags, left, left_count, right, right_count)
+    }
+
+    pub fn get_string_type_w(
+        context: &mut ServiceContext<'_>,
+        kind: u32,
+        source: u64,
+        count: i32,
+        output: u64,
+    ) -> Outcome<bool> {
+        // CT_CTYPE1 is 1. The numeric and locale-specific type 2 and 3 tables
+        // are refused rather than answered wrong; compare.rs documents it.
+        if kind != 1 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let memory = &mut *context.memory;
+        let units = read_wide_units(memory, source, count)?;
+        let total = if count < 0 {
+            units.len() + 1
+        } else {
+            units.len()
+        };
+        for index in 0..total {
+            let unit = units.get(index).copied().unwrap_or(0);
+            memory
+                .write_u16(output + index as u64 * 2, compare::ctype1(unit))
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        }
+        Ok(true)
+    }
+
+    const LCMAP_LOWERCASE: u32 = 0x100;
+    const LCMAP_UPPERCASE: u32 = 0x200;
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn lcmap_string_w(
+        context: &mut ServiceContext<'_>,
+        lcid: u32,
+        flags: u32,
+        source: u64,
+        count: i32,
+        destination: u64,
+        destination_count: i32,
+    ) -> Outcome<i32> {
+        if lcid != 0x0409 {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        // Exactly one case operation, nothing else: sort keys, the byte
+        // reversal and the linguistic modifiers are refused. compare.rs
+        // documents that only ASCII letters change.
+        if flags != LCMAP_UPPERCASE && flags != LCMAP_LOWERCASE {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        let memory = &mut *context.memory;
+        let units = read_wide_units(memory, source, count)?;
+        let total = if count < 0 {
+            units.len() + 1
+        } else {
+            units.len()
+        };
+        let mapped: Vec<u16> = (0..total)
+            .map(|index| {
+                let unit = units.get(index).copied().unwrap_or(0);
+                match u8::try_from(unit) {
+                    Ok(byte) if flags == LCMAP_UPPERCASE => u16::from(byte.to_ascii_uppercase()),
+                    Ok(byte) => u16::from(byte.to_ascii_lowercase()),
+                    Err(_) => unit,
+                }
+            })
+            .collect();
+        if destination_count == 0 {
+            return Ok(total as i32);
+        }
+        if (destination_count as usize) < total {
+            return context
+                .state
+                .fail(context.teb, ERROR_INSUFFICIENT_BUFFER, 0);
+        }
+        for (index, unit) in mapped.iter().enumerate() {
+            memory
+                .write_u16(destination + index as u64 * 2, *unit)
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        }
+        Ok(total as i32)
+    }
+
+    // The console identity and the standard handles, package 8 first part of
+    // #459. `services/console.rs` documents the scope.
+
+    pub fn get_std_handle(context: &mut ServiceContext<'_>, kind: u32) -> Outcome<u64> {
+        match context.state.console().handle(kind) {
+            Some(handle) => Ok(handle),
+            None => context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0),
+        }
+    }
+
+    pub fn set_std_handle(
+        context: &mut ServiceContext<'_>,
+        kind: u32,
+        handle: u64,
+    ) -> Outcome<bool> {
+        let mut console = context.state.console();
+        console.initialize();
+        match kind {
+            console::STD_INPUT => console.input_handle = Some(handle),
+            console::STD_OUTPUT => console.output_handle = Some(handle),
+            console::STD_ERROR => console.error_handle = Some(handle),
+            _ => {
+                return context
+                    .state
+                    .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn get_console_cp(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(65001)
+    }
+
+    pub fn get_console_output_cp(_context: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(65001)
+    }
+
+    fn console_device(_context: &ServiceContext<'_>, handle: u64) -> Option<bool> {
+        // Some(false) output, Some(true) error, None input or unknown. The
+        // match is on the fixed console devices, not on what the standard
+        // handles were redirected to: redirecting output to the error device
+        // writes to the error capture, and redirecting it to a value that is
+        // no console at all fails, as it does on Windows.
+        if handle == console::OUTPUT_HANDLE {
+            Some(false)
+        } else if handle == console::ERROR_HANDLE {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_console_mode(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        output: u64,
+    ) -> Outcome<bool> {
+        let memory = &mut *context.memory;
+        let mut console = context.state.console();
+        console.initialize();
+        // The modes belong to the console devices themselves, like the
+        // writes: redirection does not move them.
+        let known = handle == console::INPUT_HANDLE
+            || handle == console::OUTPUT_HANDLE
+            || handle == console::ERROR_HANDLE;
+        if !known {
+            return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
+        }
+        let mode = if handle == console::INPUT_HANDLE {
+            console.input_mode
+        } else {
+            console.output_mode
+        };
+        memory
+            .write_u32(output, mode)
+            .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        Ok(true)
+    }
+
+    pub fn set_console_mode(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        mode: u32,
+    ) -> Outcome<bool> {
+        let mut console = context.state.console();
+        console.initialize();
+        let known = handle == console::INPUT_HANDLE
+            || handle == console::OUTPUT_HANDLE
+            || handle == console::ERROR_HANDLE;
+        if !known {
+            return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
+        }
+        if handle == console::INPUT_HANDLE {
+            console.input_mode = mode;
+        } else {
+            console.output_mode = mode;
+        }
+        Ok(true)
+    }
+
+    fn write_console(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        bytes: &[u8],
+        characters: u32,
+        written: u64,
+    ) -> Outcome<bool> {
+        let error = match console_device(context, handle) {
+            Some(error) => error,
+            None => return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false),
+        };
+        let memory = &mut *context.memory;
+        context.state.crt_streams().console_write(error, bytes);
+        if written != 0 {
+            memory
+                .write_u32(written, characters)
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        }
+        Ok(true)
+    }
+
+    pub fn write_console_a(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        text: u64,
+        characters: u32,
+        written: u64,
+        reserved: u64,
+    ) -> Outcome<bool> {
+        if reserved != 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let mut bytes = Vec::new();
+        for index in 0..characters as u64 {
+            bytes.push(
+                context
+                    .memory
+                    .read_u8(text + index)
+                    .map_err(crate::cpu::ExitReason::MemoryFault)?,
+            );
+        }
+        write_console(context, handle, &bytes, characters, written)
+    }
+
+    pub fn write_console_w(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        text: u64,
+        characters: u32,
+        written: u64,
+        reserved: u64,
+    ) -> Outcome<bool> {
+        if reserved != 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let mut units = Vec::new();
+        for index in 0..characters as u64 {
+            units.push(
+                context
+                    .memory
+                    .read_u16(text + index * 2)
+                    .map_err(crate::cpu::ExitReason::MemoryFault)?,
+            );
+        }
+        // Wide to UTF-8: the console code page is UTF-8, so the conversion
+        // is the encoding, not a code page mapping.
+        let text = String::from_utf16_lossy(&units);
+        write_console(context, handle, text.as_bytes(), characters, written)
+    }
+
+    pub fn read_console_a(
+        context: &mut ServiceContext<'_>,
+        handle: u64,
+        buffer: u64,
+        size: u32,
+        read: u64,
+        control: u64,
+    ) -> Outcome<bool> {
+        if control != 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        if handle != console::INPUT_HANDLE {
+            return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
+        }
+        let memory = &mut *context.memory;
+        let line = context.state.crt_streams().console_line(size as usize);
+        let length = line.len() as u32;
+        if length != 0 {
+            memory
+                .write_bytes(buffer, &line)
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        }
+        if read != 0 {
+            memory
+                .write_u32(read, length)
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        }
+        Ok(true)
+    }
+
+    // Queries about the hosted process environment and the console identity.
+    // The process environment is empty: no host variable passes through, so
+    // every query misses, which is what an empty environment answers on
+    // Windows rather than a stub.
+
+    pub fn environment_variable(
+        context: &mut ServiceContext<'_>,
+        _name: u64,
+        _buffer: u64,
+        _size: u32,
+    ) -> Outcome<u32> {
+        context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0)
+    }
+
+    /// The hosted runtime has no console window: the answer is a null handle.
+    pub fn console_window(_context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        Ok(0)
+    }
+
+    pub fn set_console_title_wide(context: &mut ServiceContext<'_>, title: u64) -> Outcome<bool> {
+        if title == 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let units = read_wide_units(context.memory, title, -1)?;
+        context.state.console().title = units;
+        Ok(true)
+    }
+
+    pub fn console_title_wide(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u32,
+    ) -> Outcome<u32> {
+        if buffer == 0 || size == 0 {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        let title = context.state.console().title.clone();
+        let length = title.len() as u32;
+        // What fits with its terminator; the answer is the full length even
+        // then, so a caller can size its buffer and ask again.
+        let room = size.saturating_sub(1) as usize;
+        let copied = room.min(title.len());
+        for (index, unit) in title[..copied].iter().enumerate() {
+            context
+                .memory
+                .write_u16(buffer + 2 * index as u64, *unit)
+                .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        }
+        context
+            .memory
+            .write_u16(buffer + 2 * copied as u64, 0)
+            .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        Ok(length)
+    }
+
+    pub fn set_console_title_narrow(context: &mut ServiceContext<'_>, title: u64) -> Outcome<bool> {
+        if title == 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let bytes = read_narrow_string(context.memory, title)?;
+        // The console code page is UTF-8, so the narrow text is UTF-8.
+        let text = String::from_utf8_lossy(&bytes);
+        context.state.console().title = text.encode_utf16().collect();
+        Ok(true)
+    }
+
+    pub fn console_title_narrow(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u32,
+    ) -> Outcome<u32> {
+        if buffer == 0 || size == 0 {
+            return context.state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        let title = context.state.console().title.clone();
+        let bytes: Vec<u8> = String::from_utf16_lossy(&title).into_bytes();
+        let length = bytes.len() as u32;
+        let room = size.saturating_sub(1) as usize;
+        let copied = room.min(bytes.len());
+        context
+            .memory
+            .write_bytes(buffer, &bytes[..copied])
+            .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        context
+            .memory
+            .write_u8(buffer + copied as u64, 0)
+            .map_err(crate::cpu::ExitReason::MemoryFault)?;
+        Ok(length)
     }
 
     // What a hosted C program's startup code hands to `main` (#392).
@@ -1476,6 +2888,59 @@ pub(crate) mod handlers {
         Ok(())
     }
 
+    // The legacy CRT's way into the same startup state (#632). `__getmainargs`
+    // is how the statically linked startup of a msvcrt-linked program reaches
+    // the arguments; the answers are the same table the modern configuration
+    // builds, copied through the caller's pointers.
+
+    pub fn getmainargs(
+        context: &mut ServiceContext<'_>,
+        argc: u64,
+        argv: u64,
+        envp: u64,
+        dowildcard: i32,
+        _start_info: u64,
+    ) -> Outcome<i32> {
+        if argc == 0 || argv == 0 || envp == 0 {
+            crt::set_errno(context.memory, context.teb, crt::EINVAL)?;
+            return Ok(-1);
+        }
+        let fault = crate::cpu::ExitReason::MemoryFault;
+        let mut arguments = context.state.crt_arguments();
+        // A nonzero `dowildcard` asks for wildcard expansion. Xenora does not
+        // expand either way, as `_configure_narrow_argv` already documents:
+        // the two modes build the same table.
+        let mode = if dowildcard == 0 { 1 } else { 2 };
+        arguments.configure(context.memory, mode)?;
+        arguments.initialize_environment(context.memory)?;
+        let count_address = arguments.address(context.memory, crt_arguments::Variable::Argc)?;
+        let argv_address = arguments.address(context.memory, crt_arguments::Variable::Argv)?;
+        let environ_address =
+            arguments.address(context.memory, crt_arguments::Variable::Environ)?;
+        let count = context.memory.read_u32(count_address).map_err(fault)?;
+        let table = context.memory.read_u64(argv_address).map_err(fault)?;
+        let environment = context.memory.read_u64(environ_address).map_err(fault)?;
+        context.memory.write_u32(argc, count).map_err(fault)?;
+        context.memory.write_u64(argv, table).map_err(fault)?;
+        context.memory.write_u64(envp, environment).map_err(fault)?;
+        Ok(0)
+    }
+
+    /// The legacy CRT's largest multibyte character in the C locale: one
+    /// byte, coherent with the byte-oriented narrow conversions of the C
+    /// locale documented in `crt_wide.rs`.
+    pub fn mb_cur_max_legacy(_: &mut ServiceContext<'_>) -> Outcome<u32> {
+        Ok(1)
+    }
+
+    /// `_amsg_exit` ends the process after a runtime error. Partial: the
+    /// message the CRT writes is not modelled.
+    pub fn amsg_exit(context: &mut ServiceContext<'_>, code: i32) -> Outcome<()> {
+        Err(crate::cpu::ExitReason::ProcessExit(
+            context.state.exit_process(code as u32),
+        ))
+    }
+
     pub fn set_invalid_parameter_handler(
         context: &mut ServiceContext<'_>,
         handler: u64,
@@ -1516,21 +2981,288 @@ pub(crate) mod handlers {
         context: &mut ServiceContext<'_>,
         filter: u64,
     ) -> Outcome<u64> {
-        Ok(context
-            .state
-            .crt_startup()
-            .set_unhandled_exception_filter(filter))
+        // Kept with the guest memory, where the exception dispatcher that
+        // calls it at the end of an unhandled search can reach it.
+        Ok(std::mem::replace(
+            &mut context.memory.unhandled_filter,
+            filter,
+        ))
     }
 
     // The Universal C runtime services that a C++ guest's runtime imports.
     // Their implementations are in `crt.rs` and `crt_streams.rs`.
     pub use super::crt::{_lock_file, _unlock_file, fputc, localeconv, mbrtowc, strerror, wcrtomb};
 
+    // The C time services of package 5 of #459. `crt_clock.rs` documents
+    // the UTC clock they share.
+    pub fn _gmtime64(context: &mut ServiceContext<'_>, time: u64) -> Outcome<u64> {
+        context
+            .state
+            .crt_clock()
+            .break_time(context.memory, context.teb, time)
+    }
+
+    pub fn _mktime64(context: &mut ServiceContext<'_>, tm: u64) -> Outcome<u64> {
+        context
+            .state
+            .crt_clock()
+            .compose_time(context.memory, context.teb, tm)
+    }
+
+    pub fn asctime(context: &mut ServiceContext<'_>, tm: u64) -> Outcome<u64> {
+        context
+            .state
+            .crt_clock()
+            .ascii_time(context.memory, context.teb, tm)
+    }
+
+    pub fn _ctime64(context: &mut ServiceContext<'_>, time: u64) -> Outcome<u64> {
+        context
+            .state
+            .crt_clock()
+            .ascii_clock(context.memory, context.teb, time)
+    }
+
+    pub fn asctime_s(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u64,
+        tm: u64,
+    ) -> Outcome<u32> {
+        context
+            .state
+            .crt_clock()
+            .ascii_time_s(context.memory, context.teb, buffer, size, tm)
+            .map(|value| value as u32)
+    }
+
+    pub fn _ctime64_s(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u64,
+        time: u64,
+    ) -> Outcome<u32> {
+        context
+            .state
+            .crt_clock()
+            .ascii_clock_s(context.memory, context.teb, buffer, size, time)
+            .map(|value| value as u32)
+    }
+
+    pub fn strftime(
+        context: &mut ServiceContext<'_>,
+        out: u64,
+        size: u64,
+        format: u64,
+        tm: u64,
+    ) -> Outcome<u64> {
+        context
+            .state
+            .crt_clock()
+            .format_time(context.memory, context.teb, out, size, format, tm)
+    }
+
+    pub fn clock(context: &mut ServiceContext<'_>) -> Outcome<u64> {
+        // `clock` counts in units of CLOCKS_PER_SEC, 1000; the performance
+        // count is in 100-nanosecond ticks, so ten thousand of them are
+        // one of its units.
+        Ok(context.state.clock.performance_count() / 10_000)
+    }
+
+    pub fn _difftime64(
+        _context: &mut ServiceContext<'_>,
+        time1: u64,
+        time2: u64,
+    ) -> Outcome<Float64> {
+        Ok(Float64(
+            (time1 as i64 as f64 - time2 as i64 as f64).to_bits(),
+        ))
+    }
+
+    pub fn file_time_to_local_file_time(
+        context: &mut ServiceContext<'_>,
+        input: u64,
+        output: u64,
+    ) -> Outcome<u32> {
+        // The machine's local time is UTC, so the conversion is the
+        // identity. Failure for an unrepresentable time cannot occur.
+        let time = context.memory.read_u64(input).map_err(crt_streams::fault)?;
+        context
+            .memory
+            .write_u64(output, time)
+            .map_err(crt_streams::fault)?;
+        Ok(1)
+    }
+
+    // The wide-character conversions and classification of package 6 of
+    // #459. `crt_wide.rs` documents the C locale's identity encoding they
+    // convert in.
+    pub fn mbtowc(
+        context: &mut ServiceContext<'_>,
+        wide: u64,
+        text: u64,
+        count: u64,
+    ) -> Outcome<i32> {
+        crt_wide::multibyte_to_wide(context.memory, context.teb, wide, text, count)
+            .map(|value| value as i32)
+    }
+
+    pub fn wctomb(context: &mut ServiceContext<'_>, text: u64, wide: u32) -> Outcome<i32> {
+        crt_wide::wide_to_multibyte(context.memory, context.teb, text, u64::from(wide))
+            .map(|value| value as i32)
+    }
+
+    pub fn mblen(context: &mut ServiceContext<'_>, text: u64, count: u64) -> Outcome<i32> {
+        crt_wide::multibyte_length(context.memory, context.teb, text, count)
+            .map(|value| value as i32)
+    }
+
+    pub fn mbstowcs(
+        context: &mut ServiceContext<'_>,
+        wide: u64,
+        text: u64,
+        count: u64,
+    ) -> Outcome<u64> {
+        crt_wide::multibyte_string_to_wide(context.memory, context.teb, wide, text, count)
+    }
+
+    pub fn wcstombs(
+        context: &mut ServiceContext<'_>,
+        text: u64,
+        wide: u64,
+        count: u64,
+    ) -> Outcome<u64> {
+        crt_wide::wide_string_to_multibyte(context.memory, context.teb, text, wide, count)
+    }
+
+    pub fn mbsrtowcs(
+        context: &mut ServiceContext<'_>,
+        wide: u64,
+        source: u64,
+        count: u64,
+        _state: u64,
+    ) -> Outcome<u64> {
+        crt_wide::mbsrtowcs(context.memory, context.teb, wide, source, count)
+    }
+
+    pub fn wcsrtombs(
+        context: &mut ServiceContext<'_>,
+        text: u64,
+        source: u64,
+        count: u64,
+        _state: u64,
+    ) -> Outcome<u64> {
+        crt_wide::wcsrtombs(context.memory, context.teb, text, source, count)
+    }
+
+    pub fn iswalpha(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<i32> {
+        crt_wide::iswalpha(context.memory, context.teb, u64::from(wide)).map(|value| value as i32)
+    }
+
+    pub fn iswdigit(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<i32> {
+        crt_wide::iswdigit(context.memory, context.teb, u64::from(wide)).map(|value| value as i32)
+    }
+
+    pub fn iswalnum(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<i32> {
+        crt_wide::iswalnum(context.memory, context.teb, u64::from(wide)).map(|value| value as i32)
+    }
+
+    pub fn iswlower(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<i32> {
+        crt_wide::iswlower(context.memory, context.teb, u64::from(wide)).map(|value| value as i32)
+    }
+
+    pub fn iswupper(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<i32> {
+        crt_wide::iswupper(context.memory, context.teb, u64::from(wide)).map(|value| value as i32)
+    }
+
+    pub fn iswspace(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<i32> {
+        crt_wide::iswspace(context.memory, context.teb, u64::from(wide)).map(|value| value as i32)
+    }
+
+    pub fn towlower(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<u32> {
+        crt_wide::towlower(context.memory, context.teb, u64::from(wide)).map(|value| value as u32)
+    }
+
+    pub fn towupper(context: &mut ServiceContext<'_>, wide: u32) -> Outcome<u32> {
+        crt_wide::towupper(context.memory, context.teb, u64::from(wide)).map(|value| value as u32)
+    }
+
+    pub fn iswctype(context: &mut ServiceContext<'_>, wide: u32, mask: u32) -> Outcome<i32> {
+        crt_wide::iswctype(
+            context.memory,
+            context.teb,
+            u64::from(wide),
+            u64::from(mask),
+        )
+        .map(|value| value as i32)
+    }
+
+    pub fn wcsncat(
+        context: &mut ServiceContext<'_>,
+        start: u64,
+        end: u64,
+        count: u64,
+    ) -> Outcome<u64> {
+        crt_wide::wcsncat(context.memory, context.teb, start, end, count)
+    }
+
+    pub fn wcscpy(context: &mut ServiceContext<'_>, start: u64, end: u64) -> Outcome<u64> {
+        crt_wide::wcscpy(context.memory, start, end)
+    }
+
+    pub fn _wcsnicmp(
+        context: &mut ServiceContext<'_>,
+        first: u64,
+        second: u64,
+        count: u64,
+    ) -> Outcome<i32> {
+        match crt_wide::wcsnicmp(context.memory, first, second, count) {
+            Ok(value) => Ok(value as u32 as i32),
+            Err(reason) => Err(reason),
+        }
+    }
+
+    /// `_strdup` is the narrow form of `_wcsdup`: a copy of the string the
+    /// CRT heap owns, as the CRT hands out.
+    pub fn _strdup(context: &mut ServiceContext<'_>, text: u64) -> Outcome<u64> {
+        let mut bytes = Vec::new();
+        let mut at = text;
+        loop {
+            let byte = context
+                .memory
+                .read_u8(at)
+                .map_err(ExitReason::MemoryFault)?;
+            bytes.push(byte);
+            if byte == 0 {
+                break;
+            }
+            at = at.checked_add(1).ok_or(ExitReason::MemoryFault(
+                crate::memory::MemoryError::Overflow,
+            ))?;
+            if bytes.len() > 65_536 {
+                return Ok(0);
+            }
+        }
+        let copy = context
+            .memory
+            .map_heap_allocation(crate::memory::PROCESS_HEAP, bytes.len())
+            .map_err(ExitReason::MemoryFault)?;
+        context
+            .memory
+            .write_bytes(copy, &bytes)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(copy)
+    }
+
+    pub fn _wcsdup(context: &mut ServiceContext<'_>, text: u64) -> Outcome<u64> {
+        crt_wide::wcsdup(context.memory, context.teb, text)
+    }
+
     // The rest of math.h (#468); `crt_math.rs` says which are exact.
     pub use super::crt_math::{
         acos, asin, atan, atan2, atan2f, cbrt, ceil, ceilf, copysign, cos, cosf, cosh, erf, exp,
-        exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, llround,
-        log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder, rint, round,
-        roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
+        exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, ldexp,
+        llround, log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder,
+        rint, round, roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
     };
 }

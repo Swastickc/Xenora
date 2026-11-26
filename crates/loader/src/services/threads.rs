@@ -15,7 +15,7 @@ use super::{
     PROCESS_THREADS_V1, ServicesState, THREAD_QUERY_RIGHTS,
 };
 use crate::cpu::{CpuState, ExitReason, Register};
-use crate::imports::{ImportRegistry, ServiceStatus};
+use crate::imports::{CallbackStart, CallbackStep, CallbackTask, ImportRegistry, ServiceStatus};
 use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -52,8 +52,40 @@ const TEB_STACK_BASE: u64 = 0x08;
 const TEB_STACK_LIMIT: u64 = 0x10;
 const TEB_SELF: u64 = 0x30;
 
-/// Return address of a thread's start routine. Nothing is mapped there.
-pub(crate) const THREAD_RETURN: u64 = 0xFFFF_FFFF_FFFE_0000;
+/// Return address of a thread's start routine. It is on the reserved
+/// sentinel page, so the import dispatcher stops there before any fetch: a
+/// start routine's return is a host event, never a guest fault.
+pub(crate) const THREAD_RETURN: u64 =
+    crate::tls::TLS_CALLBACK_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(THREAD_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
+
+/// Tail-call the actual ExitThread service with the worker's original return
+/// slot and home area. The worker can use FLS without importing ExitThread.
+pub(crate) fn prepare_worker_exit(
+    registry: Option<&ImportRegistry>,
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+    code: u32,
+) -> Result<(), ExitReason> {
+    let (registry, index) = registry
+        .and_then(|registry| {
+            registry
+                .service_index(KERNEL32, "ExitThread")
+                .map(|index| (registry, index))
+        })
+        .ok_or(ExitReason::ServiceAbiViolation)?;
+    let rsp = cpu
+        .get(Register::Rsp)
+        .checked_sub(8)
+        .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
+    memory
+        .write_u64(rsp, THREAD_RETURN)
+        .map_err(ExitReason::MemoryFault)?;
+    cpu.set(Register::Rsp, rsp);
+    cpu.set(Register::Rcx, u64::from(code));
+    cpu.rip = registry.dynamic_trampolines().expose(index);
+    Ok(())
+}
 
 /// How a service asked the scheduler to act after it completed.
 const SWITCH_NONE: u8 = 0;
@@ -114,6 +146,26 @@ pub(crate) struct GuestThread {
     allocations: Vec<u64>,
     /// Set by ExitThread and TerminateThread.
     pub(crate) exit: Option<u32>,
+    fls_cleanup_started: bool,
+}
+
+struct FlsThreadExit {
+    state: Arc<ServicesState>,
+    id: u32,
+    code: u32,
+    callbacks: std::vec::IntoIter<(u64, u64)>,
+}
+
+impl CallbackTask for FlsThreadExit {
+    fn resume(&mut self, _: u64, _: u64, _: &mut GuestMemory) -> Result<CallbackStep, ExitReason> {
+        match self.callbacks.next() {
+            Some((entry, value)) => Ok(CallbackStep::Call {
+                entry,
+                args: [value, 0, 0, 0],
+            }),
+            None => Err(self.state.finish_thread_exit(self.id, self.code)),
+        }
+    }
 }
 
 /// Objects a blocked thread waits for, captured when it first blocked.
@@ -329,6 +381,7 @@ impl ServicesState {
                 slot: None,
                 allocations: Vec::new(),
                 exit: None,
+                fls_cleanup_started: false,
             },
         );
         table.queue.push_back(self.thread_id);
@@ -363,6 +416,62 @@ impl ServicesState {
         drop(table);
         self.hooks.switch.store(SWITCH_NONE, Ordering::SeqCst);
         self.hooks.attached.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn has_thread_fls_callbacks(&self, teb: u64) -> bool {
+        self.synch
+            .lock()
+            .expect("guest synchronization state")
+            .has_thread_fls_callbacks(teb)
+    }
+
+    fn start_thread_exit(
+        self: &Arc<Self>,
+        teb: u64,
+        code: u32,
+    ) -> Result<CallbackStart, ExitReason> {
+        let id = {
+            let mut table = self.threads.lock().expect("guest thread table");
+            let id = table
+                .id_of(teb)
+                .ok_or(ExitReason::IllegalInstruction(0xFE))?;
+            let thread = table.threads.get_mut(&id).expect("thread found above");
+            // Cleanup belongs to workers and runs at most once per worker.
+            if thread.slot.is_none() || thread.fls_cleanup_started {
+                thread.exit = Some(code);
+                return Err(ExitReason::GuestThreadExited);
+            }
+            thread.fls_cleanup_started = true;
+            id
+        };
+        let mut callbacks = self
+            .synch
+            .lock()
+            .expect("guest synchronization state")
+            .take_thread_fls_callbacks(teb)
+            .into_iter();
+        let Some((entry, value)) = callbacks.next() else {
+            return Err(self.finish_thread_exit(id, code));
+        };
+        Ok(CallbackStart::Call {
+            task: Box::new(FlsThreadExit {
+                state: Arc::clone(self),
+                id,
+                code,
+                callbacks,
+            }),
+            entry,
+            args: [value, 0, 0, 0],
+        })
+    }
+
+    fn finish_thread_exit(&self, id: u32, code: u32) -> ExitReason {
+        let mut table = self.threads.lock().expect("guest thread table");
+        let Some(thread) = table.threads.get_mut(&id) else {
+            return ExitReason::IllegalInstruction(0xFE);
+        };
+        thread.exit = Some(code);
+        ExitReason::GuestThreadExited
     }
 
     /// Record a thread's exit code, signal its object and reclaim its state.
@@ -581,6 +690,7 @@ impl ServicesState {
                 slot: Some(slot),
                 allocations,
                 exit: None,
+                fls_cleanup_started: false,
             },
         );
         table.queue.push_back(id);
@@ -791,14 +901,12 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
 
     let s = Arc::clone(state);
-    registry.register(KERNEL32, "ExitThread", move |args, cpu, _| {
-        let mut table = s.threads.lock().expect("guest thread table");
-        let Some(id) = table.id_of(cpu.gs_base) else {
-            return Err(ExitReason::IllegalInstruction(0xFE));
-        };
-        table.threads.get_mut(&id).expect("thread found above").exit = Some(args.rcx as u32);
-        Err(ExitReason::GuestThreadExited)
-    });
+    registry.register_callback_task(
+        KERNEL32,
+        "ExitThread",
+        ServiceStatus::Partial,
+        move |args, teb, _, _| s.start_thread_exit(teb, args.rcx as u32),
+    );
 
     let s = Arc::clone(state);
     registry.register(KERNEL32, "TerminateThread", move |args, cpu, memory| {

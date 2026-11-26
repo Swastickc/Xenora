@@ -2,31 +2,31 @@
 
 //! Persistent guest rendering for one session (Gate 3, #266).
 //!
-//! The embedded `frame-loop.exe` fixture calls `xenora.dll!frame_submit(index)`
-//! with index 0, 1, 2, ... and halts when the call returns 0. The guest runs on
-//! its own thread for the session's lifetime. Pause, resume and stop act at the
-//! frame-submit boundary: a paused guest waits inside that call with its
-//! architectural state untouched, and a stop request makes the call return 0 so
-//! the guest leaves its loop and halts.
+//! The embedded guest records graphics commands once and submits one list per
+//! frame. It waits at the frame boundary while paused and releases its graphics
+//! objects before exiting. Only a checked guest readback reaches the app.
 
-use std::cell::RefCell;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 
+use xenora_loader::graphics::{FramePresentation, GraphicsBackendId, GraphicsError};
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
-use xenora_loader::{ExitReason, ImportRegistry, Register};
+use xenora_loader::{
+    ExitReason, ImportRegistry, MockClock, ServicesState, register_standard_services,
+};
 use xenora_metal::NativeCompute;
 use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
 
-const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/frame-loop.exe");
-const INTERACTIVE_FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/interactive.exe");
+const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/app-graphics-loop.exe");
 pub const WIDTH: usize = 4;
 pub const HEIGHT: usize = 3;
 pub const FRAME_BYTES: usize = WIDTH * HEIGHT * 4;
 pub const MAX_FRAMES: u32 = 100_000;
-/// Guest instructions per loop iteration (mov, call, inc, test, jnz) plus slack.
-const STEPS_PER_FRAME: usize = 8;
-const STEPS_PER_INTERACTIVE_FRAME: usize = 24;
+/// Budget for startup, four command recordings, the final gate and teardown.
+const SETUP_AND_EXIT_STEPS: usize = 2048;
+/// Budget per guest frame, including input, execute, readback and publication.
+const STEPS_PER_FRAME: usize = 96;
 /// `x9-constant-ps.s` exports (1, 0, 0, 1): opaque red. Everything else is the clear colour.
 const RED: [u8; 4] = [255, 0, 0, 255];
 const CLEAR: [u8; 4] = [19, 43, 93, 251];
@@ -89,8 +89,9 @@ struct State {
     input: ControllerInput,
     input_queue: std::collections::VecDeque<InputState>,
     recorded_frames: Vec<(u32, Vec<u8>)>,
-    /// Every `frame_submit` call the guest made, including the one answered with 0.
-    calls: u64,
+    frame_admitted: bool,
+    frame_input: Option<u64>,
+    end_seen: bool,
     latest: Option<(u32, Vec<u8>)>,
 }
 
@@ -146,7 +147,7 @@ impl FrameLoop {
         true
     }
 
-    /// Ask the guest to stop at its next frame submission and wait for its thread.
+    /// Ask the guest to stop at its next frame boundary and wait for its thread.
     pub fn stop(&self) {
         {
             let mut state = self.lock();
@@ -200,122 +201,199 @@ impl FrameLoop {
     }
 
     fn execute(self: &Arc<Self>) -> Result<(), String> {
-        let shader = compile_graphics(
+        let msl = compile_graphics(
             Architecture::Gfx1030,
             include_bytes!("../../../fixtures/rdna2/x9-constant-vs.bin"),
             include_bytes!("../../../fixtures/rdna2/x9-constant-ps.bin"),
         )
-        .map_err(|e| format!("shader translation: {e}"))?;
+        .map_err(|e| format!("shader translation: {e}"))?
+        .msl;
         let gpu = shared_gpu()?;
-        // The import runs on the guest thread, so the session's shader lives there too.
-        GPU.with(|slot| *slot.borrow_mut() = Some((gpu, shader.msl)));
+        let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+        let native_draws = Arc::new(AtomicU32::new(0));
+        let draws = Arc::clone(&native_draws);
+        services
+            .graphics
+            .lock()
+            .map_err(|_| "guest graphics state is poisoned")?
+            .set_metal_backend(move |vertices, (width, height), clear| {
+                let pixels = gpu
+                    .render_rgba8(
+                        &msl,
+                        [VERTEX_ENTRY_POINT, PIXEL_ENTRY_POINT],
+                        vertices,
+                        &[[0.0; 4]; 3],
+                        [width, height],
+                        clear,
+                    )
+                    .map_err(|e| GraphicsError::BackendError(format!("Metal draw: {e}")))?;
+                draws.fetch_add(1, Ordering::Relaxed);
+                Ok(pixels)
+            });
+        self.execute_guest(&services, GraphicsBackendId::MetalNative, &native_draws)
+    }
 
+    fn execute_guest(
+        self: &Arc<Self>,
+        services: &Arc<ServicesState>,
+        backend: GraphicsBackendId,
+        native_draws: &Arc<AtomicU32>,
+    ) -> Result<(), String> {
+        let last_presentation = services
+            .graphics
+            .lock()
+            .map_err(|_| "guest graphics state is poisoned")?
+            .last_presentation
+            .clone();
         let shared = Arc::clone(self);
         let mut imports = ImportRegistry::new();
-        imports.register("xenora.dll", "frame_submit", move |args, _, memory| {
-            let index = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
-            shared
-                .submit(index)
-                .ok_or(ExitReason::IllegalInstruction(0xff))
+        register_standard_services(&mut imports, Arc::clone(services));
+        imports.register("xenora.dll", "frame_begin", move |args, _, _| {
+            shared.begin_frame(args.rcx as u32)
         });
-        if self.lock().interactive {
-            let shared_poll = Arc::clone(self);
-            imports.register("xenora.dll", "input_poll", move |_args, _, _memory| {
-                let mut state = shared_poll.lock();
-                let input = state.input_queue.pop_front().unwrap_or(state.input.state);
-                let cmd = if input.buttons & crate::XENORA_INPUT_RIGHT != 0 {
-                    1u64
-                } else if input.buttons & crate::XENORA_INPUT_LEFT != 0 {
-                    2u64
-                } else {
-                    0u64
-                };
-                Ok(cmd)
-            });
-            let snapshot = Arc::clone(self);
-            imports.register(
-                "xenora.dll",
-                "input_poll_snapshot",
-                move |args, _, memory| {
-                    let input = snapshot.lock().input;
-                    memory
-                        .write_bytes(args.rcx, &input.guest_bytes())
-                        .map_err(ExitReason::MemoryFault)?;
-                    Ok(1)
-                },
-            );
-        }
+        let shared = Arc::clone(self);
+        let draws = Arc::clone(native_draws);
+        let presentation = Arc::clone(&last_presentation);
+        imports.register("xenora.dll", "frame_present", move |args, _, memory| {
+            let mut readback = [0; FRAME_BYTES];
+            memory
+                .read_bytes(args.r8, &mut readback)
+                .map_err(ExitReason::MemoryFault)?;
+            let frame = presentation
+                .lock()
+                .map_err(|_| ExitReason::ServiceAbiViolation)?;
+            shared.publish_frame(
+                args.rcx as u32,
+                args.rdx as u32,
+                &readback,
+                &frame,
+                backend,
+                draws.load(Ordering::Relaxed),
+            )
+        });
+        let shared_poll = Arc::clone(self);
+        imports.register("xenora.dll", "input_poll", move |_, _, _| {
+            shared_poll
+                .lock()
+                .frame_input
+                .take()
+                .ok_or(ExitReason::ServiceAbiViolation)
+        });
+        let snapshot = Arc::clone(self);
+        imports.register(
+            "xenora.dll",
+            "input_poll_snapshot",
+            move |args, _, memory| {
+                let input = snapshot.lock().input;
+                memory
+                    .write_bytes(args.rcx, &input.guest_bytes())
+                    .map_err(ExitReason::MemoryFault)?;
+                Ok(1)
+            },
+        );
         let limit = self.lock().limit as usize;
-        let is_interactive = self.lock().interactive;
-        let fixture_bytes = if is_interactive {
-            INTERACTIVE_FIXTURE
-        } else {
-            FIXTURE
-        };
-        let steps_per_frame = if is_interactive {
-            STEPS_PER_INTERACTIVE_FRAME
-        } else {
-            STEPS_PER_FRAME
-        };
         let startup = run_synthetic_startup(
-            fixture_bytes,
+            FIXTURE,
             StartupLayout {
                 image_base: 0x1_4000_0000,
                 stack_top: 0x2_0001_0000,
                 tls_base: 0x3_0000_0000,
             },
             imports,
-            (limit + 1) * steps_per_frame + 32,
+            limit * STEPS_PER_FRAME + SETUP_AND_EXIT_STEPS,
         )
-        .map_err(|e| format!("startup: {e}"));
-        GPU.with(|slot| slot.borrow_mut().take());
-        let startup = startup?;
-        let calls = self.lock().calls;
-        let rbx = startup.execution.final_state.get(Register::Rbx);
-        if startup.execution.exit_reason != ExitReason::Halt {
+        .map_err(|e| format!("startup: {e}"))?;
+        if startup.execution.exit_reason != ExitReason::ProcessExit(0) {
             return Err(format!(
                 "guest ended with {:?}",
                 startup.execution.exit_reason
             ));
         }
-        if !is_interactive && rbx != calls {
-            return Err(format!("guest ended with rbx={rbx}, calls={calls}"));
+        let rendered = last_presentation
+            .lock()
+            .map_err(|_| "guest graphics presentation is poisoned")?
+            .frame_index;
+        let state = self.lock();
+        if !state.end_seen || state.frame_admitted || services.exit_status() != Some(0) {
+            return Err("guest exited before completing the frame protocol".to_owned());
+        }
+        if rendered != u64::from(state.completed) {
+            return Err("guest rendered a frame without publishing it".to_owned());
+        }
+        if backend == GraphicsBackendId::MetalNative
+            && native_draws.load(Ordering::Relaxed) != state.completed
+        {
+            return Err(
+                "guest native draw count differs from the completed frame count".to_owned(),
+            );
         }
         Ok(())
     }
 
-    /// Handle one `frame_submit`: wait while paused, then render and verify the
-    /// frame. `None` fails the guest; `Some(0)` tells it to stop.
-    fn submit(&self, index: u64) -> Option<u64> {
+    fn begin_frame(&self, sequence: u32) -> Result<u64, ExitReason> {
         let mut state = self.lock();
-        state.calls += 1;
-        while state.paused && !state.stop {
+        if state.frame_admitted || state.end_seen || sequence != state.completed {
+            return Err(ExitReason::ServiceAbiViolation);
+        }
+        // The interactive loop samples the next direction before waiting on a pause.
+        let input =
+            (state.interactive && !state.stop && state.completed < state.limit).then(|| {
+                let input = state.input_queue.pop_front().unwrap_or(state.input.state);
+                if input.buttons & crate::XENORA_INPUT_RIGHT != 0 {
+                    1
+                } else if input.buttons & crate::XENORA_INPUT_LEFT != 0 {
+                    2
+                } else {
+                    0
+                }
+            });
+        while state.paused && !state.stop && state.completed < state.limit {
             state = self.wake.wait(state).unwrap_or_else(|p| p.into_inner());
         }
         if state.stop || state.completed >= state.limit {
-            return Some(0);
+            state.end_seen = true;
+            return Ok(0);
         }
-        if state.interactive {
-            if index >= WIDTH as u64 {
-                return None; // column must be inside 0..WIDTH
-            }
-        } else if index != u64::from(state.completed) {
-            return None; // frame identities must arrive in order
-        }
-        drop(state);
-        let pixels = render(index as u32)?;
-        let mut state = self.lock();
-        state.completed += 1;
-        state.latest = Some((index as u32, pixels.clone()));
-        if state.interactive {
-            state.recorded_frames.push((index as u32, pixels));
-        }
-        Some(u64::from(state.completed < state.limit && !state.stop))
+        state.frame_admitted = true;
+        state.frame_input = input;
+        Ok(if state.interactive { 2 } else { 1 })
     }
-}
 
-thread_local! {
-    static GPU: RefCell<Option<(&'static NativeCompute, String)>> = const { RefCell::new(None) };
+    fn publish_frame(
+        &self,
+        sequence: u32,
+        column: u32,
+        readback: &[u8; FRAME_BYTES],
+        frame: &FramePresentation,
+        backend: GraphicsBackendId,
+        native_draws: u32,
+    ) -> Result<u64, ExitReason> {
+        let mut state = self.lock();
+        let id = if state.interactive { column } else { sequence };
+        if !state.frame_admitted
+            || state.frame_input.is_some()
+            || sequence != state.completed
+            || column >= WIDTH as u32
+            || column != id % WIDTH as u32
+            || frame.frame_index != u64::from(sequence) + 1
+            || (frame.width, frame.height) != (WIDTH, HEIGHT)
+            || frame.backend != Some(backend)
+            || frame.draw_count != 1
+            || (backend == GraphicsBackendId::MetalNative && native_draws != sequence + 1)
+            || frame.pixels != readback.as_slice()
+            || expected(id) != readback.as_slice()
+        {
+            return Err(ExitReason::ServiceAbiViolation);
+        }
+        state.frame_admitted = false;
+        state.completed += 1;
+        let pixels = readback.to_vec();
+        if state.interactive {
+            state.recorded_frames.push((id, pixels.clone()));
+        }
+        state.latest = Some((id, pixels));
+        Ok(1)
+    }
 }
 
 /// One Metal device and command queue shared by every frame-loop session (#290).
@@ -337,34 +415,6 @@ fn shared_gpu() -> Result<&'static NativeCompute, String> {
         .map_err(Clone::clone)
 }
 
-/// Frame `index` is a red strip in column `index % 4` on the clear colour.
-///
-/// The triangle (x0, -10), (x0 + 0.7, 0), (x0, 10) in clip space, with x0 the
-/// column's left edge, covers that column's pixel centres in all three rows and
-/// none of its neighbours'.
-fn render(index: u32) -> Option<Vec<u8>> {
-    let column = (index as usize % WIDTH) as f32;
-    let x0 = -1.0 + column * (2.0 / WIDTH as f32);
-    let pixels = GPU.with(|slot| {
-        let slot = slot.borrow();
-        let (gpu, msl) = slot.as_ref()?;
-        gpu.render_rgba8(
-            msl,
-            [VERTEX_ENTRY_POINT, PIXEL_ENTRY_POINT],
-            &[
-                [x0, -10.0, 0.5, 1.0],
-                [x0 + 0.7, 0.0, 0.5, 1.0],
-                [x0, 10.0, 0.5, 1.0],
-            ],
-            &[[0.0; 4]; 3],
-            [WIDTH, HEIGHT],
-            CLEAR,
-        )
-        .ok()
-    })?;
-    (pixels == expected(index)).then_some(pixels)
-}
-
 /// The expected frame for `index`, from the strip rule alone.
 pub fn expected(index: u32) -> Vec<u8> {
     (0..WIDTH * HEIGHT)
@@ -376,6 +426,150 @@ pub fn expected(index: u32) -> Vec<u8> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn embedded_guest_renders_standard_and_queued_interactive_frames() {
+    let red = [255, 0, 0, 255];
+    let clear = [19, 43, 93, 251];
+    let check_pixels = |column: usize, pixels: Vec<u8>| {
+        let mut row = [clear; 4];
+        row[column] = red;
+        assert_eq!(pixels, row.concat().repeat(3));
+    };
+    for interactive in [false, true] {
+        let session = Arc::new(FrameLoop::default());
+        session.lock().limit = 5;
+        session.lock().interactive = interactive;
+        if interactive {
+            let left = crate::XENORA_INPUT_LEFT;
+            let right = crate::XENORA_INPUT_RIGHT;
+            for buttons in [left, left | right, 0, right] {
+                session.queue_input(InputState {
+                    buttons,
+                    ..InputState::default()
+                });
+            }
+            session.send_input(InputState {
+                buttons: left,
+                ..InputState::default()
+            });
+        }
+        let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+        session
+            .execute_guest(
+                &services,
+                GraphicsBackendId::SoftwareReference,
+                &Arc::new(AtomicU32::new(0)),
+            )
+            .unwrap();
+
+        let snapshot = session.snapshot();
+        assert_eq!(snapshot.completed, 5);
+        let (id, pixels) = snapshot.latest.unwrap();
+        assert_eq!(id, if interactive { 0 } else { 4 });
+        check_pixels(0, pixels);
+        if interactive {
+            for (index, column) in [3, 0, 0, 1, 0].into_iter().enumerate() {
+                let (id, pixels) = session.get_recorded_frame(index).unwrap();
+                assert_eq!(id, column);
+                check_pixels(column as usize, pixels);
+            }
+        }
+        assert_eq!(services.open_handle_count(), 0);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn embedded_guest_releases_resources_on_stop_before_first_draw() {
+    let session = Arc::new(FrameLoop::default());
+    session.lock().limit = 5;
+    session.lock().paused = true;
+    session.stop();
+    let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    session
+        .execute_guest(
+            &services,
+            GraphicsBackendId::SoftwareReference,
+            &Arc::new(AtomicU32::new(0)),
+        )
+        .unwrap();
+    assert_eq!(session.snapshot().completed, 0);
+    assert!(session.snapshot().latest.is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn paused_interactive_frame_keeps_its_sampled_command() {
+    use std::time::{Duration, Instant};
+
+    let session = Arc::new(FrameLoop::default());
+    {
+        let mut state = session.lock();
+        state.status = PAUSED;
+        state.paused = true;
+        state.limit = 1;
+        state.interactive = true;
+    }
+    session.queue_input(InputState {
+        buttons: crate::XENORA_INPUT_LEFT,
+        ..InputState::default()
+    });
+    let guest = Arc::clone(&session);
+    let gate = std::thread::spawn(move || guest.begin_frame(0));
+    let until = Instant::now() + Duration::from_secs(2);
+    let sampled = loop {
+        if session.lock().input_queue.is_empty() {
+            break true;
+        }
+        if Instant::now() >= until {
+            break false;
+        }
+        std::thread::yield_now();
+    };
+    session.send_input(InputState {
+        buttons: crate::XENORA_INPUT_RIGHT,
+        ..InputState::default()
+    });
+    assert!(session.set_paused(false));
+    assert!(matches!(gate.join().unwrap(), Ok(2)));
+    assert!(sampled);
+    assert_eq!(session.lock().frame_input, Some(2));
+}
+
+#[cfg(test)]
+#[test]
+fn publication_requires_fresh_presentation_and_actual_native_draw() {
+    let session = FrameLoop::default();
+    session.lock().limit = 2;
+    let readback: [u8; FRAME_BYTES] = expected(0).try_into().unwrap();
+    let backend = GraphicsBackendId::MetalNative;
+    let mut frame = FramePresentation {
+        width: WIDTH,
+        height: HEIGHT,
+        pixels: readback.to_vec(),
+        frame_index: 1,
+        draw_count: 1,
+        backend: Some(backend),
+    };
+    let publish = |frame: &FramePresentation, pixels: &[u8; FRAME_BYTES], draws| {
+        session.publish_frame(0, 0, pixels, frame, backend, draws)
+    };
+    assert!(publish(&frame, &readback, 1).is_err());
+    assert!(matches!(session.begin_frame(0), Ok(1)));
+    frame.frame_index = 0;
+    assert!(publish(&frame, &readback, 1).is_err());
+    frame.frame_index = 1;
+    assert!(publish(&frame, &readback, 0).is_err());
+    assert!(publish(&frame, &[0; FRAME_BYTES], 1).is_err());
+    assert_eq!(session.snapshot().completed, 0);
+    assert!(session.snapshot().latest.is_none());
+
+    assert!(matches!(publish(&frame, &readback, 1), Ok(1)));
+    assert!(publish(&frame, &readback, 1).is_err());
+    assert_eq!(session.snapshot().completed, 1);
 }
 
 #[cfg(test)]

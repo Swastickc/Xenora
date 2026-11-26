@@ -307,12 +307,22 @@ catch when the process has an exception directory:
 Every other fault still stops the guest: `GeneralProtection`, `SimdException`,
 `IllegalInstruction` at any other opcode (it may be a valid instruction Xenora
 does not implement) including the runtime-limit marker `0xFE`, faults inside
-host services, and faults whose stack has no room for the dispatcher. A fault
-no filter accepts stops the guest with the original reason at the faulting
-instruction; a raised exception no frame accepts stops it with
-`ExitReason::UnhandledException(code)`. The filter stored by
-`SetUnhandledExceptionFilter` is not called. Nothing here was compared with
-Windows or with an Xbox console.
+host services, and faults whose stack has no room for the dispatcher.
+
+When a search for a fault or a raised exception reaches the end of the stack
+with no frame accepting it, the filter stored by `SetUnhandledExceptionFilter`
+is called as guest code with an `EXCEPTION_POINTERS` (#476). Its result
+`EXCEPTION_CONTINUE_EXECUTION` (-1) continues from the exception context,
+with any change the filter made to it; `EXCEPTION_CONTINUE_SEARCH` (0) and
+`EXCEPTION_EXECUTE_HANDLER` (1) take the default action, as does an exception
+with no filter set. Xenora's default action, a policy since the pages read
+give no exit status, is `ExitReason::ProcessExit(code)` with the exception
+code as the status and the registers of the raise or fault. Any other filter
+result, continuing a noncontinuable exception, an exit unwind (`RtlUnwindEx`
+with a NULL target frame) and the `ExceptionNestedException` and
+`ExceptionCollidedUnwind` dispositions stop the guest with
+`ExitReason::InvalidUnwind`. Nothing here was compared with Windows or with an
+Xbox console.
 
 ### CRT strings and byte memory
 
@@ -492,7 +502,7 @@ serving the diagnostic channel, means no input. Text mode applies when the
 input is stored: a CR LF pair becomes one line feed, a CR alone stays. The
 end-of-file indicator follows ISO C: a read that meets the end sets it, so
 a last line without a newline sets it while one that ends at a line feed
-does not. `scanf` and wide input are not provided.
+does not. `scanf` is not provided. Wide input and output in the C locale are in the wide stream io section below.
 
 Everything else that is not modelled stops the guest with the runtime-limit
 fault and writes nothing, so that nothing is printed wrongly: the
@@ -507,6 +517,35 @@ Choices where the documentation leaves room, each marked in the source:
 a string as it pads a number; a precision also limits `(null)`; `%#.0o` of
 zero prints `0`, which is ISO C's rule. All six services are `partial`. None
 of this has been compared with Windows.
+
+### Wide stream io in the C runtime
+
+`fputws`, `fgetws`, `fputwc`, `putwchar` and `getwchar` read and write wide
+characters in the C locale: every byte is the wide character of the same
+value, and a wide character above 255 cannot convert, so the write fails with
+`WEOF` and `EILSEQ`. Streams carry the C orientation: the first io operation
+on a stream fixes it byte or wide, and the other kind then fails — byte io on
+a wide-oriented stream answers `EOF` or `WEOF`, wide io on a byte-oriented
+one answers `WEOF` or null. This holds for the files and for the three
+standard streams alike; mixing `printf` and `putwchar` on stdout is a
+conflict, as it is in the CRT. The text-mode translations are the byte
+streams' own. All five services are `partial`: there is one locale, the C
+locale, and no multi-byte encoding. None of this has been compared with
+Windows.
+
+### Wide buffer formatting in the C runtime
+
+`__stdio_common_vswprintf` formats into wide buffers: the syntax and the
+conversions are the narrow engine's, with the wide family's turned-around
+character and string types — `%c` and `%s` are wide, `%C` and `%S` narrow,
+`h` forces narrow and `l` wide. Everything is counted in wide units. The
+default behavior is the CRT's legacy one, measured against a mingw-w64
+binary: truncation writes the count characters without a terminator and
+answers -1, a null buffer answers -1 with `EINVAL` — there is no size query.
+A program that sets the standard-snprintf option bit gets the standard rules
+instead, as the narrow buffer forms implement them. The service is `partial`:
+the wide printf forms for streams (`wprintf`, `fwprintf`) do not exist yet.
+None of this has been compared with Windows.
 
 ### Files through the C runtime
 
@@ -542,8 +581,8 @@ What is not provided, and what is Xenora's choice:
 
 - **Not provided:** the mode characters `x`, `c`, `n`, `N`, `S`, `R`, `T`,
   `D` and `ccs=`, which are refused; `fread`, `fseek`, `ftell`, `rewind`,
-  `ferror`, `fscanf`, `feof` of a file stream, and closing a standard
-  stream, which stop the guest.
+  `ferror`, `fscanf`, and closing a standard stream, which stop the
+  guest.
 - **No buffering.** A write reaches the drive at once, so the rule that a
   `+` stream needs `fflush` or a seek between writing and reading does not
   apply.
@@ -587,6 +626,69 @@ closed temporary file freed can come back — the page documents the same
 for its names. Both are `implemented`. `freopen` is not served: its close
 semantics on failure are unspecified beyond what the drive model can
 answer honestly, and no fixture demanded it.
+
+**The descriptor layer (#493, third part).** `_open`, `_read`, `_write`,
+`_lseek`, `_close`, `_fileno`, `_isatty`, `_access` and `_unlink` serve the
+POSIX-shaped half of the CRT. A descriptor is either a file `_open` made,
+with its own state, or one `_fileno` gave out for a stream, in which case
+it shares the stream's state as the CRT does: a write through the
+descriptor moves where `fgets` reads, and closing it closes the underlying
+file, leaving the stream dangling — undefined behaviour in C, a guest stop
+here. The standard descriptors are 0, 1 and 2: `_read` consumes what the
+host supplied, `_write` appends to the captured output, and neither can be
+sought. Descriptors are the lowest free number from 3, at most 8192. Text
+mode translates CR LF both ways as the streams do. `_O_TEMPORARY` deletes
+the file when the descriptor closes; the wide text modes are not modelled
+and stop the guest; the hint bits change nothing. `_lseek` positions are
+32-bit `long`s: a position no `long` holds is `EINVAL`. `_isatty` is always
+0, as nothing here is a character device. `_access` treats the drive's
+files as readable and writable, so only existence decides. `_unlink` is
+`remove` by another name. All nine services are `implemented` except
+`_open`, which is `partial` for the wide modes.
+
+**The secure open and the stream indicators (#493, second part).**
+`fopen_s` is `fopen` through a pointer: the error number is the result and
+`errno` at once, and the pointer holds null whenever the call does not
+succeed, as Microsoft's page says. A null or empty argument is `EINVAL`,
+and the invalid parameter handler is not modelled. A file stream keeps the
+end-of-file indicator ISO C defines: a read that meets the end (or the
+CTRL+Z of a text stream) sets it, and `feof` reports it for file streams as
+it already did for the standard input. `clearerr` clears the end-of-file
+and error indicators. Nothing raises the error indicator yet, as a failed
+read or write reports its `errno` at the call. `clearerr` is `implemented`;
+`fopen_s` is `partial` for the unmodelled handler.
+
+**The C time services (#459, package 5).** `_gmtime64`/`gmtime`,
+`_localtime64`/`localtime`, `_mktime64`/`mktime`, `asctime`, `_ctime64`/
+`ctime`, `asctime_s`, `_ctime64_s`/`ctime_s`, `clock`, `_difftime64`/
+`difftime` and `strftime` come in through `api-ms-win-crt-time-l1-1-0.dll`.
+The calendar arithmetic is exact (Hinnant's public-domain civil
+conversions). The machine's clock is UTC throughout: Xenora has no answer
+for what zone it stands in, so local time is UTC, `tm_isdst` is 0, and
+`mktime` composes what `gmtime` breaks down. The CRT's shared static
+buffers are reproduced: one `struct tm` for `gmtime`/`localtime`, one
+string for `asctime`/`ctime`. `clock` reads the injected clock's
+performance count in milliseconds. `strftime` covers the documented C
+locale conversions and copies unknown ones verbatim. Times before 1970 or
+after 3000 are `EINVAL`, as the Microsoft pages say. All `implemented`.
+`FileTimeToLocalFileTime` is the identity under the UTC clock (`partial`).
+`GetDateFormatW` and `GetTimeFormatW` belong to the locale package and are
+not served.
+
+**The wide conversions and classification (#459, package 6, first
+part).** `mbtowc`/`wctomb`/`mblen`/`mbstowcs`/`wcstombs`/`mbsrtowcs`/
+`wcsrtombs` through `api-ms-win-crt-convert-l1-1-0.dll`, and `iswctype`,
+`iswalpha` and its siblings, `towlower`/`towupper`, `wcsncat` and
+`_wcsdup` through `api-ms-win-crt-string-l1-1-0.dll`. The C locale is the
+only one the emulator has, and its multibyte encoding is documented as
+the answer: every byte is the wide character of the same value,
+zero-extended, and a wide character above 255 fails the conversion with
+`EILSEQ`. The restartable forms have no shift state to keep and say so.
+The classification is the ASCII table, through `iswctype`'s bits — the
+form mingw-w64 actually imports, as the `isw*` macros inline to it. All
+`implemented`. The wide stream operations and the wide printf forms are
+the rest of package 6 and are not served yet: they need the stream
+orientation machinery, which is their own work.
 
 ### CRT integer conversion
 
@@ -652,6 +754,53 @@ in one package in one group, coherent with the count `GetSystemInfo`
 reports. Numa, cache and group relationships are not modeled yet:
 enumerating them alone answers zero entries. Nothing was compared with
 Windows.
+
+### Encoding conversions and code pages
+
+`MultiByteToWideChar` and `WideCharToMultiByte` convert between the narrow
+and wide forms of three documented public pages: UTF-8 exactly (surrogate
+pairs and the malformed sequences of the Unicode standard's substitution
+included), Windows-1252 and IBM 437. `GetACP` answers UTF-8 — Xenora's
+choice, the value of a Windows installation in its documented UTF-8 mode,
+coherent with the UTF-8 process arguments — and `GetOEMCP` answers 437.
+`IsValidCodePage` is true for exactly the three numbers; `GetCPInfo`
+reports their widest characters and default bytes. Malformed input is
+replaced with U+FFFD unless the caller passes the strict flag, which fails
+with `ERROR_NO_UNICODE_TRANSLATION`; a character the target page cannot
+represent becomes the default byte and raises the caller's flag. A zero
+byte count is the documented failure Microsoft's pages describe, not an
+empty conversion. Nothing was compared with Windows.
+
+### Locale identity
+
+One locale exists: English (United States), which is Xenora's choice. The
+LCID and LANGID getters answer its `0x0409`, `GetUserDefaultLocaleName`
+answers `en-US`, and the `GetLocaleInfo` forms serve its documented public
+strings — the decimal point, the date and time formats, the currency — in
+wide and narrow output. Another locale, an unknown type or the number form
+fails with `ERROR_INVALID_PARAMETER` rather than answering wrong. Nothing
+was compared with Windows.
+
+### String comparison
+
+`lstrcmp`, `CompareString` and the insensitive forms compare in byte order -
+ordinal, not the linguistic order Windows en-US uses - with an ASCII-only
+case fold when insensitivity is requested. Flags Xenora does not implement
+are refused with `ERROR_INVALID_PARAMETER` rather than silently ignored.
+`GetStringTypeW` answers `CT_CTYPE1` classification of ASCII input and
+refuses the other types; `LCMapStringW` maps ASCII case and refuses sort
+keys. Nothing was compared with Windows.
+
+### The console and the standard handles
+
+The three standard devices answer fixed pseudo-handles. `WriteConsole` and
+`printf` append to the same capture in call order; the console code pages
+are UTF-8, coherent with the process code page. `SetStdHandle` changes what
+`GetStdHandle` answers, but console writes and reads still belong to the
+fixed console devices: a redirected handle that is no console fails with
+`ERROR_INVALID_HANDLE`. The console mode bits round-trip without altering
+the capture behavior yet. `ReadConsoleA` hands one input line back with CR
+LF restored. Nothing was compared with Windows.
 
 ### Guest modules
 
@@ -890,7 +1039,7 @@ They are declared in the typed registry (`docs/runtime/services.md`), all
 | `_set_invalid_parameter_handler(handler)` | the previous handler, null at first | No service calls it for an invalid argument |
 | `__p__fmode()`, `__p__commode()` | the address of the guest `int` `_fmode` (initially `_O_TEXT`, `0x4000`, as documented) or `_commode` (initially 0; its documentation gives no initial value) | Nothing reads either until stdio exists |
 | `signal(sig, handler)` | the previous handler, `SIG_DFL` at first; `SIG_ERR` and `errno` `EINVAL` for a signal other than `SIGINT`, `SIGILL`, `SIGFPE`, `SIGSEGV`, `SIGTERM` and `SIGABRT` | No signal is ever raised. One table serves the process |
-| `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | No exception reaches it |
+| `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | Called at the end of an unhandled search (see "Structured exceptions and CPU faults"); no debugger or error-mode handling |
 
 `_fmode` and `_commode` share one 8-byte block allocated from the process heap
 on the first call to either. `ServicesState::crt_app_type` and

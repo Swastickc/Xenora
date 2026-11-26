@@ -25,6 +25,54 @@ unsafe extern "C" {
     fn dup2(source: RawFd, destination: RawFd) -> RawFd;
 }
 
+/// Keep an endpoint owned by the command and inherit it at a distinct descriptor.
+pub(super) fn inherit_endpoint(
+    command: &mut Command,
+    endpoint: OwnedFd,
+    invalid_stdio: &'static str,
+) -> io::Result<RawFd> {
+    let reserved = endpoint.try_clone()?;
+    let fd = reserved.as_raw_fd();
+    if endpoint.as_raw_fd() <= 2 || fd <= 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, invalid_stdio));
+    }
+
+    // SAFETY: both descriptors are owned by the closure and the only operation
+    // before exec is the async-signal-safe dup2 of one live descriptor onto another.
+    unsafe {
+        command.pre_exec(move || {
+            if dup2(endpoint.as_raw_fd(), reserved.as_raw_fd()) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(fd)
+}
+
+/// Adopt an exec-inherited endpoint and keep a close-on-exec duplicate.
+///
+/// # Safety
+/// A live non-stdio descriptor must be unclaimed and owned by the caller.
+pub(super) unsafe fn adopt_endpoint(fd: RawFd, invalid_stdio: &'static str) -> io::Result<OwnedFd> {
+    validate_endpoint(fd, invalid_stdio)?;
+    // SAFETY: the descriptor is live and the caller owns it.
+    let inherited = unsafe { OwnedFd::from_raw_fd(fd) };
+    inherited.try_clone()
+}
+
+/// Check a worker descriptor before any endpoint adoption can allocate a new one.
+pub(super) fn validate_endpoint(fd: RawFd, invalid_stdio: &'static str) -> io::Result<()> {
+    if fd <= 2 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, invalid_stdio));
+    }
+    // SAFETY: same-descriptor dup2 only checks whether the descriptor is live.
+    if unsafe { dup2(fd, fd) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(super) enum Stage {
@@ -113,22 +161,10 @@ impl Reporter {
     /// An open non-stdio descriptor must still belong to the worker's
     /// unclaimed inherited descriptors, with no other code using or closing it.
     pub(super) unsafe fn from_inherited(fd: RawFd) -> io::Result<Self> {
-        if fd <= 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "startup diagnostic descriptor must be outside stdio",
-            ));
-        }
-        // SAFETY: same-descriptor dup2 only checks validity, including when fd is closed.
-        if unsafe { dup2(fd, fd) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: dup2 confirmed the descriptor is live, and the caller
-        // guarantees ownership of any inherited non-stdio descriptor here.
-        let inherited = unsafe { OwnedFd::from_raw_fd(fd) };
-        // Close the inherited number and keep a close-on-exec clone.
-        let channel = UnixStream::from(inherited.try_clone()?);
-        drop(inherited);
+        // SAFETY: the caller owns the unclaimed inherited descriptor.
+        let channel = UnixStream::from(unsafe {
+            adopt_endpoint(fd, "startup diagnostic descriptor must be outside stdio")?
+        });
         channel.peer_addr()?;
         Ok(Self(Some(Arc::new(Mutex::new(Writer {
             channel,
@@ -219,27 +255,11 @@ impl Collector {
         let (supervisor, worker) = UnixStream::pair()?;
         supervisor.set_nonblocking(true)?;
         worker.set_nonblocking(true)?;
-        let reserved = worker.try_clone()?;
-        let fd = reserved.as_raw_fd();
-        if worker.as_raw_fd() <= 2 || fd <= 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "startup diagnostic socket requires non-stdio descriptors",
-            ));
-        }
-
-        // Keep both descriptors owned by the command through spawn. Only the
-        // child's reserved duplicate survives exec, and stdin is inherited normally.
-        // SAFETY: the closure makes only an async-signal-safe dup2 call on
-        // two distinct, live descriptors and reports failures as an OS error.
-        unsafe {
-            command.pre_exec(move || {
-                if dup2(worker.as_raw_fd(), reserved.as_raw_fd()) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        let fd = inherit_endpoint(
+            command,
+            worker.into(),
+            "startup diagnostic socket requires non-stdio descriptors",
+        )?;
         Ok((Self(supervisor), fd))
     }
 

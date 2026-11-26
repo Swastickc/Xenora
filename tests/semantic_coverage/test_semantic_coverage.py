@@ -19,10 +19,11 @@ class SemanticCoverageTests(unittest.TestCase):
             },
         }
 
-    def counts(self, *rows):
+    def counts(self, *rows, decoder=None):
+        if decoder is None:
+            decoder = {("SOP2", "S_SUB_U32")}
         counts, _ = coverage.collect_coverage(
-            self.identified, self.registry, {("SOP2", "S_SUB_U32")},
-            {"instruction": list(rows)},
+            self.identified, self.registry, decoder, {"instruction": list(rows)},
         )
         return dict(zip(coverage.COLUMNS, counts["SOP2"]))
 
@@ -67,6 +68,32 @@ class SemanticCoverageTests(unittest.TestCase):
     def test_declared_but_not_compiled_is_not_decoder_supported(self):
         # S_ADD_U32 is declared in the registry but absent from the compiled tables.
         self.assertEqual(self.counts()["Decoder-supported"], 1)
+
+    def test_stale_decoded_claim_requires_a_compiled_form(self):
+        row = {
+            "form": "s_add_u32", "encoding": "SOP2", "decoded": True,
+            "reference": "implemented", "cpu": "fixture verified", "gpu": "fixture verified",
+        }
+        with self.assertRaisesRegex(ValueError, "S_ADD_U32.*decoder inventory"):
+            self.counts(row)
+
+        generated = coverage.parse_generated(
+            "pub const FORM_IDS: [(&str, EncodingFamily); 1] = [\n"
+            '    ("S_ADD_U32", EncodingFamily::Sop2),\n];'
+        )
+        counts = self.counts(row, decoder=generated | {("SOP2", "S_SUB_U32")})
+        self.assertEqual(counts["Decoder-supported"], 2)
+        self.assertEqual(counts["Reference-verified"], 1)
+        self.assertEqual(counts["Metal-verified"], 1)
+
+    def test_refused_form_can_remain_outside_the_decoder_inventory(self):
+        counts = self.counts({
+            "form": "s_add_u32", "encoding": "SOP2", "decoded": False,
+            "reference": "unsupported", "cpu": "refused", "gpu": "acceptance pending",
+        })
+        self.assertEqual(counts["Decoder-supported"], 1)
+        self.assertEqual(counts["Reference-verified"], 0)
+        self.assertEqual(counts["Metal-verified"], 0)
 
     def test_a_variant_without_its_form_is_an_error_not_a_traceback(self):
         self.registry["encoding_variant"] = [{"family": "VOP3", "opcode": 1, "operands": "x"}]

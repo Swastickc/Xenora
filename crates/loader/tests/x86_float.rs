@@ -418,6 +418,27 @@ fn unmasked_exceptions_stop_without_a_result() {
     assert_eq!(seen, 0x3F);
 }
 
+/// Legacy encodings have eight predicates. Ignoring the reserved bits is a local rule.
+#[test]
+fn legacy_compares_ignore_the_reserved_immediate_bits() {
+    let code = fixture();
+    let compares = vectors().into_iter().filter(|v| v.name.starts_with("cmp"));
+    for vector in compares {
+        let (text, kind) = instruction(vector.name);
+        let (a, b, r9) = inputs(&vector, kind);
+        for high in [0x08, 0x10, 0x20, 0xF8] {
+            let mut code = code[text.as_str()].clone();
+            *code.last_mut().unwrap() |= high;
+            for native in [false, true] {
+                let (cpu, mut memory) = load(&code, vector.mxcsr, a, b, r9);
+                let result = run(native, &cpu, &mut memory, 1);
+                let wanted = expect(&cpu, &vector, kind, code.len());
+                assert_eq!(result.final_state, wanted, "{text} {high:x} {vector:x?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn pre_computation_exceptions_in_any_lane_come_first() {
     let code = fixture();

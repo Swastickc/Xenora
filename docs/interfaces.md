@@ -1305,3 +1305,32 @@ addresses are not modelled. `UnmapViewOfFile` releases the view.
 process information structure, because the guest is the only process.
 This is implemented behaviour verified through the unit tests. Nothing
 here was compared with Windows or with an Xbox console.
+
+## Opt-in synthetic Gaming Runtime lifecycle
+
+`services::gaming_runtime::register_synthetic_lifecycle` registers partial
+`XGameRuntimeInitialize` and `XGameRuntimeUninitialize` services separately
+from standard services. This models one linked library: repeated initialize
+calls succeed without adding references, and teardown releases that library.
+Open GDK queue handles make teardown terminal; future initialization returns
+`E_GAMERUNTIME_UNINITIALIZE_ACTIVEOBJECTS` (0x89240105).
+
+Microsoft documents two layers: library initialization is idempotent, while
+the underlying DLL counts references from libraries. Xenora does not load
+that DLL, implement multi-library reference counts, or expose
+InitializeWithOptions. Existing queue operations retain their separate
+bounded contract. Leaked queue handles remain usable under that contract.
+Concurrent initialization and teardown remain unverified. The queue lock is
+held through teardown so the active-object snapshot stays consistent during
+the transition. Xbox startup remains unverified.
+
+The lifecycle unit suite builds the original Scarlett fixture with native
+ARM64 tools and executes it through the normal startup API twice, checking
+binding, exit status and empty output. The runtime-services suite calls bound
+lifecycle and queue imports through translated guest code, checking
+closed-handle recovery and terminal active-object failure. These are local
+synthetic checks. Independent runtime acceptance remains pending.
+
+Sources: [Initialize](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameruntimeinit/functions/xgameruntimeinitialize),
+[Uninitialize](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameruntimeinit/functions/xgameruntimeuninitialize),
+[InitializeWithOptions](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xgameruntimeinit/functions/xgameruntimeinitializewithoptions).

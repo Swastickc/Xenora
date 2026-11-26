@@ -507,7 +507,9 @@ two zeroed reserved bytes. Polling is non-consuming. A disconnected slot succeed
 command so the host can stop output; invalid indexes, null output, invalid
 sessions and sessions without a running loop are rejected before writing.
 
-The macOS frame-loop fixture polls slot zero and passes changed sequences to a
+The macOS frame-loop fixture polls each XInput slot that has an assigned
+physical controller, plus a previously connected slot once after removal so its
+actuator can stop. Changed sequences for each slot pass to an independent
 GameController/Core Haptics output sink. When the selected controller exposes
 left- and right-handle localities, the XInput left and right motor speeds map
 to continuous haptic intensity on those respective actuators. When it does
@@ -599,7 +601,7 @@ flags or output ranges return `ERROR_BAD_ARGUMENTS` before mutation.
 Hardware-verified vibration output, keystroke event capture, physical battery
 metadata, actual headset/audio endpoints and audio render/capture,
 physical-controller hotplug policy beyond the app's existing
-polling, ordinal 101/102/103 guide-wait/poweroff functions, vibration output for slots one through three,
+polling, ordinal 101/102/103 guide-wait/poweroff functions,
 arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery
 into runtime services; it does not prove physical Xbox controller behavior and
 was not compared with Windows or Xbox hardware.

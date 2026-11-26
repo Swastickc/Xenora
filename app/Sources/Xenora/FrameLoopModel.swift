@@ -112,7 +112,8 @@ final class FrameLoopModel: ObservableObject {
     }
 
     private let api: any FrameLoopAPI
-    private let vibrationSink: any ControllerVibrationSink
+    private let makeVibrationSink: @MainActor () -> any ControllerVibrationSink
+    private var vibrationSinks: [Int: any ControllerVibrationSink] = [:]
     private let readControllers: @MainActor () -> [DetectedController]
     private let sleepBeforePoll: (@MainActor (Duration) async throws -> Void)?
     private static let horizontalButtons = UInt32(XENORA_INPUT_LEFT | XENORA_INPUT_RIGHT)
@@ -121,7 +122,7 @@ final class FrameLoopModel: ObservableObject {
     private var lastSentXInputs = [SentXInput](repeating: SentXInput(), count: 4)
     private var xinputAssignments = [ObjectIdentifier?](repeating: nil, count: 4)
     private var controllerInputError: String?
-    private var lastAppliedVibration: AppliedVibration?
+    private var lastAppliedVibrations = [AppliedVibration?](repeating: nil, count: 4)
     private var session: xenora_session = 0
     private var pollTask: Task<Void, Never>?
     private var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
@@ -132,6 +133,7 @@ final class FrameLoopModel: ObservableObject {
         readController: (@MainActor () -> DetectedController?)? = nil,
         readControllers: (@MainActor () -> [DetectedController])? = nil,
         vibrationSink: (any ControllerVibrationSink)? = nil,
+        vibrationSinkFactory: (@MainActor () -> any ControllerVibrationSink)? = nil,
         sleepBeforePoll: (@MainActor (Duration) async throws -> Void)? = nil
     ) {
         self.api = api
@@ -142,7 +144,13 @@ final class FrameLoopModel: ObservableObject {
         } else {
             self.readControllers = pollGameControllers
         }
-        self.vibrationSink = vibrationSink ?? GameControllerVibrationSink()
+        if let vibrationSinkFactory {
+            makeVibrationSink = vibrationSinkFactory
+        } else if let vibrationSink {
+            makeVibrationSink = { vibrationSink }
+        } else {
+            makeVibrationSink = { GameControllerVibrationSink() }
+        }
         self.sleepBeforePoll = sleepBeforePoll
     }
 
@@ -203,8 +211,8 @@ final class FrameLoopModel: ObservableObject {
         lastSentXInputs = [SentXInput](repeating: SentXInput(), count: 4)
         controllerInputError = nil
         controllerVibrationError = nil
-        lastAppliedVibration = nil
-        vibrationSink.reset()
+        lastAppliedVibrations = [AppliedVibration?](repeating: nil, count: 4)
+        resetVibration()
         completed = 0
         frameId = XENORA_NO_FRAME
         image = nil
@@ -334,7 +342,7 @@ final class FrameLoopModel: ObservableObject {
                 vibrationSupported: vibrationSupported
             )
             guard desired != lastSentXInputs[slot] else { continue }
-            var wire = xinputValues.ffi(
+            let wire = xinputValues.ffi(
                 connected: connected,
                 vibrationSupported: connected && vibrationSupported
             )
@@ -385,36 +393,57 @@ final class FrameLoopModel: ObservableObject {
         return controllers.first { $0.identity == identity }
     }
 
+    private func vibrationSink(for slot: Int) -> any ControllerVibrationSink {
+        if let sink = vibrationSinks[slot] { return sink }
+        let sink = makeVibrationSink()
+        vibrationSinks[slot] = sink
+        return sink
+    }
+
     private func pollVibration() {
-        var raw = xenora_xinput_vibration()
-        let code = api.pollXInputVibration(session, 0, &raw)
-        guard code == XENORA_OK else {
-            let message = "Failed to poll controller vibration (status \(code))."
-            if controllerVibrationError != message { controllerVibrationError = message }
-            return
+        var firstPollError: String?
+        var firstSinkError: String?
+        for slot in 0..<4 {
+            let slotController = controllerForXInputSlot(slot)
+            let wasConnected = lastAppliedVibrations[slot]?.connected == true
+            // A never-connected slot cannot have an actuator to stop. Once a
+            // slot was connected, poll it once more after removal so the host
+            // receives the explicit disconnected zero command.
+            guard slotController != nil || wasConnected else { continue }
+
+            var raw = xenora_xinput_vibration()
+            let code = api.pollXInputVibration(session, UInt32(slot), &raw)
+            guard code == XENORA_OK else {
+                let message = "Failed to poll controller vibration slot \(slot) (status \(code))."
+                if firstPollError == nil { firstPollError = message }
+                continue
+            }
+            let command = XInputVibrationCommand(raw)
+            let application = AppliedVibration(
+                sequence: command.sequence,
+                controller: command.connected ? slotController?.identity : nil,
+                connected: command.connected,
+                enabled: command.enabled
+            )
+            let sink = vibrationSink(for: slot)
+            guard application != lastAppliedVibrations[slot] else {
+                if firstSinkError == nil { firstSinkError = sink.lastError }
+                continue
+            }
+            sink.apply(
+                command: command,
+                haptics: command.connected ? slotController?.haptics : nil
+            )
+            lastAppliedVibrations[slot] = application
+            if firstSinkError == nil { firstSinkError = sink.lastError }
         }
-        let command = XInputVibrationCommand(raw)
-        let application = AppliedVibration(
-            sequence: command.sequence,
-            controller: command.connected ? controllerForXInputSlot(0)?.identity : nil,
-            connected: command.connected,
-            enabled: command.enabled
-        )
-        guard application != lastAppliedVibration else {
-            controllerVibrationError = vibrationSink.lastError
-            return
-        }
-        vibrationSink.apply(
-            command: command,
-            haptics: command.connected ? controllerForXInputSlot(0)?.haptics : nil
-        )
-        lastAppliedVibration = application
-        controllerVibrationError = vibrationSink.lastError
+        controllerVibrationError = firstPollError ?? firstSinkError
     }
 
     private func resetVibration() {
-        vibrationSink.reset()
-        lastAppliedVibration = nil
+        for sink in vibrationSinks.values { sink.reset() }
+        vibrationSinks.removeAll()
+        lastAppliedVibrations = [AppliedVibration?](repeating: nil, count: 4)
     }
 
     func pause() {

@@ -23,10 +23,12 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var live: xenora_session = 0
     private var next: xenora_session = 1
     private var codes: [Operation: Int32] = [:]
+    private var persistentCodes: [Operation: Int32] = [:]
     private var calls: [Operation] = []
     private var sentInputs: [(handle: xenora_session, input: xenora_controller_input)] = []
     private var sentXInputs: [(handle: xenora_session, userIndex: UInt32, input: xenora_xinput_state)] = []
-    private var vibration = xenora_xinput_vibration()
+    private var vibrations = [xenora_xinput_vibration](repeating: xenora_xinput_vibration(), count: 4)
+    private var vibrationPolls: [UInt32] = []
     private var invalidCalls = 0
     private var nextStopGate: StopGate?
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
@@ -37,6 +39,10 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
 
     func fail(_ operation: Operation, _ code: Int32) {
         lock.withLock { codes[operation] = code }
+    }
+
+    func failContinuously(_ operation: Operation, _ code: Int32) {
+        lock.withLock { persistentCodes[operation] = code }
     }
 
     func count(_ operation: Operation) -> Int {
@@ -55,11 +61,14 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
         lock.withLock { sentXInputs.map { ($0.userIndex, $0.input) } }
     }
 
+    var polledVibrationSlots: [UInt32] { lock.withLock { vibrationPolls } }
+
     func reportVibration(
-        sequence: UInt32, left: UInt16, right: UInt16, connected: Bool, enabled: Bool = true
+        sequence: UInt32, left: UInt16, right: UInt16, connected: Bool, enabled: Bool = true,
+        slot: Int? = nil
     ) {
         lock.withLock {
-            vibration = xenora_xinput_vibration(
+            let value = xenora_xinput_vibration(
                 sequence: sequence,
                 left_motor: left,
                 right_motor: right,
@@ -67,6 +76,11 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
                 enabled: enabled ? 1 : 0,
                 reserved: (0, 0)
             )
+            if let slot, vibrations.indices.contains(slot) {
+                vibrations[slot] = value
+            } else {
+                vibrations = [xenora_xinput_vibration](repeating: value, count: 4)
+            }
         }
     }
 
@@ -80,7 +94,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
             invalidCalls += 1
             return Int32(XENORA_INVALID_HANDLE)
         }
-        return codes.removeValue(forKey: operation) ?? Int32(XENORA_OK)
+        return persistentCodes[operation] ?? codes.removeValue(forKey: operation) ?? Int32(XENORA_OK)
     }
 
     func create(_ handle: inout xenora_session) -> Int32 {
@@ -125,8 +139,11 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
         _ handle: xenora_session, _ userIndex: UInt32, _ output: inout xenora_xinput_vibration
     ) -> Int32 {
         lock.withLock {
+            vibrationPolls.append(userIndex)
             let code = call(.pollXInputVibration, handle)
-            if code == XENORA_OK { output = vibration }
+            if code == XENORA_OK, vibrations.indices.contains(Int(userIndex)) {
+                output = vibrations[Int(userIndex)]
+            }
             return code
         }
     }
@@ -263,6 +280,7 @@ func checkFrameLoopFailures() async -> [String] {
         + (await checkFailedStopRecovery())
         + checkControllerComposition() + checkMultiplayerSlots() + checkControllerHandoffs()
         + (await checkControllerErrorRecovery()) + (await checkVibrationOutput())
+        + (await checkMultiSlotVibration())
 }
 
 @MainActor
@@ -426,10 +444,73 @@ private func checkVibrationOutput() async -> [String] {
     expect(model.controllerVibrationError == nil,
            "successful scripted vibration polling published an error")
 
-    api.fail(.pollXInputVibration, Int32(XENORA_INTERNAL_ERROR))
+    api.failContinuously(.pollXInputVibration, Int32(XENORA_INTERNAL_ERROR))
+    api.report(XENORA_LOOP_RUNNING, completed: 2, frame: 0, pixel: 0)
     model.startInteractive()
     expect(await waitForLoop { model.controllerVibrationError?.contains("poll controller vibration") == true },
-           "vibration polling failure was hidden")
+           "vibration polling failure was hidden; polled slots \(api.polledVibrationSlots), error \(String(describing: model.controllerVibrationError))")
+    return failures
+}
+
+@MainActor
+private func checkMultiSlotVibration() async -> [String] {
+    var failures: [String] = []
+    func expect(_ condition: Bool, _ message: String) {
+        if !condition { failures.append(message) }
+    }
+
+    final class Token: NSObject {}
+    func controller(_ token: NSObject, _ name: String) -> DetectedController {
+        DetectedController(
+            identity: ObjectIdentifier(token), name: name, supportsHaptics: true,
+            snapshot: ControllerSnapshot(buttons: 0, x: 0, y: 0, leftTrigger: 0, rightTrigger: 0)
+        )
+    }
+    let firstToken = Token()
+    let secondToken = Token()
+    let first = controller(firstToken, "first rumble")
+    let second = controller(secondToken, "second rumble")
+    var detected = [first, second]
+    var sinks: [RecordingVibrationSink] = []
+    let api = ScriptedFrameLoop()
+    let model = FrameLoopModel(
+        api: api,
+        readControllers: { detected },
+        vibrationSinkFactory: {
+            let sink = RecordingVibrationSink()
+            sinks.append(sink)
+            return sink
+        },
+        sleepBeforePoll: { _ in try await Task.sleep(for: .milliseconds(5)) }
+    )
+    api.reportVibration(sequence: 3, left: 1000, right: 2000, connected: true, slot: 0)
+    api.reportVibration(sequence: 4, left: 3000, right: 4000, connected: true, slot: 1)
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
+    model.startInteractive()
+
+    expect(await waitForLoop { sinks.count == 2 && sinks.allSatisfy { $0.commands.count == 1 } },
+           "multi-slot vibration did not create independent outputs for slots zero and one")
+    guard sinks.count == 2 else {
+        return failures + ["missing multi-slot vibration sinks: \(sinks.count), controllers \(model.controllers.count), polls \(api.polledVibrationSlots)"]
+    }
+    expect(sinks[0].commands.last?.sequence == 3 && sinks[1].commands.last?.sequence == 4,
+           "multi-slot vibration commands were not routed to their respective slots")
+    expect(api.polledVibrationSlots.contains(0) && api.polledVibrationSlots.contains(1),
+           "multi-slot vibration did not poll both occupied slots")
+
+    detected = [first]
+    api.reportVibration(sequence: 4, left: 0, right: 0, connected: false, slot: 1)
+    expect(await waitForLoop { sinks[1].commands.count == 2 },
+           "slot-one disconnect did not reach its independent output")
+    expect(sinks[1].commands.last?.connected == false
+           && sinks[1].commands.last?.leftMotor == 0 && sinks[1].commands.last?.rightMotor == 0,
+           "slot-one disconnect did not stop with a neutral command")
+    expect(sinks[0].commands.count == 1,
+           "slot-one disconnect disturbed the unchanged slot-zero output")
+
+    api.report(XENORA_LOOP_STOPPED, completed: 1, frame: 0, pixel: 0)
+    await model.stop()?.value
+    expect(sinks.allSatisfy { $0.resetCount > 0 }, "terminal loop did not reset every vibration slot")
     return failures
 }
 

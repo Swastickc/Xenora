@@ -510,6 +510,10 @@ fn reference_op(instruction: Instruction) -> Op {
                 VectorUnaryOp::FfbhU32 => VectorUnary::FindFirstOneFromMsb,
                 VectorUnaryOp::FfblB32 => VectorUnary::FindFirstOneFromLsb,
                 VectorUnaryOp::FfbhI32 => VectorUnary::FindSignChange,
+                VectorUnaryOp::TruncF32 => VectorUnary::Truncate,
+                VectorUnaryOp::CeilF32 => VectorUnary::Ceiling,
+                VectorUnaryOp::RndneF32 => VectorUnary::RoundNearestEven,
+                VectorUnaryOp::FloorF32 => VectorUnary::Floor,
             },
             dst,
             match src {
@@ -596,6 +600,18 @@ fn reference_op(instruction: Instruction) -> Op {
                 ScalarUnaryOp::SextI32I8 => ScalarUnary::SignExtendByte,
                 ScalarUnaryOp::SextI32I16 => ScalarUnary::SignExtendShort,
                 ScalarUnaryOp::AbsI32 => ScalarUnary::Absolute,
+                ScalarUnaryOp::AndSaveExecB32 => ScalarUnary::AndSaveExec,
+                ScalarUnaryOp::OrSaveExecB32 => ScalarUnary::OrSaveExec,
+                ScalarUnaryOp::XorSaveExecB32 => ScalarUnary::XorSaveExec,
+                ScalarUnaryOp::Andn2SaveExecB32 => ScalarUnary::Andn2SaveExec,
+                ScalarUnaryOp::Orn2SaveExecB32 => ScalarUnary::Orn2SaveExec,
+                ScalarUnaryOp::NandSaveExecB32 => ScalarUnary::NandSaveExec,
+                ScalarUnaryOp::NorSaveExecB32 => ScalarUnary::NorSaveExec,
+                ScalarUnaryOp::XnorSaveExecB32 => ScalarUnary::XnorSaveExec,
+                ScalarUnaryOp::Andn1SaveExecB32 => ScalarUnary::Andn1SaveExec,
+                ScalarUnaryOp::Orn1SaveExecB32 => ScalarUnary::Orn1SaveExec,
+                ScalarUnaryOp::Andn1WrexecB32 => ScalarUnary::Andn1Wrexec,
+                ScalarUnaryOp::Andn2WrexecB32 => ScalarUnary::Andn2Wrexec,
             };
             Op::ScalarUnary(unary, dst, src)
         }
@@ -810,6 +826,7 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-saveexec.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-immediate.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-integer.bin"),
@@ -817,6 +834,7 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare-ft.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-round.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare-16.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-integer.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-compare.bin"),
@@ -827,7 +845,7 @@ fn compares_fixture_instructions_against_llvm() {
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 172, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 188, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -923,6 +941,13 @@ fn assemble_matrix() -> Vec<u8> {
                 writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, {src0}, v128").unwrap();
             }
             writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, v1, v255").unwrap();
+        }
+    }
+    // Every binary32 rounding form with each accepted SRC0 class: VGPRs at both
+    // ends, SGPRs at both ends, vcc_lo and a literal (no integer inline).
+    for name in ["trunc", "ceil", "rndne", "floor"] {
+        for src0 in ["v255", "v0", "s0", "s105", "vcc_lo", "0x80000001"] {
+            writeln!(assembly, "v_{name}_f32_e32 v128, {src0}").unwrap();
         }
     }
     // Every SOPK compare on the lowest and highest readable SGPR.

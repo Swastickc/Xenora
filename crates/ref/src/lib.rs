@@ -294,6 +294,54 @@ pub enum ScalarUnary {
     SignExtendShort,
     /// D = |S0| (0x80000000 stays), SCC = (D != 0).
     Absolute,
+    /// 60 `s_and_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = S0 & EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 120).
+    AndSaveExec,
+    /// 61 `s_or_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = S0 | EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    OrSaveExec,
+    /// 62 `s_xor_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = S0 ^ EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    XorSaveExec,
+    /// 63 `s_andn2_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = S0 & ~EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    Andn2SaveExec,
+    /// 64 `s_orn2_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = S0 | ~EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    Orn2SaveExec,
+    /// 65 `s_nand_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = ~(S0 & EXEC_LO), SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    NandSaveExec,
+    /// 66 `s_nor_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = ~(S0 | EXEC_LO), SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    NorSaveExec,
+    /// 67 `s_xnor_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = ~(S0 ^ EXEC_LO), SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 121).
+    XnorSaveExec,
+    /// 68 `s_andn1_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = ~S0 & EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 122).
+    Andn1SaveExec,
+    /// 69 `s_orn1_saveexec_b32`: D = the previous EXEC_LO, then
+    /// EXEC_LO = ~S0 | EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 122).
+    Orn1SaveExec,
+    /// 70 `s_andn1_wrexec_b32`: EXEC_LO = ~S0 & EXEC_LO, then
+    /// D = the new EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 122).
+    Andn1Wrexec,
+    /// 71 `s_andn2_wrexec_b32`: EXEC_LO = S0 & ~EXEC_LO, then
+    /// D = the new EXEC_LO, SCC = (EXEC_LO != 0)
+    /// (RDNA 2 ISA guide 12.3, printed page 122).
+    Andn2Wrexec,
 }
 
 /// SOPK operations decoded by the reference interpreter (RDNA 2 ISA guide
@@ -452,8 +500,8 @@ impl VectorInteger {
     }
 }
 
-/// VOP1 32-bit integer and bit forms with a general SRC0 (AMD RDNA 2 ISA
-/// guide section 12.8). None writes VCC or SCC.
+/// VOP1 32-bit integer and bit forms with a general SRC0, and the binary32
+/// rounding forms (AMD RDNA 2 ISA guide section 12.8). None writes VCC or SCC.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VectorUnary {
     /// 55: D = ~S0.
@@ -467,6 +515,14 @@ pub enum VectorUnary {
     /// 59: bits after the sign bit that equal it, from the MSB; -1 if all
     /// 32 bits are equal.
     FindSignChange,
+    /// 33: binary32 integral part, toward zero.
+    Truncate,
+    /// 34: binary32 rounded toward +infinity.
+    Ceiling,
+    /// 35: binary32 rounded to nearest, ties to even.
+    RoundNearestEven,
+    /// 36: binary32 rounded toward -infinity.
+    Floor,
 }
 
 impl VectorUnary {
@@ -478,11 +534,31 @@ impl VectorUnary {
             57 => Self::FindFirstOneFromMsb,
             58 => Self::FindFirstOneFromLsb,
             59 => Self::FindSignChange,
+            33 => Self::Truncate,
+            34 => Self::Ceiling,
+            35 => Self::RoundNearestEven,
+            36 => Self::Floor,
             _ => return None,
         })
     }
 
-    fn apply(self, s0: u32) -> u32 {
+    /// The binary32 rounding forms, which refuse integer inline constants.
+    fn is_float(self) -> bool {
+        matches!(
+            self,
+            Self::Truncate | Self::Ceiling | Self::RoundNearestEven | Self::Floor
+        )
+    }
+
+    /// D for S0, or `None` for an input outside the modeled domain.
+    fn apply(self, s0: u32) -> Option<u32> {
+        if self.is_float() {
+            return round_f32(self, s0);
+        }
+        Some(self.apply_integer(s0))
+    }
+
+    fn apply_integer(self, s0: u32) -> u32 {
         // -1 (all ones) when the scan finds nothing.
         let found = |index: u32| if index == 32 { u32::MAX } else { index };
         match self {
@@ -496,8 +572,55 @@ impl VectorUnary {
                 let positive = if (s0 as i32) < 0 { !s0 } else { s0 };
                 found(positive.leading_zeros())
             }
+            _ => unreachable!("binary32 rounding is handled by round_f32"),
         }
     }
+}
+
+/// Guide 12.8 binary32 rounding of S0 to an integral value.
+///
+/// The value is split into sign, integer significand and power of two, the
+/// integer part and the discarded remainder are compared with half a unit, and
+/// the rounded magnitude is encoded again. Subnormal inputs are read as their
+/// exact values (MODE.FP_DENORM single-precision input denormals allowed, the
+/// pinned ABI mode). RNDNE follows the guide's "round-to-nearest-even
+/// semantics" (IEEE 754 roundTiesToEven), so a zero result keeps the sign of
+/// S0. Refused (`None`): every NaN, whose result the guide leaves to MODE.IEEE
+/// and MODE.DX10_CLAMP.
+fn round_f32(kind: VectorUnary, s0: u32) -> Option<u32> {
+    let negative = s0 >> 31 == 1;
+    let biased = (s0 >> 23) & 0xff;
+    let fraction = s0 & 0x007f_ffff;
+    if biased == 0xff {
+        // Infinity is integral; NaN is refused.
+        return (fraction == 0).then_some(s0);
+    }
+    // |S0| = significand * 2^(power), exactly.
+    let (significand, power) = if biased == 0 {
+        (u64::from(fraction), -149_i32)
+    } else {
+        (u64::from(fraction | 0x0080_0000), biased as i32 - 150)
+    };
+    if power >= 0 {
+        return Some(s0);
+    }
+    let shift = power.unsigned_abs().min(63);
+    let whole = significand >> shift;
+    let remainder = significand - (whole << shift);
+    let half = 1_u64 << (shift - 1);
+    let up = match kind {
+        VectorUnary::Truncate => false,
+        VectorUnary::Ceiling => !negative && remainder != 0,
+        VectorUnary::Floor => negative && remainder != 0,
+        _ => remainder > half || (remainder == half && whole % 2 == 1),
+    };
+    let magnitude = whole + u64::from(up);
+    let sign = s0 & 0x8000_0000;
+    if magnitude == 0 {
+        return Some(sign);
+    }
+    // At most 2^24, so the conversion is exact.
+    Some(sign | (magnitude as f32).to_bits())
 }
 
 /// Execute original little-endian gfx1030 bytes with the synthetic binding ABI.
@@ -671,7 +794,7 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
             // only), OP in 8-15.
             [
                 source,
-                op @ (7 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 26 | 52),
+                op @ (7 | 11 | 13 | 15 | 17 | 19 | 21 | 23 | 25 | 26 | 52 | 60..=71),
                 destination @ 0x80..=0xe9,
                 0xbe,
                 tail @ ..,
@@ -687,6 +810,20 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     23 => ScalarUnary::FindLastSignBit,
                     25 => ScalarUnary::SignExtendByte,
                     26 => ScalarUnary::SignExtendShort,
+                    // The twelve EXEC-writing forms of guide 12.3, printed
+                    // pages 120-122.
+                    60 => ScalarUnary::AndSaveExec,
+                    61 => ScalarUnary::OrSaveExec,
+                    62 => ScalarUnary::XorSaveExec,
+                    63 => ScalarUnary::Andn2SaveExec,
+                    64 => ScalarUnary::Orn2SaveExec,
+                    65 => ScalarUnary::NandSaveExec,
+                    66 => ScalarUnary::NorSaveExec,
+                    67 => ScalarUnary::XnorSaveExec,
+                    68 => ScalarUnary::Andn1SaveExec,
+                    69 => ScalarUnary::Orn1SaveExec,
+                    70 => ScalarUnary::Andn1Wrexec,
+                    71 => ScalarUnary::Andn2Wrexec,
                     _ => ScalarUnary::Absolute,
                 };
                 let (source, length) = decode_scalar(*source, tail, offset)?;
@@ -921,6 +1058,10 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
             {
                 let kind = VectorUnary::from_opcode((packed >> 1) | ((upper & 1) << 7)).unwrap();
                 let dst = (upper >> 1) | ((tag & 1) << 7);
+                let selector = u16::from(*lo) | (u16::from(packed & 1) << 8);
+                if kind.is_float() && (128..=208).contains(&selector) {
+                    return Err(error(offset, "integer inline constant as binary32 source"));
+                }
                 let (src0, length) =
                     decode_vector_source(*lo, *packed, tail, offset, "unsupported VOP1 source")?;
                 (Op::VectorUnary(kind, dst, src0), length)
@@ -1342,7 +1483,10 @@ fn execute_wave(
                         CompareSource::Scalar(register) => read_scalar(Source::Register(register))?,
                         CompareSource::Immediate(bits) => bits,
                     };
-                    results[lane] = Some((dst, kind.apply(s0)));
+                    let value = kind
+                        .apply(s0)
+                        .ok_or_else(|| error(offset, "binary32 input outside rounding domain"))?;
+                    results[lane] = Some((dst, value));
                 }
             }
             // Guide 12.8: tmp = D; D = S0; S0 = tmp, in each active lane.
@@ -1386,28 +1530,57 @@ fn execute_wave(
                 let value = read_scalar(src)?;
                 // -1 (all ones) when no bit is found.
                 let found = |index: u32| if index == 32 { u32::MAX } else { index };
-                let result = match kind {
-                    ScalarUnary::Not => !value,
-                    ScalarUnary::ReverseBits => value.reverse_bits(),
-                    ScalarUnary::CountZeros => value.count_zeros(),
-                    ScalarUnary::CountOnes => value.count_ones(),
-                    ScalarUnary::FindFirstZero => found(value.trailing_ones()),
-                    ScalarUnary::FindFirstOne => found(value.trailing_zeros()),
-                    ScalarUnary::FindLastBit => found(value.leading_zeros()),
+                // The destination value and, for the EXEC-writing forms of
+                // guide 12.3 (printed pages 120-122), the new EXEC_LO. The ten
+                // SAVEEXEC forms leave the previous EXEC_LO in the
+                // destination, the two WREXEC forms the new one.
+                let (result, new_exec) = match kind {
+                    ScalarUnary::Not => (!value, None),
+                    ScalarUnary::ReverseBits => (value.reverse_bits(), None),
+                    ScalarUnary::CountZeros => (value.count_zeros(), None),
+                    ScalarUnary::CountOnes => (value.count_ones(), None),
+                    ScalarUnary::FindFirstZero => (found(value.trailing_ones()), None),
+                    ScalarUnary::FindFirstOne => (found(value.trailing_zeros()), None),
+                    ScalarUnary::FindLastBit => (found(value.leading_zeros()), None),
                     ScalarUnary::FindLastSignBit => {
                         let same = if value >> 31 == 1 {
                             value.leading_ones()
                         } else {
                             value.leading_zeros()
                         };
-                        found(same)
+                        (found(same), None)
                     }
-                    ScalarUnary::SignExtendByte => value as u8 as i8 as i32 as u32,
-                    ScalarUnary::SignExtendShort => value as u16 as i16 as i32 as u32,
-                    ScalarUnary::Absolute => (value as i32).wrapping_abs() as u32,
+                    ScalarUnary::SignExtendByte => (value as u8 as i8 as i32 as u32, None),
+                    ScalarUnary::SignExtendShort => (value as u16 as i16 as i32 as u32, None),
+                    ScalarUnary::Absolute => ((value as i32).wrapping_abs() as u32, None),
+                    ScalarUnary::AndSaveExec => (exec, Some(value & exec)),
+                    ScalarUnary::OrSaveExec => (exec, Some(value | exec)),
+                    ScalarUnary::XorSaveExec => (exec, Some(value ^ exec)),
+                    ScalarUnary::Andn2SaveExec => (exec, Some(value & !exec)),
+                    ScalarUnary::Orn2SaveExec => (exec, Some(value | !exec)),
+                    ScalarUnary::NandSaveExec => (exec, Some(!(value & exec))),
+                    ScalarUnary::NorSaveExec => (exec, Some(!(value | exec))),
+                    ScalarUnary::XnorSaveExec => (exec, Some(!(value ^ exec))),
+                    ScalarUnary::Andn1SaveExec => (exec, Some(!value & exec)),
+                    ScalarUnary::Orn1SaveExec => (exec, Some(!value | exec)),
+                    ScalarUnary::Andn1Wrexec => {
+                        let exec = !value & exec;
+                        (exec, Some(exec))
+                    }
+                    ScalarUnary::Andn2Wrexec => {
+                        let exec = value & !exec;
+                        (exec, Some(exec))
+                    }
                 };
                 scalars[usize::from(dst)] = Some(result);
-                if matches!(
+                if let Some(new_exec) = new_exec {
+                    // The mask does not gate this instruction, but it does
+                    // gate the vector work that follows it.
+                    exec = new_exec;
+                    scalars[EXEC_LO] = Some(new_exec);
+                    runtime_scc = runtime;
+                    scc = Some(new_exec != 0);
+                } else if matches!(
                     kind,
                     ScalarUnary::Not
                         | ScalarUnary::CountZeros

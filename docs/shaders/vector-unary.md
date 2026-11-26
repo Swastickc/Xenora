@@ -1,4 +1,4 @@
-# Wave32 vector unary integer operations and swap
+# Wave32 vector unary operations and swap
 
 Xenora translates six gfx1030 VOP1 integer forms for the synthetic Wave32 compute
 ABI. The AMD RDNA 2 ISA Reference Guide defines the operations in section 12.8,
@@ -36,3 +36,67 @@ the same instruction offset as the interpreters. The
 [LLVM-assembled fixture](../../fixtures/rdna2/vector-unary.s) exercises all
 six forms with a partial EXEC swap. Independent acceptance of the
 translator is pending. Xbox hardware agreement is unknown.
+
+## Binary32 rounding
+
+Four more VOP1 forms round a binary32 value to an integral value, defined by
+the pseudocode in guide section 12.8 (page 140 of the 30 November 2020 guide).
+
+| Form | Result in each active lane |
+| --- | --- |
+| `v_trunc_f32_e32` | Round toward zero. |
+| `v_ceil_f32_e32` | Round toward +infinity. |
+| `v_rndne_f32_e32` | Round to nearest, ties to even. |
+| `v_floor_f32_e32` | Round toward -infinity. |
+
+SRC0 is a VGPR, `s0`–`s105`, `vcc_lo` or a literal word. Integer inline
+constants are refused, because the guide does not say whether a float operation
+reads them as integer bits or as converted values. Float inline constants stay
+outside the VOP1 subset. EXEC, VCC and SCC behave as for the integer forms.
+
+The results depend on the MODE register (guide sections 3.5 and 6.4) in two
+ways, and Xenora does not model MODE writes:
+
+- Subnormal inputs. The compute ABI pins MODE.FP_DENORM single-precision input
+  denormals as allowed (modes 1 or 3). A subnormal input keeps its exact value,
+  so `v_floor_f32` of the smallest negative subnormal gives -1.0. Under input
+  flushing (modes 0 and 2) it would give -0, which is outside the contract.
+  Results are integers or signed zeros, so output flushing changes nothing.
+- NaN inputs. The pseudocode has no NaN case, and MODE.IEEE and
+  MODE.DX10_CLAMP change NaN results. NaN inputs are an unsupported operand
+  variant (`src_nan`). The CPU interpreters refuse every quiet or signalling
+  NaN input. The Metal kernel passes a NaN's bits through unchanged, so a
+  signalling NaN (for example `0x7f800001`) stays signalling, where hardware
+  with MODE.IEEE = 1 presumably quiets it. That result is not verified.
+
+The guide describes `v_rndne_f32` as "Round-to-nearest-even semantics", and
+Xenora implements that description as IEEE 754 roundTiesToEven. Its pseudocode,
+`floor(S0 + 0.5)` corrected for even ties, agrees when read in exact
+arithmetic except for the sign of a zero result: for a negative input of
+magnitude at most 0.5 (including -0 and the negative subnormals) it would give
++0, while round-to-nearest-even gives -0. Xenora returns -0. The interpreters
+can only refuse NaN lane data at run time, so the translator still accepts
+those programs.
+
+The MSL computes every result from the register bits with unsigned integer
+operations: no Metal float operation runs, so fast math, subnormal flushing
+and NaN handling in Metal cannot change a result. Constant sources are not
+folded on the CPU, so the generated MSL is the only translator path. The CPU
+reference splits the value into an integer significand and a power of two; the
+second interpreter rounds the exactly widened binary64 value on the host.
+Neither shares code with the MSL.
+
+The [guide-derived oracle](../../tests/validation/tests/vop1_float_rounding.rs)
+has a hand-written table of 43 inputs (signed zeros, infinities, quiet and
+signalling NaNs, the smallest and largest subnormals, values one unit in the
+last place around 0.5, 1, 2.5 and 2^23, halfway values) and a transcription of
+the pseudocode checked against it. Its 152 accepted cases pass on both CPU
+interpreters and, through the translator, on native Metal (Apple M4, macOS
+27.2.1, API and shader validation on: 152 cases in 65 programs). Both
+interpreters refuse the 604 rejected encodings at the instruction and the 32
+NaN-input programs at the ALU word (CPU only; these are not read back on
+Metal), and the compiler refuses the 604 encodings at the same offset. The
+[LLVM-assembled fixture](../../fixtures/rdna2/vector-round.s) exercises all
+four forms, a partial EXEC and a literal source, and the LLVM three-way check
+covers each form with every accepted source class. Independent acceptance is
+pending. Xbox hardware agreement is unknown.

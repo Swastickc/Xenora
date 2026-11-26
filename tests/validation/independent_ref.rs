@@ -9,7 +9,9 @@
 //! a defect in the production decoder or reference cannot cancel out here.
 //!
 //! Scope matches the demo fixtures: scalar move, eleven SOP1 unary forms
-//! (NOT, BREV, BCNT0/1, FF0/1, FLBIT, FLBIT_I32, SEXT_I8/I16, ABS), the twelve SOPC 32-bit integer
+//! (NOT, BREV, BCNT0/1, FF0/1, FLBIT, FLBIT_I32, SEXT_I8/I16, ABS), the
+//! twelve SOP1 SAVEEXEC and WREXEC forms (AND, OR, XOR, ANDN2, ORN2, NAND,
+//! NOR, XNOR, ANDN1, ORN1, ANDN1_WREXEC and ANDN2_WREXEC), the twelve SOPC 32-bit integer
 //! compares, branch, SOP2 unsigned
 //! and signed add and subtract, add-with-carry, subtract-with-borrow, AND, OR
 //! and XOR, the stage C forms ANDN2, ORN2, NAND, NOR, XNOR, LSHL, LSHR and
@@ -17,7 +19,9 @@
 //! MUL_I32, BFE (U32, I32), ABSDIFF, LSHL1-4_ADD and MUL_HI (U32, I32), VOP1 move
 //! (including from an SGPR), the VOP1 integer forms NOT, BFREV, FFBH_U32,
 //! FFBL_B32 and FFBH_I32 (any SRC0 a VOPC compare takes; bit scans as the
-//! guide's loops over bits from integer division) and SWAP_B32 (VGPR SRC0),
+//! guide's loops over bits from integer division), the binary32 rounding
+//! forms TRUNC, CEIL, RNDNE and FLOOR (host binary64 rounding of the exactly
+//! widened input; NaN inputs and integer inline constants are refused) and SWAP_B32 (VGPR SRC0),
 //! VOP2 bitwise, shift, arithmetic-shift and float, the VOP2 integer forms
 //! MUL_I32_I24, MUL_HI_I32_I24, MUL_U32_U24, MUL_HI_U32_U24, MIN/MAX (I32,
 //! U32), XNOR and ADD/SUB/SUBREV_NC_U32 (any SRC0 a VOPC compare takes; a
@@ -44,6 +48,10 @@
 const MAX_CODE_BYTES: usize = 1024;
 const MAX_INPUT_WORDS: usize = 4096;
 
+/// The SGPR number of EXEC_LO (guide 3.3, printed page 13). EXEC_HI is 127
+/// and is never written by the forms in this subset.
+const EXEC_LO: usize = 126;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Src {
     Reg(u8),
@@ -64,6 +72,10 @@ enum Insn {
     SMov(u8, Src),
     /// SOP1 unary opcode 7, 11, 13, 15, 17, 19, 21, 23, 25, 26 or 52.
     SUnary(u32, u8, Src),
+    /// SOP1 opcode 60-71: the ten SAVEEXEC forms (60-69) and the two WREXEC
+    /// forms (70-71). Each writes the destination and EXEC_LO, in the order
+    /// the guide's pseudocode gives.
+    SSaveExec(u32, u8, Src),
     /// SOP2 opcode 0-10, 14, 16, 18, an even opcode 20-36, 38-40, 44, 46-49,
     /// 53 or 54.
     SAlu(u32, u8, Src, Src),
@@ -102,7 +114,7 @@ enum Insn {
     /// VOP2 integer opcode 9-12, 17-20, 30 or 37-39: VDST, SRC0, VSRC1.
     VInt(u32, u8, CmpSrc, u8),
     VIntVcc(u32, u8, CmpSrc, u8),
-    /// VOP1 integer opcode 55-59: VDST, SRC0.
+    /// VOP1 integer opcode 55-59 or binary32 rounding opcode 33-36: VDST, SRC0.
     VUnary(u32, u8, CmpSrc),
     /// `v_swap_b32 vD, vS` (VOP1 opcode 101).
     VSwap(u8, u8),
@@ -170,7 +182,7 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
         .collect();
     // Scalar state is wave-uniform and shared by all lanes.
     let mut sgpr = [None::<u32>; 128];
-    sgpr[126] = Some(u32::MAX);
+    sgpr[EXEC_LO] = Some(u32::MAX);
     let mut scc: Option<bool> = None;
     // sgpr[106] holds VCC_LO's value; this flag marks it lane-derived.
     let mut vcc_lane_derived = false;
@@ -189,7 +201,7 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                 }
             }
         };
-        let execution_mask = match read_s(&sgpr, Src::Reg(126)) {
+        let execution_mask = match read_s(&sgpr, Src::Reg(EXEC_LO as u8)) {
             Ok(mask) => mask,
             Err(error) => return Err(wave_error(&mut lanes, error)),
         };
@@ -268,6 +280,28 @@ fn run_wave(program: &[(usize, Insn)], wave: &[u32]) -> Result<Vec<u32>, String>
                         if let Some(flag) = flag {
                             scc = Some(flag);
                         }
+                        None
+                    })
+                }
+            }
+            Insn::SSaveExec(opcode, dst, src) => {
+                if dst < 8 {
+                    Err(format!("{offset:#x}: write to a resource SGPR"))
+                } else {
+                    let exec_lo = sgpr[EXEC_LO]
+                        .ok_or_else(|| format!("{offset:#x}: uninitialized exec_lo"))?;
+                    read_s(&sgpr, src).map(|value| {
+                        // Guide 12.3, printed pages 120-122: the ten SAVEEXEC
+                        // forms write the previous EXEC_LO to the destination
+                        // and then update EXEC_LO; the two WREXEC forms update
+                        // EXEC_LO first and write the new value. The mask does
+                        // not affect scalar execution, so the form runs even
+                        // when EXEC_LO is zero.
+                        let updated = saveexec_mask(opcode, value, exec_lo);
+                        let destination = if opcode <= 69 { exec_lo } else { updated };
+                        sgpr[dst as usize] = Some(destination);
+                        sgpr[EXEC_LO] = Some(updated);
+                        scc = Some(updated != 0);
                         None
                     })
                 }
@@ -690,6 +724,47 @@ fn scalar_unary(opcode: u32, value: u32) -> (u32, Option<bool>) {
     (result, flag)
 }
 
+/// RDNA 2 ISA guide 12.3, printed pages 120-122: the new EXEC_LO of the
+/// twelve SAVEEXEC and WREXEC forms, one bit at a time, so that the oracle
+/// does not use the host's bitwise operators on the mask. The guide's
+/// pseudocode names the bits of S0 and of the old EXEC_LO; the ten SAVEEXEC
+/// forms (60-69) and the two WREXEC forms (70-71) differ only in the order
+/// of the two writes, which the caller applies.
+fn saveexec_mask(opcode: u32, s0: u32, exec: u32) -> u32 {
+    let bits = |value: u32| {
+        let mut bits = [false; 32];
+        let mut rest = u64::from(value);
+        for slot in &mut bits {
+            *slot = rest % 2 == 1;
+            rest /= 2;
+        }
+        bits
+    };
+    let (a, b) = (bits(s0), bits(exec));
+    let word =
+        |bits: [bool; 32]| (0..32).rev().fold(0u64, |w, i| w * 2 + u64::from(bits[i])) as u32;
+    let mut out = [false; 32];
+    for i in 0..32 {
+        // `a` is a bit of S0 and `b` a bit of the old EXEC_LO.
+        out[i] = match opcode {
+            60 => a[i] && b[i],
+            61 => a[i] || b[i],
+            62 => a[i] != b[i],
+            63 => a[i] && !b[i],
+            64 => a[i] || !b[i],
+            65 => !(a[i] && b[i]),
+            66 => !(a[i] || b[i]),
+            67 => !(a[i] != b[i]),
+            68 => !a[i] && b[i],
+            69 => !a[i] || b[i],
+            70 => !a[i] && b[i],
+            71 => a[i] && !b[i],
+            _ => unreachable!("not a SAVEEXEC or WREXEC opcode"),
+        };
+    }
+    word(out)
+}
+
 fn read_vgpr(lane: &Lane, reg: u8, offset: usize) -> Result<u32, String> {
     if reg == 0 {
         return Err(format!("{offset:#x}: v0 is the resource index"));
@@ -1035,7 +1110,12 @@ fn lane_step(
                 CmpSrc::Imm(value) => value,
                 CmpSrc::Vgpr(reg) => read_v(reg)?,
             };
-            (dst, vector_unary(opcode, a))
+            let d = if (33..=36).contains(&opcode) {
+                vector_round(opcode, a, offset)?
+            } else {
+                vector_unary(opcode, a)
+            };
+            (dst, d)
         }
         // Guide 12.8: tmp = D; D = S0; S0 = tmp. Both are VGPR writes.
         Insn::VSwap(dst, src0) => {
@@ -1058,6 +1138,26 @@ fn lane_step(
     };
     lane.vgpr[value.0 as usize] = Some(value.1);
     Ok(())
+}
+
+/// D of VOP1 binary32 rounding opcode 33-36 (guide 12.8) for S0 = `bits`.
+///
+/// Widening to binary64 is exact, subnormals included (input denormals
+/// allowed), and the binary64 integral result converts back exactly.
+fn vector_round(opcode: u32, bits: u32, offset: usize) -> Result<u32, String> {
+    let x = f64::from(f32::from_bits(bits));
+    if x.is_nan() {
+        return Err(format!(
+            "{offset:#x}: NaN rounding input is outside the domain"
+        ));
+    }
+    let rounded = match opcode {
+        33 => x.trunc(),
+        34 => x.ceil(),
+        35 => x.round_ties_even(),
+        _ => x.floor(),
+    };
+    Ok((rounded as f32).to_bits())
 }
 
 /// D of VOP1 integer opcode `opcode` (guide 12.8 pseudocode) for S0 = `value`.
@@ -1282,7 +1382,10 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
     if first >> 25 == 0b011_1111 {
         let dst = (first >> 17) as u8;
         match (first >> 9) & 0xff {
-            opcode @ 55..=59 => {
+            opcode @ (33..=36 | 55..=59) => {
+                if opcode <= 36 && (128..=208).contains(&(first & 0x1ff)) {
+                    return Err(fail("integer inline constant as a binary32 source"));
+                }
                 let (src0, len) = vector_src0(code, offset, first, "VOP1")?;
                 return Ok((Insn::VUnary(opcode, dst, src0), len));
             }
@@ -1388,6 +1491,17 @@ fn decode_one(code: &[u8], offset: usize) -> Result<(Insn, usize), String> {
         }
         let (src, len) = scalar_source(code, offset, first as u8)?;
         return Ok((Insn::SUnary(sop1_op, dst, src), len));
+    }
+    // The twelve SAVEEXEC and WREXEC forms share the SOP1 encoding. Guide
+    // 12.3, printed pages 120-122: the destination is a normal SGPR, so
+    // EXEC_LO and EXEC_HI are refused as destinations.
+    if first >> 23 == 0b1_0111_1101 && (60..=71).contains(&sop1_op) {
+        let dst = ((first >> 16) & 0x7f) as u8;
+        if dst > 105 {
+            return Err(fail("unsupported SOP1 destination"));
+        }
+        let (src, len) = scalar_source(code, offset, first as u8)?;
+        return Ok((Insn::SSaveExec(sop1_op, dst, src), len));
     }
     if first & 0xff80_ff00 == 0xbe80_0300 {
         let dst = ((first >> 16) & 0x7f) as u8;

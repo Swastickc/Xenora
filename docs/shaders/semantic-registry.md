@@ -116,8 +116,8 @@ error.
 | `family` | Encoding family; must match the XML base encoding | e.g. `SOP2` |
 | `opcode` | Opcode; must match the XML | non-negative integer |
 | `variant` | Rust enum variant of the typed operation | CamelCase, e.g. `AddU32` |
-| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr`, `min`, `max`, `cselect`, `bfm`, `mul`, `mul_hi`, `bfe`, `absdiff`, `lshl_add`, `mul24`, `mul_hi24` (vector only), `mov` (SOP1 and SOPK), `cmov` (SOPK only), `compare` and the SOP1 unaries |
-| `signedness` | How operands are read | `unsigned`, `signed`, `bitwise` (always `bitwise` for the logical operations, `cselect` and `bfm`; never for the arithmetic ones, `add`, `sub`, `min`, `max`, `mul`, `mul_hi`, `bfe`, `absdiff` and `lshl_add`; shifts take their primitive's signedness) |
+| `operation` | The primitive the form uses | `add`, `sub`, `and`, `or`, `xor`, `andn2`, `orn2`, `nand`, `nor`, `xnor`, `lshl`, `lshr`, `ashr`, `min`, `max`, `cselect`, `bfm`, `mul`, `mul_hi`, `bfe`, `absdiff`, `lshl_add`, `mul24`, `mul_hi24` (vector only), `mov` (SOP1 and SOPK), `cmov` (SOPK only), `compare`, the SOP1 unaries and the VOP1 binary32 roundings `trunc`, `ceil`, `rndne` and `floor` |
+| `signedness` | How operands are read | `unsigned`, `signed`, `bitwise`, `float` (`float` exactly for the binary32 roundings; always `bitwise` for the logical operations, `cselect` and `bfm`; never for the arithmetic ones, `add`, `sub`, `min`, `max`, `mul`, `mul_hi`, `bfe`, `absdiff` and `lshl_add`; shifts take their primitive's signedness) |
 | `carry_in` | Implicit carry, borrow or select input | `none`, `scc` for unsigned scalar `add` and `sub` and required for scalar `cselect`, `vcc` for the Wave32 VOP2 select and carry forms |
 | `width` | Operand and result width in bits (operand width for compares) | `32`, `16` with `vopc_vcc_half`, or `64` with `vopc_vcc_pair` |
 | `source_bits` | Sign extension only: the low bits of S0 that are read. The XML must list S0 with that size and format (`FMT_NUM_I8` or `FMT_NUM_I16`) | `8`, `16`; required for `sext`, rejected elsewhere |
@@ -126,8 +126,8 @@ error.
 | `shift_amount` | `lshl_add` only: the fixed left shift of S0 before the add | `1` to `4`; required for `lshl_add`, rejected elsewhere |
 | `shift_count_bits` | Shifts only: the low bits of the count source used as the count: S1, or S0 for a vector form with `source_order = "reversed"`. Scalar forms mask it in the generated evaluation, vector forms in their MSL template; the XML must list the count source as unsigned | `5` (log2 of `width`); required for shifts, rejected elsewhere |
 | `scc` | What the form writes to SCC | `carry_out`, `borrow`, `signed_overflow`, `nonzero`, `relation` (SOPC and SOPK compares only), `selected_src0` (min and max: S0 won the strict compare, so a tie gives 0), `unchanged` |
-| `vcc`, `exec` | Implicit effect on VCC and EXEC | `vcc` is `lane_mask` for [VOPC compares](vector-compare.md) and the three [VOP2 carry forms](vector-vcc.md). These write all of VCC_LO, zero inactive lane bits and leave VCC_HI unknown. Other forms declare `vcc` as `unchanged`. All forms declare `exec` as `unchanged`. Operand rules cover explicit destinations. |
-| `wave` | Wave sizes the form is valid in | `wave32` for SOPP controls, VOPC compares, VOP1 integer forms and VCC-reading VOP2 forms in the Wave32 compute fixture ABI, `any` for other registry forms |
+| `vcc`, `exec` | Implicit effect on VCC and EXEC | `vcc` is `lane_mask` for [VOPC compares](vector-compare.md) and the three [VOP2 carry forms](vector-vcc.md). These write all of VCC_LO, zero inactive lane bits and leave VCC_HI unknown. Other forms declare `vcc` as `unchanged`. `exec` is `unchanged` for every form except the twelve [SOP1 EXEC-writing forms](sop1-saveexec.md), which declare `exec_save` or `exec_write`. Operand rules cover explicit destinations. |
+| `wave` | Wave sizes the form is valid in | `wave32` for SOPP controls, VOPC compares, VOP1 integer and rounding forms and VCC-reading VOP2 forms in the Wave32 compute fixture ABI, `any` for other registry forms |
 | `operands` | Name of an `[operand_rules]` entry for the same family | e.g. `sop2_sgpr` |
 | `spec` | References `{ document, section, page }` | at least one `guide` reference with a page above 0 |
 | `verify` | Evidence the form needs before it counts as verified | `reference`, `independent`, `metal`, `llvm_encoding` |
@@ -207,7 +207,10 @@ integer as SRC0 and a VGPR pair as VSRC1. All three declare a `relation`,
 64-bit VCC output must be present and is accounted for by `lane_mask`. Signedness
 still matters for `eq` and `lg`, because the MSL lowering casts signed operands.
 The VOP3A variants redirect the same Wave32 mask to SDST. EXEC-writing
-compares (`v_cmpx_*`) and Wave64 stay unsupported.
+compares (`v_cmpx_*`) and Wave64 stay unsupported. The SOP1 forms that write
+EXEC are the exception: they declare `exec_save` or `exec_write`, and the
+generator checks that their XML record has one implicit EXEC read and one
+implicit EXEC write.
 
 A SOPC compare must use an operand rule of the compare kind (`sopc_scalar`: two
 sources, no destination), a unary operation one of the unary kind (`sop1_sgpr`:

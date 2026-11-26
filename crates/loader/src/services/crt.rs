@@ -347,7 +347,27 @@ pub(super) fn register_conversions(registry: &mut ImportRegistry) {
             parse_integer(memory, args, cpu.gs_base, signed, wide_result, unit)
         });
         registry.alias("api-ms-win-crt-convert-l1-1-0.dll", UCRT, symbol);
+        // The legacy CRT exports the narrow integer parses under the same
+        // names; the wide forms are the legacy CRT's own spellings too.
+        registry.alias(MSVCRT, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+}
+
+/// The console key input of the legacy CRT. `_getch` reads one key
+/// without echo and `_getche` with it, directly from the console rather
+/// than stdin. The machine's console input buffer is empty - no keyboard
+/// exists - so a read would block the one executor forever. Blocking is
+/// not modelled: the honest answer for a program that actually asks for a
+/// key is to stop, while a program that merely imports the forms - the
+/// common case, since the legacy CRT binds them transitively - runs
+/// undisturbed.
+pub(super) fn register_conio(registry: &mut ImportRegistry) {
+    for symbol in ["_getch", "_getche"] {
+        registry.register(MSVCRT, symbol, |_, _, _| {
+            Err(ExitReason::IllegalInstruction(0xFE))
+        });
+        registry.set_status(MSVCRT, symbol, ServiceStatus::Partial);
     }
 }
 
@@ -1297,4 +1317,42 @@ fn format_integer(
         .write_bytes(buffer, &digits)
         .map_err(ExitReason::MemoryFault)?;
     Ok(buffer)
+}
+
+#[cfg(test)]
+#[test]
+fn the_legacy_crt_aliases_the_integer_parses_and_the_console_keys_stop() {
+    use crate::cpu::CpuState;
+    use crate::import_table::ImportName;
+
+    let mut registry = ImportRegistry::new();
+    register_conversions(&mut registry);
+    register_conio(&mut registry);
+    // The legacy CRT resolves the integer parses through the alias: the
+    // strtol family busybox imports from msvcrt.dll is the ucrtbase engine.
+    for symbol in [
+        "strtol",
+        "strtoul",
+        "strtoll",
+        "strtoull",
+        "_strtoi64",
+        "_strtoui64",
+    ] {
+        assert!(
+            registry
+                .resolve(MSVCRT, &ImportName::Name(symbol.to_owned()))
+                .is_some(),
+            "{symbol} resolves through the legacy CRT"
+        );
+    }
+    // The console keys are registered - a program importing them binds -
+    // and calling one stops the guest because the empty console input
+    // would block the one executor forever.
+    let mut memory = GuestMemory::new();
+    let cpu = CpuState::default();
+    let service = registry
+        .resolve(MSVCRT, &ImportName::Name("_getch".to_owned()))
+        .expect("_getch resolves");
+    let result = (service.handler)(&Win64Args::new(&cpu), &mut CpuState::default(), &mut memory);
+    assert!(matches!(result, Err(ExitReason::IllegalInstruction(0xFE))));
 }

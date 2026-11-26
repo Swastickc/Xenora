@@ -1,0 +1,12 @@
+0000: t0 = load.u32 input[index]
+000c: t1 = trunc.f32 t0
+0010: t2 = ceil.f32 t0
+0014: t3 = rndne.f32 t0
+0020: t4 = floor.f32 t0
+0020: t5 = merge.lanes mask=0x55555555, t4, t3
+0028: t6 = const.u32 0x40200000
+0028: t7 = rndne.f32 t6
+0030: t8 = xor.b32 t1, t2
+0034: t9 = xor.b32 t5, t8
+0038: t10 = xor.b32 t7, t9
+003c: store.u32 output[index], t10

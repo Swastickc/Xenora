@@ -65,6 +65,7 @@ OPERATIONS = {
     **{name: variant for name, (variant, _, _) in CONTROL_OPERATIONS.items()},
     "add": "Add", "sub": "Sub", "and": "And", "or": "Or", "xor": "Xor",
     "andn2": "AndNot", "orn2": "OrNot", "nand": "Nand", "nor": "Nor", "xnor": "Xnor",
+    "andn1": "AndNot0", "orn1": "OrNot0",
     "lshl": "ShiftLeft", "lshr": "LogicalShiftRight", "ashr": "ArithmeticShiftRight",
     "compare": "Compare",
     "not": "Not", "brev": "ReverseBits", "bcnt0": "CountZeros", "bcnt1": "CountOnes",
@@ -75,9 +76,15 @@ OPERATIONS = {
     "absdiff": "AbsoluteDifference", "lshl_add": "ShiftLeftAdd",
     "mul24": "Multiply24", "mul_hi24": "MultiplyHigh24",
     "mov": "Move", "cmov": "ConditionalMove", "swap": "Swap",
+    "trunc": "Truncate", "ceil": "Ceiling", "rndne": "RoundNearestEven", "floor": "Floor",
 }
 # Unary operations read one source; they need an operand rule of the unary kind.
-UNARY = {"not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs"}
+UNARY = {
+    "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs",
+    "trunc", "ceil", "rndne", "floor",
+}
+# Binary32 rounding to an integral value (guide 12.8). They take float operands only.
+FLOAT_ROUNDING = {"trunc", "ceil", "rndne", "floor"}
 # Sign extension reads only the low source_bits of S0 (required for sext only).
 SOURCE_BITS_KEY = "source_bits"
 SOURCE_BITS = {8, 16}
@@ -113,6 +120,7 @@ COMPARE_PRIMITIVES = {
 # the signedness their primitive names, and their S1 is an unsigned count.
 LOGICAL = {
     "and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor",
+    "andn1", "orn1",
     "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "cselect", "bfm", "swap",
 }
 ARITHMETIC = {
@@ -129,6 +137,7 @@ SOURCE_FORMATS = {
     "signed": {"FMT_NUM_I32"},
     "unsigned": {"FMT_NUM_U32"},
     "bitwise": {"FMT_NUM_U32", "FMT_NUM_B32"},
+    "float": {"FMT_NUM_F32"},
 }
 # Optional keys: required exactly when the condition holds.
 SHIFT_KEY = "shift_count_bits"
@@ -139,7 +148,7 @@ SHIFT_AMOUNTS = {1, 2, 3, 4}
 # declare it; the XML records no operand order.
 SOURCE_ORDER_KEY = "source_order"
 SOURCE_ORDERS = {"reversed"}
-SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise"}
+SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise", "float": "Float"}
 CARRY_IN = {"none": "None", "scc": "Scc", "vcc": "Vcc"}
 SCC = {
     "unchanged": "Unchanged",
@@ -154,6 +163,13 @@ SCC = {
 # sdst_lane_mask: the Wave32 compare result written to explicit VOP3A SDST.
 # EXEC writes such as v_cmpx have no contract, so exec must stay unchanged.
 MASK = {"unchanged": "Unchanged", "lane_mask": "LaneMask", "sdst_lane_mask": "SdstLaneMask"}
+# Effects on the EXEC mask. `exec_save` writes the combined result to EXEC_LO and
+# leaves the previous EXEC_LO in the destination; `exec_write` writes the combined
+# result to both EXEC_LO and the destination. Guide 12.3, printed pages 117-122.
+EXEC = {"unchanged": "Unchanged", "exec_save": "ExecSave", "exec_write": "ExecWrite"}
+# The operations that combine S0 with EXEC_LO. The EXEC operand is the second one,
+# except for andn1 and orn1, which negate the first.
+EXEC_COMBINE = {"and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor", "andn1", "orn1"}
 WAVE = {"any": "Any", "wave32": "Wave32"}
 # The synthetic compute fixture ABI fixes the wave size for these operand-rule
 # kinds and for the VCC-reading VOP2 rule. Other forms declare "any".
@@ -196,6 +212,8 @@ PRIMITIVES = {
     ("xor", "bitwise"): ("nonzero", "xor_nonzero_b32", False),
     ("andn2", "bitwise"): ("nonzero", "andn2_nonzero_b32", False),
     ("orn2", "bitwise"): ("nonzero", "orn2_nonzero_b32", False),
+    ("andn1", "bitwise"): ("nonzero", "andn1_nonzero_b32", False),
+    ("orn1", "bitwise"): ("nonzero", "orn1_nonzero_b32", False),
     ("nand", "bitwise"): ("nonzero", "nand_nonzero_b32", False),
     ("nor", "bitwise"): ("nonzero", "nor_nonzero_b32", False),
     ("xnor", "bitwise"): ("nonzero", "xnor_nonzero_b32", False),
@@ -276,7 +294,9 @@ UNSUPPORTED_COMBOS = {
 # which SOP2 groups under src_vcc and src_special).
 # VOP3 rules also name source classes and encoding fields they refuse.
 VOP3_COMBOS = {"src_sgpr", "src_inline", "src_literal", "modifiers", "src2"}
-ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi"} | VOP3_COMBOS
+# src_nan: a NaN value in a float source, whose result depends on MODE.IEEE
+# and MODE.DX10_CLAMP (guide 3.5); the translator does not model it.
+ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi", "src_nan"} | VOP3_COMBOS
 VOP3_VGPR2_UNSUPPORTED = {
     "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
     "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
@@ -288,6 +308,10 @@ VECTOR_UNARY_PRIMITIVES = {
     ("flbit", "unsigned"): "FindHighUnsigned",
     ("ff1", "bitwise"): "FindLow",
     ("flbit", "signed"): "FindHighSigned",
+    ("trunc", "float"): "TruncateF32",
+    ("ceil", "float"): "CeilingF32",
+    ("rndne", "float"): "RoundNearestEvenF32",
+    ("floor", "float"): "FloorF32",
 }
 
 OPERAND_RULES = {
@@ -325,6 +349,23 @@ OPERAND_RULES = {
         "unsupported": {
             "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_float_inline",
             "src_special",
+        },
+        "kind": "vector_unary",
+    },
+    # Binary32 rounding: the guide does not say how a float operation reads an
+    # integer inline constant, so only VGPR, SGPR, vcc_lo and literal SRC0 are kept.
+    "vop1_f32": {
+        "rust": "Vop1F32",
+        "enum": "VectorUnaryOp",
+        "shape": {
+            "family": "VOP1",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [{"field": "SRC0", "class": "vector_source"}],
+            "max_literals": 1,
+        },
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special", "src_nan",
         },
         "kind": "vector_unary",
     },
@@ -397,6 +438,19 @@ OPERAND_RULES = {
             "max_literals": 1,
         },
         "unsupported": UNSUPPORTED_COMBOS - {"two_literals", "dst_vcc", "dst_exec"},
+        "kind": "unary",
+    },
+    "sop1_saveexec": {
+        "rust": "Sop1SaveExec",
+        "enum": "ScalarUnaryOp",
+        "shape": {
+            "family": "SOP1",
+            "dst": {"field": "SDST", "class": "sgpr", "min": 0, "max": 105},
+            "src": [{"field": "SSRC0", "class": "scalar_source"}],
+            "max_literals": 1,
+        },
+        # One source, so two literals cannot occur; the rest are rejected.
+        "unsupported": {combo for combo in UNSUPPORTED_COMBOS if combo != "two_literals"},
         "kind": "unary",
     },
     "sopk_sgpr": {
@@ -757,6 +811,7 @@ def _check_xml(form, rule, snapshot, errors):
     scc_in = scc_out = False
     implicit = set()
     vcc_operands = []
+    exec_operands = []
     control_mask = CONTROL_OPERATIONS.get(form["operation"], (None, None, None))[2]
     mask_inputs = 0
     for field, data_format, kind, size, is_input, is_output, is_implicit, encoded in variant["operands"]:
@@ -771,6 +826,10 @@ def _check_xml(form, rule, snapshot, errors):
             operands[field] = (data_format, kind, size, is_input, is_output)
         elif kind == "OPR_VCC":
             vcc_operands.append((data_format, size, is_input, is_output))
+        elif kind == "OPR_SDST_EXEC":
+            # The EXEC mask is an implicit operand: the XML lists it as a read
+            # and a write for the forms that update it.
+            exec_operands.append((is_input, is_output))
         else:
             implicit.add(kind)
     if form["carry_in"] == "vcc":
@@ -791,6 +850,13 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: carry_in {form['carry_in']} contradicts the XML SCC input")
     if scc_out != (form["scc"] != "unchanged"):
         errors.append(f"{label}: scc {form['scc']} contradicts the XML SCC output")
+    if form["exec"] == "unchanged":
+        if exec_operands:
+            errors.append(f"{label}: the XML has an implicit EXEC operand but no EXEC effect is declared")
+    elif exec_operands.count((True, False)) != 1 or exec_operands.count((False, True)) != 1:
+        errors.append(
+            f"{label}: exec {form['exec']} needs one implicit EXEC read and one implicit EXEC write"
+        )
     if rule is None:
         return
     if not _well_formed(rule):
@@ -906,7 +972,7 @@ def validate(registry, snapshot):
             continue
         for key, vocabulary in (
             ("operation", OPERATIONS), ("signedness", SIGNEDNESS), ("carry_in", CARRY_IN),
-            ("scc", SCC), ("vcc", MASK), ("exec", MASK), ("wave", WAVE),
+            ("scc", SCC), ("vcc", MASK), ("exec", EXEC), ("wave", WAVE),
         ):
             if form[key] not in vocabulary:
                 errors.append(f"{label}: unknown {key} {form[key]!r}")
@@ -932,7 +998,19 @@ def validate(registry, snapshot):
                 f"(requires {vcc})"
             )
         if form["exec"] != "unchanged":
-            errors.append(f"{label}: exec {form['exec']} has no contract (requires unchanged)")
+            # The EXEC-writing forms are the Wave32 `_B32` SAVEEXEC and WREXEC
+            # families of guide 12.3, printed pages 117-122. Each reads EXEC_LO,
+            # writes the combined result back to EXEC_LO and sets SCC.
+            if form["family"] != "SOP1" or form["width"] != 32:
+                errors.append(f"{label}: exec {form['exec']} is only defined for 32-bit SOP1 forms")
+            elif form["operands"] != "sop1_saveexec":
+                errors.append(f"{label}: exec {form['exec']} requires the sop1_saveexec rule")
+            elif form["operation"] not in EXEC_COMBINE:
+                errors.append(
+                    f"{label}: exec {form['exec']} requires one of the EXEC-combining operations"
+                )
+            elif form["scc"] != "nonzero":
+                errors.append(f"{label}: exec {form['exec']} requires the nonzero SCC effect")
         expected_width = (_implemented_rule(form) or {}).get("width", 32)
         if type(form["width"]) is not int or form["width"] != expected_width:
             errors.append(f"{label}: width {form['width']} is not supported")
@@ -946,8 +1024,10 @@ def validate(registry, snapshot):
                 shown = form["variant"] if key == "variant" else value
                 errors.append(f"{label}: duplicate {key} {shown}")
             seen[key].add(value)
-        if (form["operation"] in LOGICAL and form["signedness"] != "bitwise") or (
-            form["operation"] in ARITHMETIC and form["signedness"] == "bitwise"
+        if (
+            (form["operation"] in LOGICAL and form["signedness"] != "bitwise")
+            or (form["operation"] in ARITHMETIC and form["signedness"] == "bitwise")
+            or ((form["operation"] in FLOAT_ROUNDING) != (form["signedness"] == "float"))
         ):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts operation {form['operation']}"
@@ -1063,7 +1143,7 @@ def validate(registry, snapshot):
             else "vector_unary" if _rule_kind(form) == "vector_unary" and form["operation"] in UNARY
             else "unary" if form["operation"] in UNARY or (
                 form["operation"] == "mov" and form["family"] == "SOP1"
-            )
+            ) or form["exec"] != "unchanged"
             else "vector" if _rule_kind(form) == "vector" and form["operation"] not in UNARY
             else "control" if form["operation"] in CONTROL_OPERATIONS
             else "immediate" if _rule_kind(form) == "immediate"
@@ -1324,7 +1404,7 @@ def render(registry, snapshot):
             + (f"Some(CompareRelation::{RELATIONS[form[RELATION_KEY]]})," if RELATION_KEY in form else "None,"),
             f"        scc: SccEffect::{SCC[form['scc']]},",
             f"        vcc: MaskEffect::{MASK[form['vcc']]},",
-            f"        exec: MaskEffect::{MASK[form['exec']]},",
+            f"        exec: MaskEffect::{EXEC[form['exec']]},",
             f"        wave: Wave::{WAVE[form['wave']]},",
             f"        operands: OperandRule::{OPERAND_RULES[form['operands']]['rust']},",
             f"        spec: &[{spec}],",
@@ -1676,24 +1756,57 @@ def _render_enum(rule_name, forms, snapshot, positions):
             "        }",
             "    }",
             "",
-            "    /// The result and, for forms that write it, the new SCC (`None` leaves SCC",
-            "    /// unchanged).",
-            "    pub const fn evaluate(self, src: u32) -> (u32, Option<bool>) {",
+            "    /// Whether the operation writes the EXEC mask.",
+            "    pub const fn writes_exec(self) -> bool {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => {'false' if form['exec'] == 'unchanged' else 'true'},"
+            for form in forms
+        ]
+        out += [
+            "        }",
+            "    }",
+            "",
+            "    /// The destination value, the new EXEC mask and, for forms that write it,",
+            "    /// the new SCC (`None` leaves SCC unchanged).",
+            "    ///",
+            "    /// EXEC is an implicit operand of the forms that write it: they combine",
+            "    /// the source with the current mask. For every other form the mask is",
+            "    /// returned unchanged.",
+            "    pub const fn evaluate(self, src: u32, exec: u32) -> (u32, u32, Option<bool>) {",
             "        match self {",
         ]
         for form in forms:
             _, function, _ = PRIMITIVES[(form["operation"], form["signedness"])]
+            if form["exec"] != "unchanged":
+                # The combine primitives take the source and the mask, and return
+                # the combined mask with the flag for it.
+                combine = f"primitive::{function}(src, exec)"
+                if form["exec"] == "exec_save":
+                    # The destination receives the previous mask.
+                    destination = "exec"
+                else:
+                    # The destination receives the new mask.
+                    destination = "value"
+                out += [
+                    f"            Self::{form['variant']} => {{",
+                    f"                let (value, scc) = {combine};",
+                    f"                ({destination}, value, Some(scc))",
+                    "            }",
+                ]
+                continue
             if form["operation"] == "sext":
                 value = f"primitive::{function}(src, {form[SOURCE_BITS_KEY]})"
             else:
                 value = f"primitive::{function}(src)"
             if form["scc"] == "unchanged":
-                out.append(f"            Self::{form['variant']} => ({value}, None),")
+                out.append(f"            Self::{form['variant']} => ({value}, exec, None),")
             else:
                 out += [
                     f"            Self::{form['variant']} => {{",
                     f"                let (value, scc) = {value};",
-                    "                (value, Some(scc))",
+                    "                (value, exec, Some(scc))",
                     "            }",
                 ]
         out += ["        }", "    }", "}"]

@@ -20,6 +20,8 @@ use xenora_decoder::{
 const VCC_LO: usize = 106;
 /// SGPR index of `vcc_hi`.
 const VCC_HI: usize = 107;
+/// SGPR index of `exec_lo`.
+const EXEC_LO: usize = 126;
 
 /// Entry point of all kernels produced by this compiler.
 pub const ENTRY_POINT: &str = "xenora_compute";
@@ -247,6 +249,10 @@ impl Op {
                     VectorUnary::FindHighSigned => format!(
                         "({src} == 0u || {src} == 0xffffffffu) ? 0xffffffffu : clz({src} ^ (0u - ({src} >> 31u)))"
                     ),
+                    VectorUnary::TruncateF32
+                    | VectorUnary::CeilingF32
+                    | VectorUnary::RoundNearestEvenF32
+                    | VectorUnary::FloorF32 => float_rounding_expression(op, &src),
                 }
             }
             Self::Binary(operator, left, right) => {
@@ -636,6 +642,10 @@ pub fn compile_with(
                     VectorUnary::FindHighUnsigned => "ffbh.u32",
                     VectorUnary::FindLow => "ffbl.b32",
                     VectorUnary::FindHighSigned => "ffbh.i32",
+                    VectorUnary::TruncateF32 => "trunc.f32",
+                    VectorUnary::CeilingF32 => "ceil.f32",
+                    VectorUnary::RoundNearestEvenF32 => "rndne.f32",
+                    VectorUnary::FloorF32 => "floor.f32",
                 };
                 (
                     format!("{dest} = {mnemonic} {source}"),
@@ -1342,7 +1352,7 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 dst,
                 src,
             } => {
-                let (value, _) = op.evaluate(read_scalar(src)?);
+                let (value, _, _) = op.evaluate(read_scalar(src)?, exec);
                 if dst < 8 {
                     return Err(error("scalar move would modify a resource descriptor"));
                 }
@@ -1363,7 +1373,14 @@ fn lift(decoded: &[DecodedInstruction], code_len: usize) -> Result<Vec<(usize, O
                 if dst < 8 {
                     return Err(error("scalar unary would modify a resource descriptor"));
                 }
-                let (value, flag) = op.evaluate(src);
+                let (value, mask, flag) = op.evaluate(src, exec);
+                if op.writes_exec() {
+                    // The EXEC-writing forms combine the source with the mask and
+                    // write the result back to EXEC_LO. The mask is a compile-time
+                    // value here, so the destination and the mask agree.
+                    exec = mask;
+                    scalars[EXEC_LO] = ScalarValue::Known(mask);
+                }
                 let slot = scalars
                     .get_mut(usize::from(dst))
                     .ok_or_else(|| error("scalar destination exceeds the fixture register file"))?;
@@ -2032,8 +2049,57 @@ fn concrete_bits(facts: KnownBits) -> Option<u32> {
     }
 }
 
+/// MSL for a binary32 rounding form, on the register bits only: no Metal
+/// float operation runs, so fast math, subnormal flushing and NaN
+/// canonicalization cannot change the result. A magnitude of at least 2^23
+/// (including infinities and NaNs) is already integral and passes through;
+/// below 1.0 the result is a signed zero or one; otherwise the `m` fraction
+/// bits are cleared and, when rounding away from zero, one unit is added to the
+/// magnitude (a carry into the exponent is the next binade).
+fn float_rounding_expression(op: VectorUnary, src: &str) -> String {
+    let magnitude = format!("({src} & 0x7fffffffu)");
+    let sign = format!("({src} & 0x80000000u)");
+    let fraction = format!("(0x007fffffu >> (((({src} >> 23u) & 0xffu) - 127u) & 31u))");
+    let below_one = match op {
+        VectorUnary::TruncateF32 => sign.clone(),
+        VectorUnary::FloorF32 => format!("({src} > 0x80000000u ? 0xbf800000u : {sign})"),
+        VectorUnary::CeilingF32 => {
+            format!("(({src} != 0u && {src} < 0x80000000u) ? 0x3f800000u : {sign})")
+        }
+        VectorUnary::RoundNearestEvenF32 => {
+            format!("({magnitude} > 0x3f000000u ? ({sign} | 0x3f800000u) : {sign})")
+        }
+        _ => unreachable!("not a binary32 rounding form"),
+    };
+    let whole = format!("({src} & ~{fraction})");
+    if op == VectorUnary::TruncateF32 {
+        return format!(
+            "{magnitude} >= 0x4b000000u ? {src} : {magnitude} < 0x3f800000u ? {below_one} : {whole}"
+        );
+    }
+    let frac = format!("({src} & {fraction})");
+    let unit = format!("({fraction} + 1u)");
+    let away = match op {
+        VectorUnary::FloorF32 => format!("({frac} != 0u && {sign} != 0u)"),
+        VectorUnary::CeilingF32 => format!("({frac} != 0u && {sign} == 0u)"),
+        VectorUnary::RoundNearestEvenF32 => format!(
+            "({frac} > ({unit} >> 1u) || ({frac} == ({unit} >> 1u) && ({src} & {unit}) != 0u))"
+        ),
+        _ => unreachable!("not a binary32 rounding form"),
+    };
+    format!(
+        "{magnitude} >= 0x4b000000u ? {src} : {magnitude} < 0x3f800000u ? {below_one} : ({whole} + ({away} ? {unit} : 0u))"
+    )
+}
+
 fn eval_unary(operator: VectorUnary, source: u32) -> Option<u32> {
     Some(match operator {
+        // Not folded: constant sources still run the MSL above, so the
+        // translator has one implementation of these forms.
+        VectorUnary::TruncateF32
+        | VectorUnary::CeilingF32
+        | VectorUnary::RoundNearestEvenF32
+        | VectorUnary::FloorF32 => return None,
         VectorUnary::Not => !source,
         VectorUnary::ReverseBits => source.reverse_bits(),
         VectorUnary::FindHighUnsigned => {
@@ -2197,6 +2263,16 @@ mod tests {
                 "missing MSL template for {operation:?}"
             );
             assert!(eval_unary(operation, 0x8000_0001).is_some());
+        }
+        for operation in [
+            VectorUnary::TruncateF32,
+            VectorUnary::CeilingF32,
+            VectorUnary::RoundNearestEvenF32,
+            VectorUnary::FloorF32,
+        ] {
+            let expression = Op::Unary(operation, Value(0)).expression(&|v| v.to_string(), "", "");
+            assert!(!expression.contains("as_type"), "float op in {operation:?}");
+            assert!(eval_unary(operation, 0x3fc0_0000).is_none());
         }
     }
 

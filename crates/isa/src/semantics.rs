@@ -35,6 +35,10 @@ pub enum Operation {
     AndNot,
     /// Bitwise OR with the complement of S1.
     OrNot,
+    /// Bitwise AND with the complement of S0.
+    AndNot0,
+    /// Bitwise OR with the complement of S0.
+    OrNot0,
     /// Complement of bitwise AND.
     Nand,
     /// Complement of bitwise OR.
@@ -108,9 +112,18 @@ pub enum Operation {
     WaitLoad,
     /// Swap the two old per-lane VGPR values (guide 12.8).
     Swap,
+    /// Binary32 integral part, rounding toward zero (guide 12.8).
+    Truncate,
+    /// Binary32 rounding up to an integral value (guide 12.8).
+    Ceiling,
+    /// Binary32 rounding to the nearest integral value, ties to even (guide 12.8).
+    RoundNearestEven,
+    /// Binary32 rounding down to an integral value (guide 12.8).
+    Floor,
 }
 
-/// Per-lane integer operation with one input and one result.
+/// Per-lane operation with one input and one result: integer and bit forms,
+/// and binary32 rounding to an integral value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VectorUnary {
     /// Bitwise complement.
@@ -123,6 +136,14 @@ pub enum VectorUnary {
     FindLow,
     /// Count leading sign bits, or return all ones if every bit matches.
     FindHighSigned,
+    /// Binary32 rounding toward zero.
+    TruncateF32,
+    /// Binary32 rounding toward +infinity.
+    CeilingF32,
+    /// Binary32 rounding to nearest, ties to even.
+    RoundNearestEvenF32,
+    /// Binary32 rounding toward -infinity.
+    FloorF32,
 }
 
 /// The per-lane integer operation a vector form lowers to. One reusable MSL
@@ -175,6 +196,8 @@ pub enum Signedness {
     Signed,
     /// Untyped bits.
     Bitwise,
+    /// IEEE 754 binary32 values.
+    Float,
 }
 
 /// Per-lane VOP2 operation selected by the semantic registry.
@@ -238,6 +261,13 @@ pub enum MaskEffect {
     LaneMask,
     /// Wave32 VOP3A compare mask written to SDST, which may be `vcc_lo`.
     SdstLaneMask,
+    /// The form combines its source with EXEC_LO, writes the result to EXEC_LO
+    /// and leaves the previous EXEC_LO in the destination. Guide 12.3, printed
+    /// pages 120-122.
+    ExecSave,
+    /// The form combines its source with EXEC_LO and writes the result to both
+    /// EXEC_LO and the destination. Guide 12.3, printed page 122.
+    ExecWrite,
 }
 
 /// Wave-size restriction.
@@ -264,6 +294,9 @@ pub enum OperandRule {
     /// SOP1 move: the same sources as Sop1Sgpr, with VCC and EXEC halves
     /// also allowed as explicit destinations.
     Sop1Move,
+    /// SOP1 EXEC-writing: the same sources and destination as Sop1Sgpr, with the
+    /// form also writing EXEC_LO and SCC.
+    Sop1SaveExec,
     /// SOPK integer: SDST is s0-s105 and, except for compares, written (never s0-s7,
     /// which hold resource descriptors); SIMM16 is the 16-bit immediate. The word
     /// never takes a literal. Everything else is rejected as unsupported.
@@ -304,6 +337,8 @@ pub enum OperandRule {
     Vop2Vgpr2,
     /// VOP1 unary: VGPR VDST and the same SRC0 domain as VOP2.
     Vop1Vgpr,
+    /// VOP1 binary32 rounding: as `Vop1Vgpr` without integer inline constants.
+    Vop1F32,
     /// VOP1 swap: VDST and SRC0 each read and write a VGPR.
     Vop1Swap,
 }

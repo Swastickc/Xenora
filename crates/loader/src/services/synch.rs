@@ -176,6 +176,28 @@ pub(super) struct Synch {
 }
 
 impl Synch {
+    pub(super) fn has_thread_fls_callbacks(&self, teb: u64) -> bool {
+        self.fls_values
+            .range((teb, 0)..=(teb, u32::MAX))
+            .any(|(&(_, index), _)| {
+                self.fls_slots
+                    .get(&index)
+                    .is_some_and(|slot| slot.callback != 0)
+            })
+    }
+
+    /// Take one snapshot of the exiting thread's values in slot order.
+    pub(super) fn take_thread_fls_callbacks(&mut self, teb: u64) -> Vec<(u64, u64)> {
+        let slots = &self.fls_slots;
+        self.fls_values
+            .extract_if((teb, 0)..=(teb, u32::MAX), |_, _| true)
+            .filter_map(|((_, index), value)| {
+                let entry = slots.get(&index)?.callback;
+                (entry != 0).then_some((entry, value))
+            })
+            .collect()
+    }
+
     /// Drop the thread-local values of a guest thread that has ended, without
     /// running FLS callbacks. Locks it held stay held: its TEB address may be
     /// reused, and the next thread there must not own them.

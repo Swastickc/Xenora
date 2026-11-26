@@ -13,7 +13,7 @@ use xenora_loader::cpu::{CpuState, ExitReason, Register};
 use xenora_loader::dbt::DbtEngine;
 use xenora_loader::import_table::{ImportName, ImportTableError, MAX_IMPORTS, parse_imports};
 use xenora_loader::imports::{
-    ImportError, ImportRegistry, RegistryError, ServiceStatus, Win64Args,
+    IMPORT_TRAMPOLINE_BASE_VA, ImportError, ImportRegistry, RegistryError, ServiceStatus, Win64Args,
 };
 use xenora_loader::memory::{GuestMemory, MemoryPermissions};
 use xenora_loader::pe::ParsedPe;
@@ -29,8 +29,9 @@ const BASE: u64 = 0x1_4000_0000;
 const CODE_RVA: u32 = 0x1000;
 const IDATA_RVA: u32 = 0x10000;
 const IDATA_RAW: usize = 0x2200;
-const IDATA_LEN: usize = 0x4000;
+const IDATA_LEN: usize = 0x10000;
 const SCRATCH: u64 = 0x5_0000;
+const CPBUF: u64 = 0x6_0000;
 const STACK: u64 = 0x8_0000;
 const STACK_TOP: u64 = STACK + 0x800;
 
@@ -143,6 +144,9 @@ struct Guest {
     memory: GuestMemory,
     clock: Arc<MockClock>,
     state: Arc<ServicesState>,
+    /// IAT slot RVAs in import order: the table services, `_errno`, then
+    /// the legacy data symbols.
+    slots: Vec<u32>,
     teb: u64,
     /// Upper halves and XMM lanes of unrelated arguments hold this pattern.
     xmm: [u128; 4],
@@ -155,6 +159,12 @@ impl Guest {
             .map(|service| (service.library, Symbol::Name(service.symbol)))
             .collect();
         imports.push(("ucrtbase.dll", Symbol::Name("_errno")));
+        for symbol in LEGACY_DATA_SYMBOLS {
+            imports.push(("msvcrt.dll", Symbol::Name(symbol)));
+        }
+        for symbol in LEGACY_FUNCTION_SYMBOLS {
+            imports.push(("msvcrt.dll", Symbol::Name(symbol)));
+        }
         let image = build(&imports);
         let pe = ParsedPe::parse(&image.bytes).unwrap();
         let mut memory = pe.load_into_memory(&image.bytes).unwrap().memory;
@@ -168,7 +178,10 @@ impl Guest {
         let bound = registry
             .bind_imports(&pe, &image.bytes, BASE, &mut memory)
             .unwrap();
-        assert_eq!(bound, SERVICES.len() + 1);
+        assert_eq!(
+            bound,
+            SERVICES.len() + 1 + LEGACY_DATA_SYMBOLS.len() + LEGACY_FUNCTION_SYMBOLS.len()
+        );
         let mut engine = DbtEngine::new(256 * 1024).unwrap();
         engine.set_import_registry(registry);
         Self {
@@ -176,6 +189,7 @@ impl Guest {
             memory,
             clock,
             state,
+            slots: image.slots,
             teb: 0,
             xmm: [0xAAAA_BBBB_CCCC_DDDD_EEEE_FFFF_0123_4567; 4],
         }
@@ -186,6 +200,10 @@ impl Guest {
             .iter()
             .position(|service| service.symbol == symbol)
             .or((symbol == "_errno").then_some(SERVICES.len()))
+            .or(LEGACY_FUNCTION_SYMBOLS
+                .iter()
+                .position(|&entry| entry == symbol)
+                .map(|index| SERVICES.len() + 1 + LEGACY_DATA_SYMBOLS.len() + index))
             .unwrap();
         let mut cpu = CpuState::new(BASE + u64::from(CODE_RVA) + 16 * index as u64, STACK_TOP);
         cpu.gs_base = self.teb;
@@ -1514,6 +1532,577 @@ fn temporary_files_are_uniquely_named_and_deleted_on_close() {
     assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
 }
 
+/// The descriptor layer (#493, third part): `_open`, `_read`, `_write`,
+/// `_lseek`, `_close`, `_fileno`, `_isatty`, `_access` and `_unlink`. The
+/// expectations are the Microsoft pages for each function, the `<fcntl.h>`
+/// values from mingw-w64, and the bytes written here.
+#[test]
+fn descriptors_share_files_with_streams() {
+    const EEXIST: u32 = 17;
+    let (mut guest, [stdin, out, err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    // `_open` a new file for reading and writing, in binary, and write.
+    guest.memory.write_bytes(NAME, b"fd.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    guest.memory.write_bytes(buf, b"abcdef").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf, 6]) & 0xFFFF_FFFF, 6);
+    // `_lseek` back and `_read` the bytes; the end is a 0 count, no error.
+    assert_eq!(guest.call("_lseek", &[fd, 0, 0]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, &[0xEE; 8]).unwrap();
+    assert_eq!(guest.call("_read", &[fd, buf, 8]) & 0xFFFF_FFFF, 6);
+    let mut bytes = [0u8; 6];
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"abcdef");
+    assert_eq!(guest.call("_read", &[fd, buf, 8]) & 0xFFFF_FFFF, 0);
+    // Text mode: a line feed written is CR LF on the drive, and CR LF read
+    // is one line feed.
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(NAME, b"fd.txt\0").unwrap();
+    let text = guest.call("_open", &[NAME, 2 | 0x100 | 0x200, 0]) & 0xFFFF_FFFF;
+    assert!(text >= 3, "{text:x}");
+    guest.memory.write_bytes(buf, b"x\ny").unwrap();
+    assert_eq!(guest.call("_write", &[text, buf, 3]) & 0xFFFF_FFFF, 3);
+    assert_eq!(guest.call("_lseek", &[text, 0, 0]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, &[0xEE; 8]).unwrap();
+    assert_eq!(guest.call("_read", &[text, buf, 8]) & 0xFFFF_FFFF, 3);
+    let mut bytes = [0u8; 3];
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"x\ny", "CR LF became one line feed");
+    // The raw bytes on the drive, through the binary descriptor.
+    assert_eq!(guest.call("_close", &[text]) & 0xFFFF_FFFF, 0);
+    // A closed descriptor number fails with EBADF until it is recycled.
+    assert_eq!(
+        guest.call("_lseek", &[77, 0, 0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_read", &[77, buf, 1]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), EBADF);
+    guest.memory.write_bytes(NAME, b"fd.txt\0").unwrap();
+    let raw = guest.call("_open", &[NAME, 0x8000, 0]) & 0xFFFF_FFFF;
+    guest.memory.write_bytes(buf, &[0xEE; 8]).unwrap();
+    assert_eq!(guest.call("_read", &[raw, buf, 8]) & 0xFFFF_FFFF, 4);
+    let mut bytes = [0u8; 4];
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"x\r\ny", "the drive holds CR LF");
+    assert_eq!(guest.call("_close", &[raw]) & 0xFFFF_FFFF, 0);
+
+    // `_fileno` shares the stream's state: a write through the descriptor
+    // moves where `fgets` reads.
+    store(&mut guest, "shared.bin", b"0123456789");
+    let stream = opened(&mut guest, "shared.bin", "r+b");
+    let shared = guest.call("_fileno", &[stream]) & 0xFFFF_FFFF;
+    assert!(shared >= 3, "{shared:x}");
+    assert_eq!(line(&mut guest, stream, 4).unwrap(), b"012");
+    // The lowest free descriptor is reused: the fd just closed.
+    assert_eq!(shared, raw, "the lowest free descriptor");
+    guest.memory.write_bytes(buf, b"ZZ").unwrap();
+    assert_eq!(guest.call("_lseek", &[shared, 3, 0]) & 0xFFFF_FFFF, 3);
+    assert_eq!(guest.call("_write", &[shared, buf, 2]) & 0xFFFF_FFFF, 2);
+    // The stream's position moved with the descriptor's write.
+    assert_eq!(line(&mut guest, stream, 8).unwrap(), b"56789");
+    // The same stream gives the same descriptor again.
+    assert_eq!(guest.call("_fileno", &[stream]) & 0xFFFF_FFFF, shared);
+    // `_fileno` of the standard streams, of null and of no stream.
+    assert_eq!(guest.call("_fileno", &[stdin]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_fileno", &[out]) & 0xFFFF_FFFF, 1);
+    assert_eq!(guest.call("_fileno", &[err]) & 0xFFFF_FFFF, 2);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_fileno", &[0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    assert_eq!(guest.run("_fileno", &[TEXT]).1, LIMIT);
+    // `_close` of the shared descriptor closes the underlying file: the
+    // stream is dangling afterwards, and using it stops the guest like any
+    // pointer that is no stream — in the CRT this is undefined behaviour.
+    assert_eq!(guest.call("_close", &[shared]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.run("fclose", &[stream]).1, LIMIT);
+
+    // Descriptor 0 reads what the host supplied; 1 and 2 write to the
+    // captured streams; seeking them is EBADF.
+    guest.state.set_standard_input(b"pipe\r\n");
+    guest.memory.write_bytes(buf, &[0xEE; 8]).unwrap();
+    assert_eq!(
+        guest.call("_read", &[0, buf, 8]) & 0xFFFF_FFFF,
+        5,
+        "CR LF became one line feed at load"
+    );
+    let mut bytes = [0u8; 5];
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"pipe\n");
+    guest.memory.write_bytes(buf, b"hi\n").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 3]) & 0xFFFF_FFFF, 3);
+    assert!(guest.state.standard_output().ends_with(b"hi\r\n"));
+    assert_eq!(guest.call("_write", &[2, buf, 3]) & 0xFFFF_FFFF, 3);
+    assert!(guest.state.standard_error().ends_with(b"hi\r\n"));
+    assert_eq!(
+        guest.call("_write", &[0, buf, 3]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(
+        guest.call("_read", &[1, buf, 3]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(
+        guest.call("_lseek", &[0, 0, 0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    // `_isatty`: nothing is a character device; a bad fd is EBADF.
+    assert_eq!(guest.call("_isatty", &[0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_isatty", &[1]) & 0xFFFF_FFFF, 0);
+    guest.set_errno(0);
+    assert_eq!(guest.call("_isatty", &[40]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.errno(), EBADF);
+
+    // Failures: ENOENT without `_O_CREAT`, EEXIST with `_O_EXCL`, EINVAL for
+    // access bits 3, EBADF for unknown descriptors, EINVAL before the start.
+    guest.memory.write_bytes(NAME, b"nope.bin\0").unwrap();
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_open", &[NAME, 0, 0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), ENOENT);
+    guest.memory.write_bytes(NAME, b"shared.bin\0").unwrap();
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_open", &[NAME, 0x100 | 0x400, 0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), EEXIST);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_open", &[NAME, 3, 0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    assert_eq!(
+        guest.call("_close", &[77]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.run("_close", &[0]).1, LIMIT);
+    assert_eq!(
+        guest.run("_open", &[NAME, 0x1_0000, 0]).1,
+        LIMIT,
+        "wide text stops the guest"
+    );
+    // `_access`: 0 for a file in any mode, ENOENT when missing, EINVAL for
+    // bits other than 0, 2, 4 and 6.
+    guest.memory.write_bytes(NAME, b"shared.bin\0").unwrap();
+    for mode in [0, 2, 4, 6] {
+        assert_eq!(
+            guest.call("_access", &[NAME, mode]) & 0xFFFF_FFFF,
+            0,
+            "{mode}"
+        );
+    }
+    guest.memory.write_bytes(NAME, b"nope.bin\0").unwrap();
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_access", &[NAME, 0]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), ENOENT);
+    guest.memory.write_bytes(NAME, b"shared.bin\0").unwrap();
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_access", &[NAME, 8]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    // `_unlink` is `remove` by another name.
+    assert_eq!(guest.call("_unlink", &[NAME]) & 0xFFFF_FFFF, 0);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_unlink", &[NAME]) & 0xFFFF_FFFF,
+        (-1i32) as u32 as u64
+    );
+    assert_eq!(guest.errno(), ENOENT);
+}
+
+/// `fopen_s` gives the error number as its result and stores the stream
+/// through the pointer, `feof` observes a file stream's indicator, and
+/// `clearerr` clears it (#493, second part). The expectations are the
+/// Microsoft pages for `fopen_s` and `clearerr`, and ISO C 7.21.7 for the
+/// indicator.
+#[test]
+fn secure_fopen_and_stream_indicators_follow_iso_c() {
+    const SLOT: u64 = TEXT + 0x3000;
+    let (mut guest, [_, out, _]) = stdio_guest();
+    store(&mut guest, "secure.bin", b"xy");
+    guest.memory.write_bytes(NAME, b"secure.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    // A good open: 0, the slot holds the stream, and it reads.
+    assert_eq!(guest.call("fopen_s", &[SLOT, NAME, MODE]) & 0xFFFF_FFFF, 0);
+    let file = guest.memory.read_u64(SLOT).unwrap();
+    assert_ne!(file, 0);
+    assert_eq!(line(&mut guest, file, 8).unwrap(), b"xy");
+    // Reading past the end sets the indicator; `feof` observes it and
+    // `clearerr` clears it.
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(line(&mut guest, file, 8), None, "at the end");
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("clearerr", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    // A successful seek clears the indicator too (ISO C 7.21.9.2): read to
+    // the end again, seek back to the start, and `feof` is clear.
+    assert_eq!(line(&mut guest, file, 8), None, "at the end");
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_fseeki64", &[file, 0, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(line(&mut guest, file, 8).unwrap(), b"xy");
+    close(&mut guest, file);
+    // `clearerr` of a null stream is a no-op with errno EINVAL; of the
+    // output streams it has nothing to clear; of a pointer that is no
+    // stream it stops the guest.
+    guest.set_errno(0);
+    assert_eq!(guest.call("clearerr", &[0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    assert_eq!(guest.call("clearerr", &[out]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.run("clearerr", &[TEXT]).1, LIMIT);
+    // A missing file: the result is ENOENT, errno matches, the slot is null.
+    for (name, mode, errno) in [
+        ("missing.bin\0", "rb\0", ENOENT),
+        ("secure.bin\0", "zz\0", STDIO_EINVAL),
+        ("\0", "rb\0", STDIO_EINVAL),
+    ] {
+        guest.memory.write_bytes(NAME, name.as_bytes()).unwrap();
+        guest.memory.write_bytes(MODE, mode.as_bytes()).unwrap();
+        guest.memory.write_u64(SLOT, 0xAA).unwrap();
+        guest.set_errno(0);
+        assert_eq!(
+            guest.call("fopen_s", &[SLOT, NAME, MODE]) & 0xFFFF_FFFF,
+            u64::from(errno) & 0xFFFF_FFFF,
+            "{name:?} {mode:?}"
+        );
+        assert_eq!(guest.errno(), errno, "{name:?} {mode:?}");
+        assert_eq!(guest.memory.read_u64(SLOT).unwrap(), 0, "{name:?} {mode:?}");
+    }
+    // Null arguments are EINVAL, with the slot nulled when there is one.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fopen_s", &[SLOT, 0, MODE]) & 0xFFFF_FFFF,
+        u64::from(STDIO_EINVAL) & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fopen_s", &[SLOT, NAME, 0]) & 0xFFFF_FFFF,
+        u64::from(STDIO_EINVAL) & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fopen_s", &[0, NAME, MODE]) & 0xFFFF_FFFF,
+        u64::from(STDIO_EINVAL) & 0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    // A directory is EACCES through the same passthrough; the runtime
+    // registry has no way to make one here, so the fixture does not cover
+    // it either — it is the same `errno` forwarding ENOENT exercises.
+    // An unwritable output pointer stops the guest with a fault.
+    let exit = guest.run("fopen_s", &[0x9_0000_0000, NAME, MODE]).1;
+    assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+}
+
+/// The C time services of package 5 of #459. The expectations are the
+/// civil calendar itself: 2001-09-09 01:46:40 UTC is the second
+/// 1_000_000_000, and 1970-01-01 was a Thursday.
+#[test]
+fn c_time_breaks_down_and_composes_the_injected_clock() {
+    let (mut guest, _) = stdio_guest();
+    // 1_000_000_000 seconds after the epoch.
+    guest.memory.write_u64(LINE, 1_000_000_000).unwrap();
+    let tm = guest.call("_gmtime64", &[LINE]);
+    assert_ne!(tm, 0);
+    fn field(guest: &Guest, tm: u64, index: u64) -> i32 {
+        guest.memory.read_u32(tm + 4 * index).unwrap() as i32
+    }
+    macro_rules! field {
+        ($index:expr) => {
+            field(&guest, tm, $index)
+        };
+    }
+    assert_eq!(field!(0), 40, "tm_sec");
+    assert_eq!(field!(1), 46, "tm_min");
+    assert_eq!(field!(2), 1, "tm_hour");
+    assert_eq!(field!(3), 9, "tm_mday");
+    assert_eq!(field!(4), 8, "tm_mon: September is 8");
+    assert_eq!(field!(5), 101, "tm_year: 2001 is 101");
+    assert_eq!(field!(6), 0, "tm_wday: a Sunday");
+    assert_eq!(field!(7), 251, "tm_yday");
+    assert_eq!(field!(8), 0, "tm_isdst: the clock is UTC");
+    // The same address answers `_localtime64`: the machine's local time is
+    // UTC, and one static buffer serves both, as the CRT keeps one.
+    assert_eq!(guest.call("_localtime64", &[LINE]), tm);
+    // The epoch itself: Thursday, January 1, 1970.
+    guest.memory.write_u64(LINE, 0).unwrap();
+    assert_eq!(guest.call("_gmtime64", &[LINE]), tm);
+    assert_eq!(field!(6), 4, "the epoch was a Thursday");
+    // Negative and post-3000 times are EINVAL with a null return.
+    guest.memory.write_u64(LINE, u64::MAX).unwrap();
+    assert_eq!(guest.call("_gmtime64", &[LINE]), 0);
+    assert_eq!(guest.errno(), 22);
+    guest.memory.write_u64(LINE, 32_535_216_000).unwrap();
+    assert_eq!(guest.call("_gmtime64", &[LINE]), 0);
+    assert_eq!(guest.errno(), 22);
+
+    // `mktime` composes what `gmtime` breaks down, normalizes the fields in
+    // place, and fills the weekday.
+    guest.memory.write_u64(LINE, 1_000_000_000).unwrap();
+    guest.call("_gmtime64", &[LINE]);
+    // Copy the static tm into scratch memory mktime can normalize.
+    let mut fields = [0u8; 36];
+    guest.memory.read_bytes(tm, &mut fields).unwrap();
+    guest.memory.write_bytes(LINE + 0x100, &fields).unwrap();
+    let made = guest.call("_mktime64", &[LINE + 0x100]);
+    assert_eq!(made, 1_000_000_000);
+    // A month of 13 normalizes into the next year.
+    guest.memory.write_u32(LINE + 0x100 + 16, 13).unwrap();
+    guest.memory.write_u32(LINE + 0x100 + 20, 100).unwrap();
+    let made = guest.call("_mktime64", &[LINE + 0x100]);
+    // February of 2001, day 9, same time of day.
+    guest.memory.write_u64(LINE, made).unwrap();
+    guest.call("_gmtime64", &[LINE]);
+    assert_eq!(field!(4), 1, "month 13 of 2000 is February 2001");
+    assert_eq!(field!(5), 101);
+    // 1969 is outside the CRT's range.
+    guest.memory.write_u32(LINE + 0x100 + 20, 69).unwrap();
+    assert_eq!(guest.call("_mktime64", &[LINE + 0x100]), u64::MAX);
+    assert_eq!(guest.errno(), 22);
+}
+
+/// The string forms, `clock` and `difftime`, and the identity
+/// `FileTimeToLocalFileTime`.
+#[test]
+fn c_time_formats_and_measures_as_the_crt_does() {
+    let (mut guest, _) = stdio_guest();
+    guest.memory.write_u64(LINE, 1_000_000_000).unwrap();
+    let tm = guest.call("_gmtime64", &[LINE]);
+    // `asctime` is the fixed 24-character shape the CRT writes.
+    let text = guest.call("asctime", &[tm]);
+    assert_ne!(text, 0);
+    let mut bytes = [0u8; 26];
+    guest.memory.read_bytes(text, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"Sun Sep  9 01:46:40 2001\n\0");
+    // `_ctime64` of the same second is the same string, in the same buffer.
+    assert_eq!(guest.call("_ctime64", &[LINE]), text);
+    // Two-digit days pad with a zero, single-digit with a space: check the
+    // tenth of September too.
+    guest
+        .memory
+        .write_u64(LINE, 1_000_000_000 + 86_400)
+        .unwrap();
+    assert_eq!(guest.call("_ctime64", &[LINE]), text);
+    guest.memory.read_bytes(text, &mut bytes).unwrap();
+    assert_eq!(&bytes[8..10], b"10", "day 10");
+    assert_eq!(&bytes[..19], b"Mon Sep 10 01:46:40");
+    // `asctime_s` validates the buffer size and empties it on failure.
+    let rc = guest.call("asctime_s", &[LINE + 0x200, 26, tm]);
+    assert_eq!(rc, 0);
+    guest.memory.read_bytes(LINE + 0x200, &mut bytes).unwrap();
+    assert_eq!(&bytes[..5], b"Mon S");
+    assert_eq!(guest.call("asctime_s", &[LINE + 0x200, 25, tm]), 22);
+    assert_eq!(guest.memory.read_u8(LINE + 0x200).unwrap(), 0, "emptied");
+    assert_eq!(guest.errno(), 22);
+    // `strftime` for the C locale.
+    let tm = guest.call("_gmtime64", &[LINE]);
+    let format = LINE + 0x400;
+    guest
+        .memory
+        .write_bytes(
+            format,
+            b"%Y-%m-%d %H:%M:%S %a %A %b %B %j %U %W %w %p %I %x %X %y %% %z %Z\0",
+        )
+        .unwrap();
+    let len = guest.call("strftime", &[LINE + 0x600, 200, format, tm]);
+    assert_ne!(len, 0);
+    let mut out = vec![0u8; len as usize];
+    guest.memory.read_bytes(LINE + 0x600, &mut out).unwrap();
+    // 2001-09-10 01:46:40, Monday, the 253rd day, AM.
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "2001-09-10 01:46:40 Mon Monday Sep September 253 36 37 1 AM 01 09/10/01 01:46:40 01 % +0000 UTC"
+    );
+    // An unknown conversion copies verbatim, and too small a buffer is 0.
+    guest.memory.write_bytes(format, b"%Q\0").unwrap();
+    assert_eq!(guest.call("strftime", &[LINE + 0x600, 200, format, tm]), 2);
+    assert_eq!(guest.call("strftime", &[LINE + 0x600, 2, format, tm]), 0);
+    // `clock` reads the injected clock's performance count in milliseconds.
+    assert_eq!(guest.call("clock", &[]), 0);
+    // `difftime` subtracts. A double returns in XMM0, not the integer
+    // register, so the call goes through the floating-point path.
+    let diff = math_call(
+        &mut guest,
+        "_difftime64",
+        &[],
+        &[2_000_000_000, 1_500_000_000],
+    );
+    assert_eq!(
+        f64::from_bits(diff as u64),
+        500_000_000.0,
+        "the difference is exact in a double"
+    );
+    // `FileTimeToLocalFileTime` copies: the machine's local time is UTC.
+    guest.memory.write_u64(LINE, 123_456_789).unwrap();
+    assert_eq!(guest.call("FileTimeToLocalFileTime", &[LINE, LINE + 8]), 1);
+    assert_eq!(guest.memory.read_u64(LINE + 8).unwrap(), 123_456_789);
+}
+
+/// The wide conversions and classification of package 6 of #459. The
+/// expectations are the C locale: every byte is the wide character of the
+/// same value, a wide character above 255 has no multibyte form, and the
+/// classes are the ASCII ones.
+#[test]
+fn wide_characters_convert_in_the_c_locale() {
+    let (mut guest, _) = stdio_guest();
+    // `mbstowcs` zero-extends every byte.
+    guest.memory.write_bytes(LINE, b"abc\0").unwrap();
+    assert_eq!(guest.call("mbstowcs", &[LINE + 0x100, LINE, 8]), 3);
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x100).unwrap(),
+        u16::from(b'a')
+    );
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x104).unwrap(),
+        u16::from(b'c')
+    );
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x106).unwrap(),
+        0,
+        "terminated"
+    );
+    // Fewer wide slots than bytes: no terminator, the count is the slots.
+    assert_eq!(guest.call("mbstowcs", &[LINE + 0x100, LINE, 2]), 2);
+    // A null destination is the length query.
+    assert_eq!(guest.call("mbstowcs", &[0, LINE, 0]), 3);
+    // `wcstombs` is the inverse, failing for a wide character above 255.
+    assert_eq!(guest.call("wcstombs", &[LINE + 0x200, LINE + 0x100, 8]), 3);
+    assert_eq!(
+        &{
+            let mut b = [0u8; 3];
+            guest.memory.read_bytes(LINE + 0x200, &mut b).unwrap();
+            b
+        },
+        b"abc"
+    );
+    guest.memory.write_u16(LINE + 0x100, 0x100).unwrap();
+    assert_eq!(
+        guest.call("wcstombs", &[LINE + 0x200, LINE + 0x100, 8]),
+        u64::MAX
+    );
+    assert_eq!(guest.errno(), 42, "EILSEQ");
+    // The single-character forms.
+    guest.memory.write_bytes(LINE, b"z\0").unwrap();
+    assert_eq!(guest.call("mbtowc", &[LINE + 0x100, LINE, 1]), 1);
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x100).unwrap(),
+        u16::from(b'z')
+    );
+    assert_eq!(
+        guest.call("mbtowc", &[LINE + 0x100, LINE, 0]),
+        0xFFFF_FFFF,
+        "-1 as an int"
+    );
+    assert_eq!(guest.call("wctomb", &[LINE + 0x300, u64::from(b'q')]), 1);
+    assert_eq!(guest.memory.read_u8(LINE + 0x300).unwrap(), b'q');
+    assert_eq!(
+        guest.call("wctomb", &[LINE + 0x300, 0x100]),
+        0xFFFF_FFFF,
+        "-1 as an int"
+    );
+    assert_eq!(guest.call("mblen", &[LINE, 1]), 1);
+    // The restartable forms advance their source pointer.
+    guest.memory.write_bytes(LINE, b"xy\0").unwrap();
+    guest.memory.write_u64(LINE + 0x400, LINE).unwrap();
+    assert_eq!(
+        guest.call("mbsrtowcs", &[LINE + 0x100, LINE + 0x400, 1, 0]),
+        1
+    );
+    assert_eq!(
+        guest.memory.read_u64(LINE + 0x400).unwrap(),
+        LINE + 1,
+        "advanced"
+    );
+    assert_eq!(
+        guest.call("mbsrtowcs", &[LINE + 0x100, LINE + 0x400, 4, 0]),
+        1
+    );
+    assert_eq!(
+        guest.memory.read_u64(LINE + 0x400).unwrap(),
+        0,
+        "consumed the null"
+    );
+
+    // The classification is ASCII's, through `iswctype`'s bits.
+    assert_eq!(
+        guest.call("iswctype", &[u64::from(b'a'), 0x103]),
+        1,
+        "_ALPHA"
+    );
+    assert_eq!(
+        guest.call("iswctype", &[u64::from(b'a'), 0x4]),
+        0,
+        "not a digit"
+    );
+    assert_eq!(guest.call("iswctype", &[u64::from(b'5'), 0x4]), 1, "_DIGIT");
+    assert_eq!(
+        guest.call("iswctype", &[0xE9, 0x103]),
+        0,
+        "no class above ASCII"
+    );
+    assert_eq!(
+        guest.call("iswctype", &[u64::from(b' '), 0x40]),
+        1,
+        "_BLANK"
+    );
+    // The direct forms answer the same.
+    assert_eq!(guest.call("iswalpha", &[u64::from(b'a')]), 1);
+    assert_eq!(guest.call("iswalpha", &[u64::from(b'5')]), 0);
+    assert_eq!(guest.call("iswspace", &[u64::from(b' ')]), 1);
+    assert_eq!(guest.call("iswupper", &[u64::from(b'A')]), 1);
+    assert_eq!(guest.call("towupper", &[u64::from(b'a')]), u64::from(b'A'));
+    assert_eq!(guest.call("towlower", &[u64::from(b'A')]), u64::from(b'a'));
+    assert_eq!(guest.call("towupper", &[u64::from(b'5')]), u64::from(b'5'));
+
+    // `wcsncat` appends at most count units.
+    let wide = |units: &[u16]| -> Vec<u8> { units.iter().flat_map(|u| u.to_le_bytes()).collect() };
+    let mut start = wide(&[u16::from(b'a'), 0]);
+    start.resize(16, 0);
+    guest.memory.write_bytes(LINE + 0x500, &start).unwrap();
+    let end = wide(&[u16::from(b'b'), u16::from(b'c'), u16::from(b'd'), 0]);
+    guest.memory.write_bytes(LINE + 0x600, &end).unwrap();
+    assert_eq!(
+        guest.call("wcsncat", &[LINE + 0x500, LINE + 0x600, 2]),
+        LINE + 0x500
+    );
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x502).unwrap(),
+        u16::from(b'b')
+    );
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x504).unwrap(),
+        u16::from(b'c')
+    );
+    assert_eq!(
+        guest.memory.read_u16(LINE + 0x506).unwrap(),
+        0,
+        "terminated after count"
+    );
+
+    // `_wcsdup` copies.
+    let dup = guest.call("_wcsdup", &[LINE + 0x600]);
+    assert_ne!(dup, 0);
+    assert_eq!(guest.memory.read_u16(dup).unwrap(), u16::from(b'b'));
+    assert_eq!(guest.memory.read_u16(dup + 6).unwrap(), 0);
+}
+
 #[test]
 fn formatted_output_refuses_what_it_cannot_print_correctly() {
     let (mut guest, [input, out, _]) = stdio_guest();
@@ -1751,6 +2340,7 @@ fn captured_output_is_bounded() {
 }
 
 const ENOENT: u32 = 2;
+const EEXIST: u32 = 17;
 const EBADF: u32 = 9;
 const EMFILE: u32 = 24;
 const ENOSPC: u32 = 28;
@@ -3739,6 +4329,45 @@ fn arguments_are_assigned_by_position_and_read_the_stack_after_the_fourth() {
 // --- registry ----------------------------------------------------------------
 
 /// Bits above an `int` argument are not part of it.
+/// The legacy CRT data imports the harness image carries after `_errno`,
+/// in this order (#643).
+const LEGACY_DATA_SYMBOLS: [&str; 7] = [
+    "__argc",
+    "__argv",
+    "_environ",
+    "__initenv",
+    "_fmode",
+    "_commode",
+    "_timezone",
+];
+
+/// Legacy-linked binaries import these services from `msvcrt.dll`, where the
+/// compatibility mapping resolves them to the same handlers as the modern
+/// runtime.
+const LEGACY_FUNCTION_SYMBOLS: [&str; 21] = [
+    "__iob_func",
+    "sscanf",
+    "fprintf",
+    "vfprintf",
+    "strlen",
+    "memcpy",
+    "malloc",
+    "free",
+    "strcmp",
+    "memchr",
+    "strchr",
+    "getenv",
+    "sprintf",
+    "_vsnprintf",
+    "_vscprintf",
+    "_time64",
+    "_tzset",
+    "_umask",
+    "_getpid",
+    "rand",
+    "srand",
+];
+
 const JUNK: u64 = 0xFFFF_FFFF_0000_0000;
 /// The low 32 bits of an `int` result of -1.
 const MINUS_ONE: u64 = 0xFFFF_FFFF;
@@ -3923,6 +4552,254 @@ fn crt_app_type_and_math_error_handler_are_recorded() {
     assert_eq!(guest.last_error(), 0);
 }
 
+#[test]
+fn legacy_startup_records_the_app_type() {
+    let mut guest = Guest::new();
+    assert_eq!(guest.state.crt_app_type(), 0);
+    guest.call("__set_app_type", &[JUNK | 1]);
+    assert_eq!(guest.state.crt_app_type(), 1);
+    // The legacy entry and the modern one record in the same place.
+    guest.call("_set_app_type", &[2]);
+    assert_eq!(guest.state.crt_app_type(), 2);
+    assert_eq!(guest.errno(), 0);
+}
+
+#[test]
+fn legacy_startup_builds_the_main_arguments() {
+    let mut guest = Guest::new();
+    let supplied = ["gate-a2.exe", "one", "two words"];
+    guest.state.set_program_arguments(&supplied).unwrap();
+    // Null output pointers are refused with EINVAL.
+    for args in [
+        [0, SCRATCH, SCRATCH + 16, 0, 0],
+        [SCRATCH, 0, SCRATCH + 16, 0, 0],
+        [SCRATCH, SCRATCH + 16, 0, 0, 0],
+    ] {
+        guest.memory.write_u64(SCRATCH, 0xDEAD).unwrap();
+        assert_eq!(
+            guest.call("__getmainargs", &args) & 0xFFFF_FFFF,
+            u64::from(u32::MAX)
+        );
+        assert_eq!(guest.memory.read_u64(SCRATCH).unwrap(), 0xDEAD, "untouched");
+        assert_eq!(guest.errno(), 22);
+    }
+    guest.memory.write_u64(SCRATCH, 0).unwrap();
+    guest.memory.write_u64(SCRATCH + 8, 0).unwrap();
+    guest.memory.write_u64(SCRATCH + 16, 0).unwrap();
+    assert_eq!(
+        guest.call(
+            "__getmainargs",
+            &[SCRATCH, SCRATCH + 8, SCRATCH + 16, 0, 0xBAD]
+        ) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.memory.read_u32(SCRATCH).unwrap(), 3);
+    let table = guest.memory.read_u64(SCRATCH + 8).unwrap();
+    assert!(table != 0);
+    // The same table the modern accessors reach.
+    let modern = guest.call("__p___argv", &[]);
+    assert_eq!(guest.memory.read_u64(modern).unwrap(), table);
+    let mut first = guest.memory.read_u64(table).unwrap();
+    let mut bytes = Vec::new();
+    loop {
+        match guest.memory.read_u8(first).unwrap() {
+            0 => break,
+            byte => bytes.push(byte),
+        }
+        first += 1;
+    }
+    assert_eq!(bytes, b"gate-a2.exe");
+    // The environment is the empty table `_initialize_narrow_environment` builds.
+    let environ = guest.memory.read_u64(SCRATCH + 16).unwrap();
+    assert_eq!(guest.memory.read_u64(environ).unwrap(), 0);
+    // A second call returns the same table: the arguments configure once.
+    assert_eq!(
+        guest.call("__getmainargs", &[SCRATCH, SCRATCH + 8, SCRATCH + 16, 1, 0]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.memory.read_u64(SCRATCH + 8).unwrap(), table);
+}
+
+#[test]
+fn legacy_mb_cur_max_is_one_byte() {
+    let mut guest = Guest::new();
+    assert_eq!(guest.call("___mb_cur_max_func", &[]) & 0xFFFF_FFFF, 1);
+    assert_eq!(guest.errno(), 0);
+}
+
+#[test]
+fn legacy_amsg_exit_ends_the_process() {
+    let mut guest = Guest::new();
+    let (_, exit) = guest.run("_amsg_exit", &[JUNK | 7]);
+    assert_eq!(exit, ExitReason::ProcessExit(7));
+    let (_, again) = guest.run("_amsg_exit", &[3]);
+    assert_eq!(
+        again,
+        ExitReason::ProcessExit(7),
+        "the first exit status wins"
+    );
+}
+
+#[test]
+fn environment_variables_are_never_found_in_the_empty_environment() {
+    let mut guest = Guest::new();
+    guest.memory.write_bytes(SCRATCH, b"PATH\0").unwrap();
+    for symbol in ["GetEnvironmentVariableA", "GetEnvironmentVariableW"] {
+        for args in [
+            [SCRATCH, SCRATCH + 0x40, 32],
+            [0, SCRATCH + 0x40, 32],
+            [SCRATCH, 0, 0],
+        ] {
+            assert_eq!(guest.call(symbol, &args) & 0xFFFF_FFFF, 0, "{symbol}");
+            assert_eq!(guest.last_error(), 203, "{symbol} ERROR_ENVVAR_NOT_FOUND");
+        }
+    }
+}
+
+#[test]
+fn the_hosted_console_has_no_window_and_its_title_round_trips() {
+    let mut guest = Guest::new();
+    assert_eq!(guest.call("GetConsoleWindow", &[]), 0);
+
+    // Null titles and invalid outputs are refused.
+    assert_eq!(guest.call("SetConsoleTitleW", &[0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.last_error(), 87);
+    assert_eq!(guest.call("GetConsoleTitleW", &[0, 32]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("GetConsoleTitleW", &[SCRATCH, 0]) & 0xFFFF_FFFF,
+        0
+    );
+
+    // The title starts empty: length zero, just the terminator written.
+    assert_eq!(
+        guest.call("GetConsoleTitleW", &[SCRATCH, 32]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.memory.read_u16(SCRATCH).unwrap(), 0);
+
+    // A wide round trip. "titre é" is 7 characters.
+    let wide: Vec<u16> = "titre é".encode_utf16().collect();
+    for (index, unit) in wide.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 2 * index as u64, *unit)
+            .unwrap();
+    }
+    guest
+        .memory
+        .write_u16(SCRATCH + 2 * wide.len() as u64, 0)
+        .unwrap();
+    assert_eq!(guest.call("SetConsoleTitleW", &[SCRATCH]) & 0xFFFF_FFFF, 1);
+    guest.memory.write_bytes(SCRATCH, &[0xCC; 0x40]).unwrap();
+    assert_eq!(
+        guest.call("GetConsoleTitleW", &[SCRATCH, 32]) & 0xFFFF_FFFF,
+        7
+    );
+    for (index, unit) in wide.iter().enumerate() {
+        assert_eq!(
+            guest.memory.read_u16(SCRATCH + 2 * index as u64).unwrap(),
+            *unit
+        );
+    }
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 14).unwrap(),
+        0,
+        "terminated"
+    );
+
+    // A short buffer holds less, yet the answer is the full length.
+    assert_eq!(
+        guest.call("GetConsoleTitleW", &[SCRATCH, 4]) & 0xFFFF_FFFF,
+        7
+    );
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 6).unwrap(),
+        0,
+        "terminated at size - 1"
+    );
+
+    // The narrow form converts with the UTF-8 console code page.
+    assert_eq!(
+        guest.call("GetConsoleTitleA", &[SCRATCH, 32]) & 0xFFFF_FFFF,
+        8,
+        "é is two bytes"
+    );
+    assert_eq!(guest.memory.read_u8(SCRATCH + 6).unwrap(), 0xC3);
+    assert_eq!(guest.memory.read_u8(SCRATCH + 7).unwrap(), 0xA9);
+    // A narrow round trip too.
+    guest
+        .memory
+        .write_bytes(SCRATCH, "café".as_bytes())
+        .unwrap();
+    guest.memory.write_u8(SCRATCH + 5, 0).unwrap();
+    assert_eq!(guest.call("SetConsoleTitleA", &[SCRATCH]) & 0xFFFF_FFFF, 1);
+    assert_eq!(
+        guest.call("GetConsoleTitleW", &[SCRATCH, 32]) & 0xFFFF_FFFF,
+        4,
+        "café is 4 wide characters"
+    );
+    assert_eq!(
+        guest.last_error(),
+        87,
+        "successes leave the last error alone"
+    );
+}
+
+#[test]
+fn legacy_data_imports_bind_the_crt_variable_cells() {
+    let mut guest = Guest::new();
+    let supplied = ["prog.exe", "alpha", "beta"];
+    guest.state.set_program_arguments(&supplied).unwrap();
+    // The slot of each data import, in the order of LEGACY_DATA_SYMBOLS.
+    let base = SERVICES.len() + 1;
+    let cell = |guest: &Guest, position: usize| {
+        guest
+            .memory
+            .read_u64(BASE + u64::from(guest.slots[base + position]))
+            .unwrap()
+    };
+    let argc = cell(&guest, 0);
+    let argv = cell(&guest, 1);
+    let environ = cell(&guest, 2);
+    let initenv = cell(&guest, 3);
+    let fmode = cell(&guest, 4);
+    let commode = cell(&guest, 5);
+    let timezone = cell(&guest, 6);
+    // None of them is a dispatch trampoline: a data import binds the
+    // variable itself, below the trampoline range.
+    for address in [argc, argv, environ, initenv, fmode, commode, timezone] {
+        assert!(address != 0, "bound");
+        assert!(
+            address < IMPORT_TRAMPOLINE_BASE_VA,
+            "{address:#x} is no trampoline"
+        );
+    }
+    // `_fmode` starts as _O_TEXT, `_commode` and `_timezone` as zero.
+    assert_eq!(guest.memory.read_u32(fmode).unwrap(), 0x4000);
+    assert_eq!(guest.memory.read_u32(commode).unwrap(), 0);
+    assert_eq!(guest.memory.read_u32(timezone).unwrap(), 0);
+    // `_fmode` and `_commode` are adjacent ints, `_commode` after `_fmode`.
+    assert_eq!(commode, fmode + 4);
+    // Before the runtime configures the arguments the cells are zero.
+    assert_eq!(guest.memory.read_u32(argc).unwrap(), 0);
+    assert_eq!(guest.memory.read_u64(argv).unwrap(), 0);
+
+    // The modern configuration fills the same cells the data imports bound.
+    assert_eq!(guest.call("_configure_narrow_argv", &[1]) & 0xFFFF_FFFF, 0);
+    let modern_argv = guest.call("__p___argv", &[]);
+    let modern_argc = guest.call("__p___argc", &[]);
+    assert_eq!(argv, modern_argv, "the data import is the modern cell");
+    assert_eq!(argc, modern_argc);
+    let table = guest.memory.read_u64(argv).unwrap();
+    assert_ne!(table, 0);
+    assert_eq!(guest.memory.read_u32(argc).unwrap(), 3);
+    // The modern accessor and the data cell read one table.
+    assert_eq!(guest.memory.read_u64(modern_argv).unwrap(), table);
+    // `_environ` and `__initenv` bind one cell, the one `_initialize_narrow_environment` fills.
+    assert_eq!(environ, initenv);
+    assert_eq!(environ, guest.call("__p__environ", &[]));
+}
+
 /// The module and symbol pairs a program built with mingw-w64 14.0.0 (UCRT)
 /// imports these services by, read from such a program's import table.
 #[test]
@@ -4035,7 +4912,7 @@ fn generated_metadata_matches_the_live_registry() {
         );
         assert!(
             registry
-                .resolve("api-ms-win-core-file-l1-1-0.dll", &named(service.symbol))
+                .resolve("api-ms-win-core-file-l2-1-0.dll", &named(service.symbol))
                 .is_none()
         );
     }
@@ -4852,4 +5729,1356 @@ fn memmove_binds_through_the_private_api_set() {
         .map(|index| memory.read_u8(destination + index).unwrap())
         .collect();
     assert_eq!(moved, b"moved");
+}
+
+/// Regression checks for three descriptor edge cases: a read past the end
+/// keeps the seeked position, a zero-byte write does not extend the file,
+/// and a full descriptor table refuses before creating or truncating.
+#[test]
+fn descriptor_edges_past_the_end_and_a_full_table() {
+    let (mut guest, _streams) = stdio_guest();
+    store(&mut guest, "edge.bin", b"abc");
+    guest.memory.write_bytes(NAME, b"edge.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!(fd >= 3, "{fd:x}");
+    // Seek past the end, read: nothing read, position stays at 8.
+    assert_eq!(guest.call("_lseek", &[fd, 8, 0]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_read", &[fd, SCRATCH, 1]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_lseek", &[fd, 0, 1]) & 0xFFFF_FFFF, 8);
+    // A zero-byte write there does not extend the file: a second descriptor
+    // still sees the end at offset 3.
+    assert_eq!(guest.call("_write", &[fd, SCRATCH, 0]) & 0xFFFF_FFFF, 0);
+    let probe = guest.call("_open", &[NAME, 0x8000, 0]) & 0xFFFF_FFFF;
+    assert_eq!(guest.call("_lseek", &[probe, 0, 2]) & 0xFFFF_FFFF, 3);
+    assert_eq!(guest.call("_close", &[probe]) & 0xFFFF_FFFF, 0);
+    // A real write lands at 8 and does extend, with the gap zeroed.
+    guest.memory.write_bytes(SCRATCH, b"Z").unwrap();
+    assert_eq!(guest.call("_write", &[fd, SCRATCH, 1]) & 0xFFFF_FFFF, 1);
+    let probe = guest.call("_open", &[NAME, 0x8000, 0]) & 0xFFFF_FFFF;
+    assert_eq!(guest.call("_lseek", &[probe, 0, 2]) & 0xFFFF_FFFF, 9);
+    assert_eq!(guest.call("_close", &[probe]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+}
+
+/// `fputws`/`fgetws`/`putwchar`/`getwchar` in the C locale: every byte is
+/// its wide character, the C orientation is enforced, and a wide character
+/// above 255 fails the write.
+#[test]
+fn wide_stream_io_writes_and_reads_in_the_c_locale() {
+    let (mut guest, [_stdin, stdout, _error]) = stdio_guest();
+    let wide: Vec<u8> = b"wide line\n"
+        .iter()
+        .flat_map(|byte| [*byte, 0])
+        .chain([0, 0])
+        .collect();
+    guest.memory.write_bytes(STRINGS, &wide).unwrap();
+    let file = opened(&mut guest, "wide-a.txt", "w+b");
+    // fputws returns a non-negative value on success, never WEOF.
+    assert!(guest.call("fputws", &[STRINGS, file]) < 0xFFFF);
+    close(&mut guest, file);
+    assert!(guest.state.standard_output().is_empty());
+
+    let file = opened(&mut guest, "wide-a.txt", "r");
+    guest.memory.write_bytes(SCRATCH, &[0xEE; 64]).unwrap();
+    assert_eq!(guest.call("fgetws", &[SCRATCH, 32, file]), SCRATCH);
+    let mut back = Vec::new();
+    for at in 0..11u64 {
+        back.push(guest.memory.read_u16(SCRATCH + at * 2).unwrap() as u8);
+    }
+    assert_eq!(&back[..10], b"wide line\n");
+    assert_eq!(back[10], 0);
+    close(&mut guest, file);
+
+    // putwchar writes the byte of the character in the C locale.
+    assert_eq!(guest.call("putwchar", &[u64::from(b'A')]), u64::from(b'A'));
+    assert_eq!(guest.state.standard_output(), b"A");
+    // stdout is wide-oriented now: a byte write on it fails, as the CRT
+    // fails the conflict.
+    let byte = place(&mut guest, STRINGS + 0x40, b"B");
+    assert_eq!(
+        guest.call("fputs", &[byte, stdout]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    // A wide character above 255 cannot convert in the C locale.
+    assert_eq!(guest.call("putwchar", &[0x100]), 0xFFFF);
+
+    // getwchar reads one byte as its wide character.
+    let (mut guest, _streams) = stdio_guest();
+    guest.state.set_standard_input(b"Hi there");
+    assert_eq!(guest.call("getwchar", &[]), u64::from(b'H'));
+    assert_eq!(guest.call("getwchar", &[]), u64::from(b'i'));
+    // stdin is wide-oriented now: getchar answers EOF for the conflict.
+    assert_eq!(guest.call("getchar", &[]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+}
+
+/// Write the wide units of a string and return their address.
+fn place_wide(guest: &mut Guest, at: u64, text: &str) -> u64 {
+    let mut bytes = Vec::new();
+    for unit in text.encode_utf16().chain([0]) {
+        bytes.extend(unit.to_le_bytes());
+    }
+    guest.memory.write_bytes(at, &bytes).unwrap();
+    at
+}
+
+/// `__stdio_common_vswprintf` in the C locale: the syntax is printf's, the
+/// counting is in wide units, `%s` is the wide string and `%S` the narrow
+/// one, and truncation follows the same option bits as the narrow forms.
+#[test]
+fn wide_buffer_formatting_counts_in_wide_units() {
+    let (mut guest, _streams) = stdio_guest();
+    let wide_print = |guest: &mut Guest, format_addr: u64, count: u64, slots: &[u64]| -> u64 {
+        for (index, slot) in slots.iter().enumerate() {
+            guest
+                .memory
+                .write_u64(VA_LIST + 8 * index as u64, *slot)
+                .unwrap();
+        }
+        guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+        guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+        let (cpu, exit) = guest.run(
+            "__stdio_common_vswprintf",
+            &[STANDARD, SCRATCH, count, format_addr],
+        );
+        assert_eq!(exit, ExitReason::Halt);
+        cpu.get(Register::Rax) & 0xFFFF_FFFF
+    };
+    let read_wide = |guest: &Guest, at: u64, len: usize| -> String {
+        let mut units = Vec::new();
+        for index in 0..len as u64 {
+            let unit = guest.memory.read_u16(at + index * 2).unwrap();
+            if unit == 0 {
+                break;
+            }
+            units.push(unit);
+        }
+        String::from_utf16(&units).unwrap()
+    };
+
+    // Integers, a wide string, a narrow one, both characters, padding.
+    let wide_arg = place_wide(&mut guest, STRINGS, "wide");
+    let narrow_arg = place(&mut guest, STRINGS + 0x40, b"narrow");
+    let format = place_wide(&mut guest, TEXT, "n=%d w=%s s=%S c=%c%C pad=%5u!");
+    let result = wide_print(
+        &mut guest,
+        format,
+        64,
+        &[
+            42,
+            wide_arg,
+            narrow_arg,
+            u64::from(b'W'),
+            u64::from(b'n'),
+            7,
+        ],
+    );
+    assert_eq!(
+        read_wide(&guest, SCRATCH, 64),
+        "n=42 w=wide s=narrow c=Wn pad=    7!"
+    );
+    assert_eq!(
+        result as usize,
+        "n=42 w=wide s=narrow c=Wn pad=    7!".len()
+    );
+
+    // The terminator is one wide zero, and truncation counts in units.
+    let format = place_wide(&mut guest, TEXT, "abcdef");
+    guest.memory.write_bytes(SCRATCH, &[0xEE; 32]).unwrap();
+    assert_eq!(wide_print(&mut guest, format, 4, &[]), 6);
+    // "abc" and the wide terminator, then the untouched sentinel bytes.
+    assert_eq!(read_wide(&guest, SCRATCH, 4), "abc");
+    assert_eq!(guest.memory.read_u16(SCRATCH + 6).unwrap(), 0);
+    assert_eq!(guest.memory.read_u8(SCRATCH + 8).unwrap(), 0xEE);
+
+    // The size query: null buffer, zero count, the would-be length.
+    let format = place_wide(&mut guest, TEXT, "%d%d%d");
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+    for (index, slot) in [1u64, 22, 333].iter().enumerate() {
+        guest
+            .memory
+            .write_u64(VA_LIST + 8 * index as u64, *slot)
+            .unwrap();
+    }
+    let (cpu, exit) = guest.run("__stdio_common_vswprintf", &[STANDARD, 0, 0, format]);
+    assert_eq!(exit, ExitReason::Halt);
+    assert_eq!(cpu.get(Register::Rax) & 0xFFFF_FFFF, 6);
+
+    // A width or precision from the arguments, as the narrow forms read it.
+    let wide_arg2 = place_wide(&mut guest, STRINGS + 0x60, "xy");
+    let format = place_wide(&mut guest, TEXT, "%*s");
+    assert_eq!(wide_print(&mut guest, format, 16, &[6, wide_arg2]), 6);
+    assert_eq!(read_wide(&guest, SCRATCH, 8), "    xy");
+
+    // %n is invalid here as it is there.
+    let format = place_wide(&mut guest, TEXT, "%n");
+    assert_eq!(wide_print(&mut guest, format, 16, &[]), u32::MAX as u64);
+}
+
+/// Call a service whose arguments past the fourth ride the guest stack
+/// above the shadow space, as compiled code passes them.
+fn call6(guest: &mut Guest, symbol: &str, args: &[u64]) -> u64 {
+    for (index, arg) in args.iter().enumerate().skip(4) {
+        guest
+            .memory
+            .write_u64(STACK_TOP + 32 + 8 * (index - 4) as u64, *arg)
+            .unwrap();
+    }
+    let registers = args.len().min(4);
+    guest.call(symbol, &args[..registers])
+}
+
+#[test]
+fn multibyte_to_wide_converts_utf8_and_the_ansi_page() {
+    let mut guest = Guest::new();
+    guest
+        .memory
+        .map_region(CPBUF, 0x1000, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    // UTF-8 "h\u{e9}\u{20ac}": three characters, five bytes plus terminator.
+    let text = place(&mut guest, CPBUF, "h\u{e9}\u{20ac}".as_bytes());
+    let asked = call6(
+        &mut guest,
+        "MultiByteToWideChar",
+        &[65001, 0, text, u64::MAX, 0, 0],
+    );
+    assert_eq!(asked, 4, "the terminator counts under a -1 byte count");
+    let out = SCRATCH;
+    let wrote = call6(
+        &mut guest,
+        "MultiByteToWideChar",
+        &[65001, 0, text, u64::MAX, out, asked],
+    );
+    assert_eq!(wrote, 4);
+    assert_eq!(guest.memory.read_u16(out).unwrap(), u16::from(b'h'));
+    assert_eq!(guest.memory.read_u16(out + 2).unwrap(), 0xE9);
+    assert_eq!(guest.memory.read_u16(out + 4).unwrap(), 0x20AC);
+    assert_eq!(guest.memory.read_u16(out + 6).unwrap(), 0);
+    // A positive byte count converts exactly that many bytes.
+    let exact = call6(
+        &mut guest,
+        "MultiByteToWideChar",
+        &[65001, 0, text, 1, out, 8],
+    );
+    assert_eq!(exact, 1);
+    // The ANSI page: byte 0x80 is the euro sign, 0x81 is undefined.
+    place(&mut guest, CPBUF + 0x40, &[0x80, 0x81]);
+    let ansi = call6(
+        &mut guest,
+        "MultiByteToWideChar",
+        &[1252, 0, CPBUF + 0x40, 2, out, 8],
+    );
+    assert_eq!(ansi, 2);
+    assert_eq!(guest.memory.read_u16(out).unwrap(), 0x20AC);
+    assert_eq!(
+        guest.memory.read_u16(out + 2).unwrap(),
+        0xFFFD,
+        "a byte the page leaves undefined is replaced"
+    );
+    // CP_ACP resolves to UTF-8, the runtime's ANSI page: the ASCII byte
+    // converts as itself.
+    let pseudo = call6(&mut guest, "MultiByteToWideChar", &[0, 0, CPBUF, 1, out, 8]);
+    assert_eq!(pseudo, 1);
+    assert_eq!(guest.memory.read_u16(out).unwrap(), u16::from(b'h'));
+    // A malformed sequence fails under MB_ERR_INVALID_CHARS and is replaced
+    // without it.
+    place(&mut guest, CPBUF + 0x80, &[0xFF]);
+    let strict = call6(
+        &mut guest,
+        "MultiByteToWideChar",
+        &[65001, 8, CPBUF + 0x80, 1, out, 8],
+    );
+    assert_eq!(strict, 0);
+    assert_eq!(guest.last_error(), 1113, "ERROR_NO_UNICODE_TRANSLATION");
+    let lenient = call6(
+        &mut guest,
+        "MultiByteToWideChar",
+        &[65001, 0, CPBUF + 0x80, 1, out, 8],
+    );
+    assert_eq!(lenient, 1);
+    assert_eq!(guest.memory.read_u16(out).unwrap(), 0xFFFD);
+    // The failures: an unknown page, a zero byte count, flags past the one
+    // documented, and a small output buffer.
+    assert_eq!(
+        call6(
+            &mut guest,
+            "MultiByteToWideChar",
+            &[99999, 0, text, 1, out, 8]
+        ),
+        0
+    );
+    assert_eq!(guest.last_error(), 87, "ERROR_INVALID_PARAMETER");
+    assert_eq!(
+        call6(
+            &mut guest,
+            "MultiByteToWideChar",
+            &[65001, 0, text, 0, out, 8]
+        ),
+        0
+    );
+    assert_eq!(guest.last_error(), 87);
+    assert_eq!(
+        call6(
+            &mut guest,
+            "MultiByteToWideChar",
+            &[65001, 2, text, 1, out, 8]
+        ),
+        0
+    );
+    assert_eq!(guest.last_error(), 1004, "ERROR_INVALID_FLAGS");
+    assert_eq!(
+        call6(
+            &mut guest,
+            "MultiByteToWideChar",
+            &[65001, 0, text, 4, out, 2]
+        ),
+        0
+    );
+    assert_eq!(guest.last_error(), 122, "ERROR_INSUFFICIENT_BUFFER");
+}
+
+#[test]
+fn wide_char_to_multibyte_converts_utf8_and_marks_defaults() {
+    let mut guest = Guest::new();
+    guest
+        .memory
+        .map_region(CPBUF, 0x1000, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    // Wide "h\u{e9}" as units, then a terminator.
+    for (index, unit) in [u16::from(b'h'), 0xE9, 0].iter().enumerate() {
+        guest
+            .memory
+            .write_u16(CPBUF + index as u64 * 2, *unit)
+            .unwrap();
+    }
+    let out = SCRATCH;
+    let wrote = call6(
+        &mut guest,
+        "WideCharToMultiByte",
+        &[65001, 0, CPBUF, u64::MAX, out, 16, 0, 0],
+    );
+    assert_eq!(wrote, 4, "h, two bytes for é, and the terminator");
+    assert_eq!(guest.memory.read_u8(out).unwrap(), b'h');
+    assert_eq!(guest.memory.read_u8(out + 1).unwrap(), 0xC3);
+    assert_eq!(guest.memory.read_u8(out + 2).unwrap(), 0xA9);
+    assert_eq!(guest.memory.read_u8(out + 3).unwrap(), 0);
+    // A character the ANSI page cannot represent becomes the default byte
+    // and sets the used-default flag.
+    guest.memory.write_u16(CPBUF, 0x4E2D).unwrap();
+    guest.memory.write_u16(CPBUF + 2, 0).unwrap();
+    let used = SCRATCH + 0x40;
+    let ansi = call6(
+        &mut guest,
+        "WideCharToMultiByte",
+        &[1252, 0, CPBUF, u64::MAX, out, 16, 0, used],
+    );
+    assert_eq!(ansi, 2);
+    assert_eq!(guest.memory.read_u8(out).unwrap(), b'?');
+    assert_eq!(guest.memory.read_u32(used).unwrap(), 1);
+    // The same input fails under WC_ERR_INVALID_CHARS.
+    let strict = call6(
+        &mut guest,
+        "WideCharToMultiByte",
+        &[1252, 0x80, CPBUF, u64::MAX, out, 16, 0, 0],
+    );
+    assert_eq!(strict, 0);
+    assert_eq!(guest.last_error(), 1113);
+    // UTF-8 refuses the default-character arguments, as documented.
+    guest.memory.write_u8(CPBUF + 0x60, b'!').unwrap();
+    assert_eq!(
+        call6(
+            &mut guest,
+            "WideCharToMultiByte",
+            &[65001, 0, CPBUF, u64::MAX, out, 16, CPBUF + 0x60, 0]
+        ),
+        0
+    );
+    assert_eq!(guest.last_error(), 87);
+    // A size query answers the bytes needed: three for the character in
+    // UTF-8, one for the terminator.
+    let asked = call6(
+        &mut guest,
+        "WideCharToMultiByte",
+        &[65001, 0, CPBUF, u64::MAX, 0, 0, 0, 0],
+    );
+    assert_eq!(asked, 4);
+}
+
+#[test]
+fn the_codepages_answer_their_numbers() {
+    let mut guest = Guest::new();
+    assert_eq!(guest.call("GetACP", &[]), 65001);
+    assert_eq!(guest.call("GetOEMCP", &[]), 437);
+    assert_eq!(guest.call("IsValidCodePage", &[1252]), 1);
+    assert_eq!(guest.call("IsValidCodePage", &[437]), 1);
+    assert_eq!(guest.call("IsValidCodePage", &[65001]), 1);
+    assert_eq!(guest.call("IsValidCodePage", &[0]), 0);
+    assert_eq!(guest.call("IsValidCodePage", &[99999]), 0);
+    let info = SCRATCH;
+    assert_eq!(guest.call("GetCPInfo", &[1252, info]), 1);
+    assert_eq!(guest.memory.read_u32(info).unwrap(), 1);
+    assert_eq!(guest.call("GetCPInfo", &[65001, info]), 1);
+    assert_eq!(guest.memory.read_u32(info).unwrap(), 4);
+    assert_eq!(guest.call("GetCPInfo", &[99999, info]), 0);
+    assert_eq!(guest.last_error(), 87);
+}
+
+#[test]
+fn the_locale_is_en_us_and_answers_its_strings() {
+    let mut guest = Guest::new();
+    guest
+        .memory
+        .map_region(CPBUF, 0x1000, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    assert_eq!(guest.call("GetSystemDefaultLCID", &[]), 0x0409);
+    assert_eq!(guest.call("GetUserDefaultLCID", &[]), 0x0409);
+    assert_eq!(guest.call("GetUserDefaultLangID", &[]), 0x0409);
+    // The locale name comes as wide units, its count including the
+    // terminator, and the size query agrees.
+    let asked = guest.call("GetUserDefaultLocaleName", &[0, 0]);
+    assert_eq!(asked, 6);
+    let wrote = guest.call("GetUserDefaultLocaleName", &[CPBUF, 16]);
+    assert_eq!(wrote, 6);
+    assert_eq!(guest.memory.read_u16(CPBUF).unwrap(), u16::from(b'e'));
+    assert_eq!(guest.memory.read_u16(CPBUF + 6).unwrap(), u16::from(b'U'));
+    assert_eq!(guest.memory.read_u16(CPBUF + 10).unwrap(), 0);
+    assert_eq!(guest.call("GetUserDefaultLocaleName", &[CPBUF, 4]), 0);
+    assert_eq!(guest.last_error(), 122, "ERROR_INSUFFICIENT_BUFFER");
+    // LOCALE_SENGLANGUAGE (0x1001) is "English" in every form.
+    let wide = guest.call("GetLocaleInfoW", &[0x0409, 0x1001, CPBUF, 32]);
+    assert_eq!(wide, 8, "seven letters and the terminator");
+    assert_eq!(guest.memory.read_u16(CPBUF).unwrap(), u16::from(b'E'));
+    let narrow = guest.call("GetLocaleInfoA", &[0x0409, 0x1001, CPBUF, 32]);
+    assert_eq!(narrow, 8);
+    assert_eq!(guest.memory.read_u8(CPBUF).unwrap(), b'E');
+    assert_eq!(guest.memory.read_u8(CPBUF + 7).unwrap(), 0);
+    // The ex form: a null name is the user default, "en-US" any case names
+    // the one locale, anything else fails.
+    place(&mut guest, CPBUF + 0x40, b"E\0N\0-\0u\0s\0\0\0");
+    // The units above were placed as bytes; write them properly as units.
+    for (index, unit) in [b'E', b'N', b'-', b'u', b's', 0u8].iter().enumerate() {
+        guest
+            .memory
+            .write_u16(CPBUF + 0x40 + index as u64 * 2, u16::from(*unit))
+            .unwrap();
+    }
+    let ex = guest.call("GetLocaleInfoEx", &[CPBUF + 0x40, 0x005C, CPBUF, 32]);
+    assert_eq!(ex, 6, "en-US and its terminator");
+    let null_name = guest.call("GetLocaleInfoEx", &[0, 0x000E, CPBUF, 32]);
+    assert_eq!(null_name, 2, "the decimal point and its terminator");
+    assert_eq!(guest.memory.read_u16(CPBUF).unwrap(), u16::from(b'.'));
+    // The failures: another locale, an unknown type, the number form.
+    assert_eq!(
+        guest.call("GetLocaleInfoW", &[0x040C, 0x1001, CPBUF, 32]),
+        0
+    );
+    assert_eq!(guest.last_error(), 87, "ERROR_INVALID_PARAMETER");
+    assert_eq!(
+        guest.call("GetLocaleInfoW", &[0x0409, 0x7777, CPBUF, 32]),
+        0
+    );
+    assert_eq!(guest.last_error(), 87);
+    assert_eq!(
+        guest.call("GetLocaleInfoW", &[0x0409, 0x2000_000E, CPBUF, 32]),
+        0
+    );
+    assert_eq!(guest.last_error(), 87);
+    // The size query and the small buffer.
+    assert_eq!(guest.call("GetLocaleInfoW", &[0x0409, 0x1001, 0, 0]), 8);
+    assert_eq!(guest.call("GetLocaleInfoW", &[0x0409, 0x1001, CPBUF, 4]), 0);
+    assert_eq!(guest.last_error(), 122);
+}
+
+/// Writes args 5 and 6 to the guest stack above the shadow space, then calls
+/// with the first four in registers: the Microsoft x64 calling convention.
+
+#[test]
+fn the_string_comparison_services_answer_in_byte_order() {
+    let mut guest = Guest::new();
+    place(&mut guest, SCRATCH, b"Hello");
+    place(&mut guest, SCRATCH + 0x10, b"HELLO");
+    place(&mut guest, SCRATCH + 0x20, b"world");
+    // Wide "AbC" at 0x30 and "aBc" at 0x40.
+    for (base, text) in [(0x30u64, "AbC"), (0x40, "aBc")] {
+        for (index, unit) in text.encode_utf16().chain([0]).enumerate() {
+            guest
+                .memory
+                .write_u16(SCRATCH + base + index as u64 * 2, unit)
+                .unwrap();
+        }
+    }
+
+    // The lengths count without the terminator, narrow in bytes and wide in units.
+    assert_eq!(guest.call("lstrlenA", &[SCRATCH]), 5);
+    assert_eq!(guest.call("lstrlenW", &[SCRATCH + 0x30]), 3);
+
+    // lstrcpy copies with the terminator and hands the destination back.
+    let copied = guest.call("lstrcpyA", &[SCRATCH + 0x60, SCRATCH + 0x20]);
+    assert_eq!(copied, SCRATCH + 0x60);
+    assert_eq!(guest_string(&guest.memory, SCRATCH + 0x60), b"world");
+
+    // lstrcmp is ordinal; the case-insensitive form folds ASCII letters.
+    assert_eq!(guest.call("lstrcmpA", &[SCRATCH, SCRATCH]) as i32, 0);
+    // Ordinal: 'e'(0x65) > 'E'(0x45), so "Hello" sorts after "HELLO".
+    assert!((guest.call("lstrcmpA", &[SCRATCH, SCRATCH + 0x10]) as i32) > 0);
+    assert!((guest.call("lstrcmpA", &[SCRATCH + 0x10, SCRATCH]) as i32) < 0);
+    assert_eq!(
+        guest.call("lstrcmpiA", &[SCRATCH, SCRATCH + 0x10]) as i32,
+        0
+    );
+    assert!((guest.call("lstrcmpiA", &[SCRATCH, SCRATCH + 0x20]) as i32) != 0);
+
+    // CompareString answers 1/2/3 for less/equal/greater, byte order in both
+    // widths, the case fold only when asked. -1 counts the terminator.
+    let args = [0x0409, 0, SCRATCH, u64::MAX, SCRATCH, u64::MAX];
+    assert_eq!(call6(&mut guest, "CompareStringA", &args), 2);
+    // Ordinal byte order: 'e'(0x65) sorts after 'E'(0x45), so "Hello" is greater.
+    let args = [0x0409, 0, SCRATCH, u64::MAX, SCRATCH + 0x10, u64::MAX];
+    assert_eq!(call6(&mut guest, "CompareStringA", &args), 3);
+    let args = [0x0409, 1, SCRATCH, u64::MAX, SCRATCH + 0x10, u64::MAX];
+    assert_eq!(call6(&mut guest, "CompareStringA", &args), 2);
+    let args = [
+        0x0409,
+        0,
+        SCRATCH + 0x30,
+        u64::MAX,
+        SCRATCH + 0x40,
+        u64::MAX,
+    ];
+    assert_eq!(call6(&mut guest, "CompareStringW", &args), 1); // 'A'<'a' ordinal
+    let args = [
+        0x0409,
+        1,
+        SCRATCH + 0x30,
+        u64::MAX,
+        SCRATCH + 0x40,
+        u64::MAX,
+    ];
+    assert_eq!(call6(&mut guest, "CompareStringW", &args), 2);
+
+    // Failures: another locale, unsupported flags.
+    let args = [0x040C, 0, SCRATCH, u64::MAX, SCRATCH, u64::MAX];
+    assert_eq!(call6(&mut guest, "CompareStringA", &args), 0);
+    assert_eq!(guest.last_error(), 87);
+    let args = [0x0409, 4, SCRATCH, u64::MAX, SCRATCH, u64::MAX];
+    assert_eq!(call6(&mut guest, "CompareStringA", &args), 0);
+    assert_eq!(guest.last_error(), 87);
+
+    // GetStringTypeW classifies ASCII for CT_CTYPE1, terminator included for -1.
+    let got = guest.call(
+        "GetStringTypeW",
+        &[1, SCRATCH + 0x30, u64::MAX, SCRATCH + 0x80],
+    );
+    assert_eq!(got, 1);
+    let upper_alpha = 0x1 | 0x100 | 0x80; // 'A' is upper, alpha, xdigit
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0x80).unwrap(), upper_alpha);
+    let lower_alpha = 0x2 | 0x100 | 0x80; // 'b' is lower, alpha and a hex digit
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0x82).unwrap(), lower_alpha);
+    let upper_c = 0x1 | 0x100 | 0x80; // 'C' is upper, alpha and a hex digit
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0x84).unwrap(), upper_c);
+    // The terminator is classified too for -1: U+0000 is a control character.
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0x86).unwrap(), 0x20);
+    // CT_CTYPE2 is refused.
+    let got = guest.call(
+        "GetStringTypeW",
+        &[2, SCRATCH + 0x30, u64::MAX, SCRATCH + 0x80],
+    );
+    assert_eq!(got, 0);
+    assert_eq!(guest.last_error(), 87);
+
+    // LCMapStringW maps ASCII case, counts the terminator for -1, answers the
+    // required size for a null destination, and fails a small buffer.
+    let wrote = call6(
+        &mut guest,
+        "LCMapStringW",
+        &[0x0409, 0x200, SCRATCH + 0x40, u64::MAX, SCRATCH + 0xA0, 8],
+    );
+    assert_eq!(wrote, 4);
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 0xA0).unwrap(),
+        u16::from(b'A')
+    );
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 0xA2).unwrap(),
+        u16::from(b'B')
+    );
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0xA6).unwrap(), 0);
+    let asked = call6(
+        &mut guest,
+        "LCMapStringW",
+        &[0x0409, 0x100, SCRATCH + 0x40, u64::MAX, 0, 0],
+    );
+    assert_eq!(asked, 4);
+    let small = call6(
+        &mut guest,
+        "LCMapStringW",
+        &[0x0409, 0x200, SCRATCH + 0x40, u64::MAX, SCRATCH + 0xA0, 2],
+    );
+    assert_eq!(small, 0);
+    assert_eq!(guest.last_error(), 122);
+    // Sort keys and friends are refused.
+    let bad = call6(
+        &mut guest,
+        "LCMapStringW",
+        &[0x0409, 0x400, SCRATCH + 0x40, u64::MAX, SCRATCH + 0xA0, 8],
+    );
+    assert_eq!(bad, 0);
+    assert_eq!(guest.last_error(), 87);
+}
+
+#[test]
+fn the_console_identity_and_standard_handles_round_trip() {
+    let mut guest = Guest::new();
+
+    // The three devices answer one fixed pseudo-handle each, distinct.
+    let input = guest.call("GetStdHandle", &[0xFFFF_FFF6]);
+    let output = guest.call("GetStdHandle", &[0xFFFF_FFF5]);
+    let error = guest.call("GetStdHandle", &[0xFFFF_FFF4]);
+    assert!(input != 0 && output != 0 && error != 0);
+    assert!(input != output && output != error && input != error);
+    // An unknown device fails.
+    assert_eq!(guest.call("GetStdHandle", &[0xFFFF_FF00]), 0);
+    assert_eq!(guest.last_error(), 87);
+
+    // The console code pages are UTF-8, coherent with the process code page.
+    assert_eq!(guest.call("GetConsoleCP", &[]), 65001);
+    assert_eq!(guest.call("GetConsoleOutputCP", &[]), 65001);
+
+    // The modes round-trip; an unknown handle fails.
+    assert_eq!(guest.call("GetConsoleMode", &[output, SCRATCH]), 1);
+    let default_mode = guest.memory.read_u32(SCRATCH).unwrap();
+    assert_ne!(default_mode, 0);
+    assert_eq!(guest.call("SetConsoleMode", &[output, 0x3]), 1);
+    assert_eq!(guest.call("GetConsoleMode", &[output, SCRATCH]), 1);
+    assert_eq!(guest.memory.read_u32(SCRATCH).unwrap(), 0x3);
+    assert_eq!(guest.call("GetConsoleMode", &[0xDEAD, SCRATCH]), 0);
+    assert_eq!(guest.last_error(), 6);
+
+    // WriteConsoleA appends bytes to the output capture printf uses, and
+    // reports the characters consumed. The fifth argument rides the stack.
+    place(&mut guest, SCRATCH, b"console-out");
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    let wrote = guest.call("WriteConsoleA", &[output, SCRATCH, 11, SCRATCH + 0x40]);
+    assert_eq!(wrote, 1);
+    assert_eq!(guest.memory.read_u32(SCRATCH + 0x40).unwrap(), 11);
+
+    // WriteConsoleW converts to UTF-8 in the same capture, in order after it.
+    for (index, unit) in "widé".encode_utf16().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 0x10 + index as u64 * 2, unit)
+            .unwrap();
+    }
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    let wrote = guest.call(
+        "WriteConsoleW",
+        &[output, SCRATCH + 0x10, 4, SCRATCH + 0x40],
+    );
+    assert_eq!(wrote, 1);
+    // é is two UTF-8 bytes: the capture holds the narrow then the wide text.
+    let capture = guest.state.standard_output();
+    let text = String::from_utf8_lossy(&capture);
+    assert!(text.contains("console-out"), "{text}");
+    assert!(text.contains("widé"), "{text}");
+    assert!(text.find("console-out").unwrap() < text.find("widé").unwrap());
+
+    // WriteConsole to the error handle goes to the error capture instead.
+    place(&mut guest, SCRATCH + 0x20, b"err-text");
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    assert_eq!(
+        guest.call("WriteConsoleA", &[error, SCRATCH + 0x20, 8, 0]),
+        1
+    );
+    let capture = guest.state.standard_error();
+    assert!(String::from_utf8_lossy(&capture).contains("err-text"));
+
+    // A write through the input handle or an unknown handle fails.
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    assert_eq!(guest.call("WriteConsoleA", &[input, SCRATCH, 1, 0]), 0);
+    assert_eq!(guest.last_error(), 6);
+
+    // ReadConsoleA hands one line back with CR LF restored, counting bytes.
+    guest.state.set_standard_input(b"first line\nsecond");
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    let got = guest.call("ReadConsoleA", &[input, SCRATCH + 0x60, 32, SCRATCH + 0x80]);
+    assert_eq!(got, 1);
+    assert_eq!(guest.memory.read_u32(SCRATCH + 0x80).unwrap(), 12);
+    let mut line = Vec::new();
+    for at in 0..12u64 {
+        line.push(guest.memory.read_u8(SCRATCH + 0x60 + at).unwrap());
+    }
+    assert_eq!(line, b"first line\r\n");
+
+    // SetStdHandle stores a replacement and GetStdHandle answers it; a write
+    // through the replacement then fails honestly, not silently.
+    assert_eq!(guest.call("SetStdHandle", &[0xFFFF_FFF5, 0x5555]), 1);
+    assert_eq!(guest.call("GetStdHandle", &[0xFFFF_FFF5]), 0x5555);
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    assert_eq!(guest.call("WriteConsoleA", &[0x5555, SCRATCH, 1, 0]), 0);
+    assert_eq!(guest.last_error(), 6);
+}
+
+#[test]
+fn legacy_function_imports_run_the_same_services() {
+    let mut guest = Guest::new();
+    // Every legacy import binds: the count assertion in `Guest::new` covers it.
+    // `strlen` measures the string the narrow form receives.
+    guest.memory.write_bytes(SCRATCH, b"legacy\0").unwrap();
+    assert_eq!(guest.call("strlen", &[SCRATCH]), 6);
+    // `memcpy` copies and answers the destination.
+    assert_eq!(
+        guest.call("memcpy", &[SCRATCH + 0x20, SCRATCH, 7]),
+        SCRATCH + 0x20
+    );
+    let mut copied = [0u8; 7];
+    guest
+        .memory
+        .read_bytes(SCRATCH + 0x20, &mut copied)
+        .unwrap();
+    assert_eq!(&copied, b"legacy\0");
+    // `malloc` and `free` round trip.
+    let allocation = guest.call("malloc", &[0x40]);
+    assert_ne!(allocation, 0);
+    guest.call("free", &[allocation]);
+    // `strcmp` orders its operands.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x40, b"legacy\0")
+        .unwrap();
+    assert_eq!(guest.call("strcmp", &[SCRATCH, SCRATCH + 0x40]), 0);
+    // `memchr` finds the byte and misses the absent one.
+    assert_eq!(
+        guest.call("memchr", &[SCRATCH, u64::from(b'g'), 6]),
+        SCRATCH + 2
+    );
+    assert_eq!(guest.call("memchr", &[SCRATCH, u64::from(b'z'), 6]), 0);
+    // `strchr` finds the terminator itself, as the documentation requires.
+    assert_eq!(guest.call("strchr", &[SCRATCH, 0]), SCRATCH + 6);
+    // `getenv` misses every name in the empty environment.
+    guest.memory.write_bytes(SCRATCH + 0x60, b"PATH\0").unwrap();
+    assert_eq!(guest.call("getenv", &[SCRATCH + 0x60]), 0);
+}
+
+#[test]
+fn legacy_printf_forms_format_and_count() {
+    let mut guest = Guest::new();
+    // The work area is a heap allocation, larger than the fixture scratch.
+    let work = guest.call("malloc", &[0x200]);
+    assert_ne!(work, 0);
+    // `sprintf` reads its variadic arguments from the calling convention and
+    // terminates the text it writes.
+    guest.memory.write_bytes(SCRATCH, b"%d-%s\0").unwrap();
+    guest.memory.write_bytes(work + 0x40, b"fin\0").unwrap();
+    let len = guest.call("sprintf", &[work + 0x80, SCRATCH, 42, work + 0x40]);
+    assert_eq!(len, 6);
+    let mut text = [0u8; 7];
+    guest.memory.read_bytes(work + 0x80, &mut text).unwrap();
+    assert_eq!(&text, b"42-fin\0");
+    // `_vscprintf` counts the same text through the va_list form: the slots
+    // sit contiguously in memory.
+    guest.memory.write_u64(work + 0x100, 42).unwrap();
+    guest.memory.write_u64(work + 0x108, work + 0x40).unwrap();
+    assert_eq!(guest.call("_vscprintf", &[SCRATCH, work + 0x100]), 6);
+    // `_vsnprintf` fills what fits and answers -1 when the text does not.
+    assert_eq!(
+        guest.call("_vsnprintf", &[work + 0x180, 4, SCRATCH, work + 0x100]),
+        u64::from(u32::MAX)
+    );
+    let mut short = [0u8; 4];
+    guest.memory.read_bytes(work + 0x180, &mut short).unwrap();
+    assert_eq!(&short, b"42-f");
+    // Room for the terminator: the text fits and the answer is its length.
+    assert_eq!(
+        guest.call("_vsnprintf", &[work + 0x180, 7, SCRATCH, work + 0x100]),
+        6
+    );
+    let mut whole = [0u8; 7];
+    guest.memory.read_bytes(work + 0x180, &mut whole).unwrap();
+    assert_eq!(&whole, b"42-fin\0");
+}
+
+#[test]
+fn legacy_time_pid_mask_and_random_services_run() {
+    let mut guest = Guest::new();
+    // `_time64` answers the injected clock: the fixture starts at
+    // 0x01DA000012345678 100-nanosecond intervals past 1601 and advances a
+    // few ticks an operation, so the seconds sit inside the window the two
+    // readings around the call bracket.
+    guest.call("GetSystemTimeAsFileTime", &[SCRATCH]);
+    let before = guest.memory.read_u64(SCRATCH).unwrap();
+    let seconds = guest.call("_time64", &[0]);
+    guest.call("GetSystemTimeAsFileTime", &[SCRATCH]);
+    let after = guest.memory.read_u64(SCRATCH).unwrap();
+    let unix = |filetime: u64| (filetime - 116_444_736_000_000_000) / 10_000_000;
+    assert!(unix(before) <= seconds && seconds <= unix(after));
+    assert_eq!(seconds, 0x652C_E246);
+    // The store form writes the same value through a non-null argument.
+    let work = guest.call("malloc", &[0x40]);
+    assert_eq!(guest.call("_time64", &[work]), seconds);
+    assert_eq!(guest.memory.read_u64(work).unwrap(), seconds);
+    // `_tzset` is void and leaves no error behind.
+    guest.call("_tzset", &[]);
+    // `_umask` answers the previous mask: first zero, then the one just set.
+    assert_eq!(guest.call("_umask", &[0o022]), 0);
+    assert_eq!(guest.call("_umask", &[0o077]), 0o022);
+    // `_getpid` answers the hosted process identifier, as GetCurrentProcessId.
+    assert_ne!(guest.call("_getpid", &[]), 0);
+    // `rand` follows the documented recurrence from its default seed: the
+    // published reference sequence of the legacy CRT is 41, 18467, 6334.
+    assert_eq!(guest.call("rand", &[]), 41);
+    assert_eq!(guest.call("rand", &[]), 18467);
+    assert_eq!(guest.call("rand", &[]), 6334);
+    // `srand` restarts the sequence: seed 1 is the default state.
+    guest.call("srand", &[1]);
+    assert_eq!(guest.call("rand", &[]), 41);
+}
+
+#[test]
+fn legacy_descriptor_seek_and_tell_positions() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    // Open a file in binary, write eight bytes, and measure with the 64-bit
+    // forms: the position after the write is 8.
+    guest.memory.write_bytes(NAME, b"fd64.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    guest.memory.write_bytes(buf, b"abcdefgh").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf, 8]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_telli64", &[fd]), 8);
+    // A negative offset from the end reaches position 6, and a positive one
+    // from the start reaches past the end, as seeking permits.
+    assert_eq!(guest.call("_lseeki64", &[fd, (-2i64) as u64, 2]), 6);
+    assert_eq!(guest.call("_telli64", &[fd]), 6);
+    assert_eq!(guest.call("_lseeki64", &[fd, 20, 0]), 20);
+    // A position before the start and an unknown origin are -1 with EINVAL.
+    assert_eq!(guest.call("_lseeki64", &[fd, (-40i64) as u64, 0]), u64::MAX);
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.call("_lseeki64", &[fd, 0, 9]), u64::MAX);
+    // The standard descriptors cannot be sought.
+    assert_eq!(guest.call("_lseeki64", &[0, 0, 1]), u64::MAX);
+    assert_eq!(guest.errno(), EBADF);
+    // `_setmode` answers the previous translation: the file opened binary.
+    assert_eq!(guest.call("_setmode", &[fd, 0x4000]), 0x8000);
+    assert_eq!(guest.call("_setmode", &[fd, 0x8000]), 0x4000);
+    // A bad descriptor and a bad mode are -1 with their errnos.
+    assert_eq!(
+        guest.call("_setmode", &[77, 0x4000]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(
+        guest.call("_setmode", &[fd, 0x2000]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    assert_eq!(guest.errno(), EINVAL);
+}
+
+#[test]
+fn legacy_descriptor_duplication_shares_the_position() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    guest.memory.write_bytes(NAME, b"dup.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    // `_dup` answers the lowest free descriptor, and a seek through the
+    // original moves the position the duplication reads at.
+    let copy = guest.call("_dup", &[fd]) & 0xFFFF_FFFF;
+    assert_eq!(copy, fd + 1);
+    guest.memory.write_bytes(buf, b"abcdefgh").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf, 8]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_lseeki64", &[fd, 4, 0]), 4);
+    let mut bytes = [0u8; 4];
+    assert_eq!(guest.call("_read", &[copy, buf, 4]) & 0xFFFF_FFFF, 4);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"efgh", "the position is shared");
+    // Closing the original keeps the file open through the duplication.
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_lseeki64", &[copy, 0, 0]), 0);
+    // `_dup2` rewires the target, closing whatever it was, and a target that
+    // already is the descriptor is itself.
+    assert_eq!(guest.call("_dup2", &[copy, copy]) & 0xFFFF_FFFF, copy);
+    assert_eq!(guest.call("_dup2", &[copy, 9]) & 0xFFFF_FFFF, 9);
+    assert_eq!(guest.call("_read", &[9, buf, 2]) & 0xFFFF_FFFF, 2);
+    // A duplication of nothing and a bad target are -1 with EBADF.
+    assert_eq!(guest.call("_dup", &[77]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_dup2", &[77, 10]) & 0xFFFF_FFFF, MINUS_ONE);
+}
+
+#[test]
+fn legacy_strdup_and_ldexp_run() {
+    let mut guest = Guest::new();
+    let text = guest.call("malloc", &[32]);
+    guest.memory.write_bytes(text, b"copy me\0").unwrap();
+    let copy = guest.call("_strdup", &[text]);
+    assert_ne!(copy, 0);
+    assert_ne!(copy, text);
+    let mut bytes = [0u8; 8];
+    guest.memory.read_bytes(copy, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"copy me\0");
+    // The copy is a heap allocation `free` releases.
+    assert_eq!(guest.call("free", &[copy]), 0);
+    // `ldexp` takes its exponent in RDX and the value in XMM0: the scaling is
+    // exact, 1.5 * 2^4 = 24 and the minimum subnormal is 1.0 scaled by -1074.
+    let mut scaled = |bits: u64, exponent: i32| {
+        guest.xmm[0] = u128::from(bits);
+        let (cpu, exit) = guest.run("ldexp", &[0xDEAD_BEEF, exponent as u64]);
+        assert_eq!(exit, ExitReason::Halt);
+        cpu.xmm[0] as u64
+    };
+    assert_eq!(scaled(0x3FF8_0000_0000_0000, 4), 0x4038_0000_0000_0000); // 1.5 -> 24
+    assert_eq!(scaled(0x3FF0_0000_0000_0000, -1074), 1); // 1.0 -> min subnormal
+    assert_eq!(scaled(0x3FF0_0000_0000_0000, -1075), 0); // underflows to zero
+    assert_eq!(scaled(0x7FF0_0000_0000_0000, -5), 0x7FF0_0000_0000_0000); // inf stays
+}
+
+#[test]
+fn legacy_create_and_temporary_names_run() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    // `_creat` makes a writable file the descriptor table serves, truncating
+    // an existing one.
+    guest.memory.write_bytes(buf, b"cr.bin\0").unwrap();
+    let fd = guest.call("_creat", &[buf, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    assert_eq!(guest.call("_write", &[fd, buf, 4]) & 0xFFFF_FFFF, 4);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    // `_mktemp` rewrites the trailing X run into a free name: the letter
+    // first, then the counter's digits, and a second call differs.
+    guest.memory.write_bytes(buf, b"tmpXXXXXX\0").unwrap();
+    assert_eq!(guest.call("_mktemp", &[buf]), buf);
+    let mut first = [0u8; 10];
+    guest.memory.read_bytes(buf, &mut first).unwrap();
+    assert_eq!(&first[..4], b"tmpa", "{first:?}");
+    // Once the name is taken a fresh template answers the next candidate.
+    let fd = guest.call("_creat", &[buf, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd));
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"tmpXXXXXX\0").unwrap();
+    assert_eq!(guest.call("_mktemp", &[buf]), buf);
+    let mut second = [0u8; 10];
+    guest.memory.read_bytes(buf, &mut second).unwrap();
+    assert_ne!(&first[..9], &second[..9], "the taken name is skipped");
+    // A template without the X run is null with EINVAL.
+    guest.memory.write_bytes(buf, b"plain\0").unwrap();
+    assert_eq!(guest.call("_mktemp", &[buf]), 0);
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.call("_mktemp", &[0]), 0);
+}
+
+#[test]
+fn legacy_fdopen_wraps_a_descriptor() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    guest.memory.write_bytes(buf, b"fd.bin\0").unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    // `_fdopen` moves the descriptor's state into a stream: writes through
+    // the stream move the position the descriptor reads at, as one file.
+    guest.memory.write_bytes(buf + 16, b"rb\0").unwrap();
+    let file = guest.call("_fdopen", &[fd, buf + 16]);
+    assert_ne!(file, 0);
+    guest.memory.write_bytes(buf + 32, b"abcdefgh").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 32, 8]) & 0xFFFF_FFFF, 8);
+    assert_eq!(guest.call("_lseeki64", &[fd, 0, 0]), 0);
+    assert_eq!(guest.call("fgets", &[buf + 40, 5, file]), buf + 40);
+    let mut bytes = [0u8; 4];
+    guest.memory.read_bytes(buf + 40, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"abcd");
+    // `fclose` takes the descriptor with it: the fd is no longer open.
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, MINUS_ONE);
+    // A bad mode string and a standard-stream descriptor are null with EINVAL.
+    guest.memory.write_bytes(buf + 16, b"zz\0").unwrap();
+    let fd = guest.call("_open", &[buf, 0, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd));
+    assert_eq!(guest.call("_fdopen", &[fd, buf + 16]), 0);
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_fdopen", &[0, buf + 16]), 0);
+}
+
+#[test]
+fn legacy_fstat64_fills_the_legacy_structure() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    let stat = guest.call("malloc", &[64]);
+    guest.memory.write_bytes(buf, b"st.bin\0").unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    guest.memory.write_bytes(buf + 16, b"12345678").unwrap();
+    assert_eq!(guest.call("_write", &[fd, buf + 16, 8]) & 0xFFFF_FFFF, 8);
+    // The structure answers the mode of a regular file and the length of the
+    // content, at the offsets the cross-compiler fixes.
+    assert_eq!(guest.call("_fstat64", &[fd, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0xF000, 0x8000);
+    assert_eq!(guest.memory.read_u64(stat + 24).unwrap(), 8);
+    assert_eq!(
+        guest.memory.read_u64(stat + 32).unwrap(),
+        0,
+        "no time model"
+    );
+    // A descriptor that is not open is -1 with EBADF; a null buffer EINVAL.
+    assert_eq!(guest.call("_fstat64", &[77, stat]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_fstat64", &[fd, 0]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EINVAL);
+}
+
+#[test]
+fn legacy_directories_are_made_and_removed() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    // `_mkdir` makes the directory a file can be written into, nested or not.
+    guest.memory.write_bytes(buf, b"adir\0").unwrap();
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EEXIST);
+    guest.memory.write_bytes(buf, b"adir\\inner\0").unwrap();
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, 0);
+    // A file inside the directory blocks its removal until it goes.
+    guest
+        .memory
+        .write_bytes(buf, b"adir\\inner\\f.bin\0")
+        .unwrap();
+    let fd = guest.call("_open", &[buf, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"adir\0").unwrap();
+    assert_eq!(guest.call("_rmdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    // Missing parents and missing directories are ENOENT.
+    guest.memory.write_bytes(buf, b"nope\\deep\0").unwrap();
+    assert_eq!(guest.call("_mkdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), ENOENT);
+    guest.memory.write_bytes(buf, b"nope\0").unwrap();
+    assert_eq!(guest.call("_rmdir", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), ENOENT);
+    // An empty directory is removed: the inner one first, then the parent
+    // once the file is gone.
+    assert_eq!(guest.call("remove", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
+}
+
+#[test]
+fn legacy_pipes_carry_bytes_between_ends() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    // `_pipe` answers two descriptors sharing one queue: what the write end
+    // takes the read end gives back, in order.
+    assert_eq!(guest.call("_pipe", &[buf, 4096, 0]) & 0xFFFF_FFFF, 0);
+    let read = guest.memory.read_u32(buf).unwrap() as u64;
+    let write = guest.memory.read_u32(buf + 4).unwrap() as u64;
+    assert!(
+        (3..0x8000).contains(&read) && read + 1 == write,
+        "{read:x} {write:x}"
+    );
+    guest.memory.write_bytes(buf + 16, b"pipe").unwrap();
+    assert_eq!(guest.call("_write", &[write, buf + 16, 4]) & 0xFFFF_FFFF, 4);
+    assert_eq!(guest.call("_read", &[read, buf + 32, 4]) & 0xFFFF_FFFF, 4);
+    let mut bytes = [0u8; 4];
+    guest.memory.read_bytes(buf + 32, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"pipe");
+    // The directions do not cross: the write end does not read, the read
+    // end does not write.
+    assert_eq!(
+        guest.call("_read", &[write, buf + 32, 1]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    assert_eq!(
+        guest.call("_write", &[read, buf + 16, 1]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    // Once the write end closes and the queue empties, the read end answers
+    // end of file: zero bytes.
+    assert_eq!(guest.call("_close", &[write]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[read, buf + 32, 4]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[read]) & 0xFFFF_FFFF, 0);
+}
+
+#[test]
+fn legacy_iob_array_carries_the_standard_descriptors() {
+    let mut guest = Guest::new();
+    // `__iob_func` answers the one array on every call, and the three
+    // legacy `FILE` objects carry their descriptor at offset 28 and the
+    // direction flag at 24, 48 bytes apart as the mingw header fixes them.
+    let base = guest.call("__iob_func", &[0]);
+    assert_ne!(base, 0);
+    assert_eq!(guest.call("__iob_func", &[0]), base, "the array is one");
+    assert_eq!(guest.memory.read_u32(base + 24).unwrap(), 1); // stdin reads
+    assert_eq!(guest.memory.read_u32(base + 28).unwrap(), 0);
+    assert_eq!(guest.memory.read_u32(base + 48 + 24).unwrap(), 2); // stdout writes
+    assert_eq!(guest.memory.read_u32(base + 48 + 28).unwrap(), 1);
+    assert_eq!(guest.memory.read_u32(base + 96 + 24).unwrap(), 2); // stderr writes
+    assert_eq!(guest.memory.read_u32(base + 96 + 28).unwrap(), 2);
+    // The buffer fields start empty: a legacy stream is unbuffered, and
+    // every byte goes through `_filbuf`/`_flsbuf`, as on Windows.
+    assert_eq!(guest.memory.read_u64(base).unwrap(), 0);
+    assert_eq!(guest.memory.read_u64(base + 8).unwrap(), 0);
+    assert_eq!(guest.memory.read_u64(base + 16).unwrap(), 0);
+}
+
+#[test]
+fn legacy_fprintf_writes_through_the_iob_streams() {
+    let mut guest = Guest::new();
+    // `stdout` is the second object of the `__iob_func` array, 48 bytes
+    // after the first, as the mingw-w64 `_iobuf` stride fixes it.
+    let base = guest.call("__iob_func", &[0]);
+    assert_ne!(base, 0);
+    let stdout = base + 48;
+    let stderr = base + 96;
+    // `fprintf` reads its variadic arguments from the calling convention.
+    let work = guest.call("malloc", &[0x100]);
+    assert_ne!(work, 0);
+    guest.memory.write_bytes(SCRATCH, b"%d-%s\0").unwrap();
+    guest.memory.write_bytes(work + 0x40, b"fin\0").unwrap();
+    let len = guest.call("fprintf", &[stdout, SCRATCH, 42, work + 0x40]);
+    assert_eq!(len, 6);
+    assert_eq!(guest.state.standard_output(), b"42-fin");
+    // stderr is the third object, captured apart.
+    assert_eq!(guest.call("fprintf", &[stderr, SCRATCH, 7, work + 0x40]), 5);
+    // `vfprintf` formats through the argument pointer: the slots sit
+    // contiguously in memory, as a Win64 va_list does.
+    guest.memory.write_u64(work + 0x80, 42).unwrap();
+    guest.memory.write_u64(work + 0x88, work + 0x40).unwrap();
+    assert_eq!(guest.call("vfprintf", &[stdout, SCRATCH, work + 0x80]), 6);
+    assert_eq!(guest.state.standard_output(), b"42-fin42-fin");
+    // A null stream is invalid: -1 with EINVAL, and nothing is written.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fprintf", &[0, SCRATCH, 42, work + 0x40]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.state.standard_output(), b"42-fin42-fin");
+}
+
+#[test]
+fn ferror_reports_the_failed_write_of_a_file_stream() {
+    let mut guest = Guest::new();
+    // A stream opened read-only refuses the write: the byte is EOF and the
+    // error indicator is set, as the CRT sets it for any failed write.
+    guest.memory.write_bytes(SCRATCH, b"data.bin\0").unwrap();
+    guest.memory.write_bytes(SCRATCH + 0x20, b"r\0").unwrap();
+    guest.memory.write_bytes(SCRATCH + 0x28, b"w\0").unwrap();
+    // The file exists: create it first with a write-mode open.
+    let made = guest.call("fopen", &[SCRATCH, SCRATCH + 0x28]);
+    assert_ne!(made, 0);
+    guest.call("fclose", &[made]);
+    let file = guest.call("fopen", &[SCRATCH, SCRATCH + 0x20]);
+    assert_ne!(file, 0);
+    assert_eq!(guest.call("ferror", &[file]), 0);
+    assert_eq!(guest.call("fputc", &[u64::from(b'x'), file]), MINUS_ONE);
+    assert_ne!(guest.call("ferror", &[file]), 0);
+    // `clearerr` resets the indicator.
+    guest.call("clearerr", &[file]);
+    assert_eq!(guest.call("ferror", &[file]), 0);
+    guest.call("fclose", &[file]);
+}
+
+#[test]
+fn putc_writes_one_character_like_fputc() {
+    let (mut guest, [_, out, _]) = stdio_guest();
+    // `putc` is `fputc` exactly, as Microsoft's documentation states.
+    for character in [u64::from(b'A'), u64::from(b'B')] {
+        assert_eq!(guest.call("putc", &[character, out]), character);
+    }
+    assert_eq!(guest.state.standard_output(), b"AB");
+    // A null stream is EOF with EINVAL, as for `fputc`.
+    guest.set_errno(0);
+    assert_eq!(guest.call("putc", &[u64::from(b'C'), 0]), MINUS_ONE);
+    assert_eq!(guest.errno(), EINVAL);
+}
+
+#[test]
+fn wcscpy_copies_and_wcsnicmp_compares_case_insensitively() {
+    let mut guest = Guest::new();
+    let wide = |text: &[u16]| -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for unit in text {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes
+    };
+    // `wcscpy` copies the terminator too and answers the destination.
+    guest
+        .memory
+        .write_bytes(SCRATCH, &wide(&[u16::from(b'H'), u16::from(b'i')]))
+        .unwrap();
+    assert_eq!(
+        guest.call("wcscpy", &[SCRATCH + 0x40, SCRATCH]),
+        SCRATCH + 0x40
+    );
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 0x40).unwrap(),
+        u16::from(b'H')
+    );
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0x44).unwrap(), 0);
+    // `_wcsnicmp` folds ASCII case: "hi" equals "HI", and orders the rest.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x20, &wide(&[u16::from(b'h'), u16::from(b'I')]))
+        .unwrap();
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x40, 2]),
+        0
+    );
+    // The count bounds the comparison: a difference past it is unseen.
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x40, 1]),
+        0
+    );
+    // 'h' against 'H' alone are equal; ordering shows on real differences.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x20, &wide(&[u16::from(b'a')]))
+        .unwrap();
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x40, 1]) & 0xFFFF_FFFF,
+        u64::from(u32::MAX)
+    );
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x40, SCRATCH + 0x20, 1]),
+        1
+    );
+    // A unit outside ASCII compares exactly, with no folding.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x20, &wide(&[0x100]))
+        .unwrap();
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x20, 1]),
+        0
+    );
+}
+
+#[test]
+fn legacy_sscanf_follows_the_reference_vectors() {
+    let mut guest = Guest::new();
+    let work = guest.call("malloc", &[0x400]);
+    assert_ne!(work, 0);
+    // input at work, format at work+0x100, outputs at work+0x200 onward.
+    let scan = |guest: &mut Guest, input: &[u8], format: &[u8], slots: &[u64]| -> u64 {
+        guest.memory.write_bytes(work, input).unwrap();
+        guest.memory.write_u8(work + input.len() as u64, 0).unwrap();
+        guest.memory.write_bytes(work + 0x100, format).unwrap();
+        guest
+            .memory
+            .write_u8(work + 0x100 + format.len() as u64, 0)
+            .unwrap();
+        let mut args = vec![work, work + 0x100];
+        args.extend_from_slice(slots);
+        guest.call("sscanf", &args)
+    };
+    let int_at = |guest: &Guest, offset: u64| guest.memory.read_u32(work + 0x200 + offset).unwrap();
+    // v1: "42 rest" %d -> r=1 d=42. The reference vectors come from the same
+    // program compiled for the host, run on this machine.
+    assert_eq!(scan(&mut guest, b"42 rest", b"%d", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 42);
+    // v2: leading whitespace and a negative sign.
+    assert_eq!(scan(&mut guest, b"   -17 x", b"%d", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), (-17i32) as u32);
+    // v3: %i reads 0x1F as hexadecimal.
+    assert_eq!(scan(&mut guest, b"0x1F end", b"%i", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 31);
+    // v4: %i reads 010 as octal.
+    assert_eq!(scan(&mut guest, b"010 zz", b"%i", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 8);
+    // v5: %x reads ff.
+    assert_eq!(scan(&mut guest, b"ff gg", b"%x", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 255);
+    // v7/v8: %s stops at whitespace and honors the width.
+    assert_eq!(
+        scan(&mut guest, b"abc", "%s".as_bytes(), &[work + 0x200]),
+        1
+    );
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), b'a');
+    assert_eq!(guest.memory.read_u8(work + 0x203).unwrap(), 0);
+    assert_eq!(scan(&mut guest, b"ab cd", b"%3s", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x202).unwrap(), 0);
+    // v9/v10: whitespace in the format skips it; %c without it does not.
+    assert_eq!(scan(&mut guest, b"  q", b" %c", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), b'q');
+    assert_eq!(scan(&mut guest, b"  q", b"%c", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), 32);
+    // v11: a literal comma must match.
+    assert_eq!(
+        scan(
+            &mut guest,
+            b"12,34",
+            b"%d,%d",
+            &[work + 0x200, work + 0x204]
+        ),
+        2
+    );
+    assert_eq!(int_at(&guest, 0), 12);
+    assert_eq!(int_at(&guest, 4), 34);
+    // v12: suppression consumes but does not assign.
+    assert_eq!(scan(&mut guest, b"12 99", b"%d %*d", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 12);
+    // v13/v14: a mismatch answers 0; empty input answers EOF.
+    assert_eq!(scan(&mut guest, b"x", b"%d", &[work + 0x200]), 0);
+    assert_eq!(
+        scan(&mut guest, b"", b"%d", &[work + 0x200]),
+        u64::from(u32::MAX)
+    );
+    // v18/v19: scansets collect members and non-members.
+    assert_eq!(scan(&mut guest, b"abcXYZ", b"%[abc]", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x203).unwrap(), 0);
+    assert_eq!(scan(&mut guest, b"xyzabc", b"%[^abc]", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), b'x');
+    assert_eq!(guest.memory.read_u8(work + 0x203).unwrap(), 0);
+    // v20: %n writes the consumed count and is not itself counted.
+    assert_eq!(
+        scan(
+            &mut guest,
+            b"123abc",
+            b"%d%n",
+            &[work + 0x200, work + 0x204]
+        ),
+        1
+    );
+    assert_eq!(int_at(&guest, 0), 123);
+    assert_eq!(int_at(&guest, 4), 3);
+    // v21: %lld reads past 32 bits.
+    assert_eq!(scan(&mut guest, b"4294967296", b"%lld", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u64(work + 0x200).unwrap(), 4294967296);
+    // v22: %hd writes a short.
+    assert_eq!(scan(&mut guest, b"327", b"%hd", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u16(work + 0x200).unwrap(), 327);
+    // v27: %hhu writes a byte.
+    assert_eq!(scan(&mut guest, b"200", b"%hhu", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), 200);
+}
+
+#[test]
+fn vsscanf_scans_through_the_va_list() {
+    let mut guest = Guest::new();
+    let work = guest.call("malloc", &[0x200]);
+    assert_ne!(work, 0);
+    // input at work, format at work+0x40, output cell at work+0x60, the
+    // va_list slots at work+0x100.
+    guest.memory.write_bytes(work, b"42 rest\0").unwrap();
+    guest.memory.write_bytes(work + 0x40, b"%d\0").unwrap();
+    guest.memory.write_u64(work + 0x100, work + 0x60).unwrap();
+    // __stdio_common_vsscanf(options, buffer, count, format, locale,
+    // arguments) — the count of the string form is -1, and the locale and
+    // the argument pointer ride the stack above the shadow space.
+    for options in [0u64, 0x02, 0x04, 0x07] {
+        guest.memory.write_u64(work + 0x60, 0).unwrap();
+        guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+        guest
+            .memory
+            .write_u64(STACK_TOP + 40, work + 0x100)
+            .unwrap();
+        let (cpu, exit) = guest.run(
+            "__stdio_common_vsscanf",
+            &[options, work, u64::MAX, work + 0x40],
+        );
+        assert_eq!(
+            (cpu.get(Register::Rax) as u32 as i32, exit),
+            (1, ExitReason::Halt),
+            "options {options:#x}"
+        );
+        assert_eq!(guest.memory.read_u32(work + 0x60).unwrap(), 42);
+    }
 }

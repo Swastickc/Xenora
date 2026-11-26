@@ -59,14 +59,39 @@ fn crt_tmp(name: &str) -> PathBuf {
     build("build-crt-tmp.sh", "run-program-crt-tmp", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_fds(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-fds.sh", "run-program-crt-fds", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_clock(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-clock.sh", "run-program-crt-clock", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_wide(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-wide.sh", "run-program-crt-wide", &OUT).join(format!("{name}.exe"))
+}
+
 fn crt_files(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-crt-files.sh", "run-program-crt-files", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_wstream(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-wstream.sh", "run-program-crt-wstream", &OUT).join(format!("{name}.exe"))
+}
+
 fn crt_math(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-crt-math.sh", "run-program-crt-math", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_swprintf(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-swprintf.sh", "run-program-crt-swprintf", &OUT).join(format!("{name}.exe"))
 }
 
 fn freestanding(name: &str) -> PathBuf {
@@ -77,6 +102,26 @@ fn freestanding(name: &str) -> PathBuf {
 fn crt_sprintf(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-crt-sprintf.sh", "run-program-crt-sprintf", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_codepages(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-codepages.sh", "run-program-crt-codepages", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_locale(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-locale.sh", "run-program-crt-locale", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_compare(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-compare.sh", "run-program-crt-compare", &OUT).join(format!("{name}.exe"))
+}
+
+fn crt_console(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-console.sh", "run-program-crt-console", &OUT).join(format!("{name}.exe"))
 }
 
 fn crt_winfiles(name: &str) -> PathBuf {
@@ -173,6 +218,11 @@ fn run_program_with_input(path: &Path, arguments: &[&str], input: &[u8]) -> Run 
         stdout: String::from_utf8(output.stdout).expect("ASCII output"),
         stderr: String::from_utf8(output.stderr).expect("ASCII output"),
     }
+}
+
+fn crt_secure(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-secure.sh", "run-program-crt-secure", &OUT).join(format!("{name}.exe"))
 }
 
 fn crt_stdin(name: &str) -> PathBuf {
@@ -402,6 +452,113 @@ fn a_program_using_temporary_files_passes_its_checks() {
         run.stdout.contains("check 10 failed: control"),
         "{}",
         run.stdout
+    );
+}
+
+#[test]
+fn a_program_using_file_descriptors_passes_its_checks() {
+    for name in ["crt-fds-O0", "crt-fds-O2"] {
+        let run = run_program(&crt_fds(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(run.stdout, "crt_fds: 35 of 35 checks passed\r\n", "{name}");
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_fds("crt-fds-break"), &[], &[]);
+    assert_eq!(run.code, Some(36), "{}", run.stderr);
+    assert!(
+        run.stdout.contains("check 36 failed: control"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_program_using_fopen_s_and_stream_indicators_passes_its_checks() {
+    for name in ["crt-secure-O0", "crt-secure-O2"] {
+        let run = run_program(&crt_secure(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(
+            run.stdout, "crt_secure: 16 of 16 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_secure("crt-secure-break"), &[], &[]);
+    assert_eq!(run.code, Some(17), "{}", run.stderr);
+    assert!(
+        run.stdout.contains("check 17 failed: control"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_program_using_the_c_clock_passes_its_checks() {
+    for name in ["crt-clock-O0", "crt-clock-O2"] {
+        let run = run_program(&crt_clock(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(
+            run.stdout, "crt_clock: 18 of 18 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_clock("crt-clock-break"), &[], &[]);
+    assert_eq!(run.code, Some(19), "{}", run.stderr);
+    assert!(
+        run.stdout.contains("check 19 failed: control"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_program_using_wide_conversions_passes_its_checks() {
+    for name in ["crt-wide-O0", "crt-wide-O2"] {
+        let run = run_program(&crt_wide(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(run.stdout, "crt_wide: 17 of 17 checks passed\r\n", "{name}");
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program(&crt_wide("crt-wide-break"), &[], &[]);
+    assert_eq!(run.code, Some(18), "{}", run.stderr);
+    assert!(
+        run.stdout.contains("check 18 failed: control"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_program_reading_and_writing_wide_stream_io_passes_its_checks() {
+    for name in ["crt-wstream-O0", "crt-wstream-O2"] {
+        let run = run_program(&crt_wstream(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        // `putwchar` oriented stdout wide: its byte is the program's only
+        // standard output; the diagnostics are on stderr.
+        assert_eq!(run.stdout, "z", "{name}");
+        assert_eq!(run.stderr, "crt-wstream: 17/17 checks passed\r\n", "{name}");
+    }
+    let run = run_program(&crt_wstream("crt-wstream-break"), &[], &[]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "check 2 failed: fputws\r\ncrt-wstream: 16/17 checks passed\r\n"
+    );
+}
+
+#[test]
+fn a_program_formatting_wide_strings_in_buffers_passes_its_checks() {
+    for name in ["crt-swprintf-O0", "crt-swprintf-O2"] {
+        let run = run_program(&crt_swprintf(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(run.stderr, "crt-swprintf: 9/9 checks passed\r\n", "{name}");
+    }
+    let run = run_program(&crt_swprintf("crt-swprintf-break"), &[], &[]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "check 1 failed: integer conversion\r\ncrt-swprintf: 8/9 checks passed\r\n"
     );
 }
 
@@ -882,6 +1039,82 @@ fn a_program_using_the_buffer_forms_of_printf_runs_and_detects_a_wrong_result() 
         run.stdout,
         "!\r\ncheck 31 failed: control\r\ncrt_sprintf: 30 of 31 checks passed\r\n"
     );
+}
+
+#[test]
+fn a_program_using_the_encoding_conversions_runs_and_detects_a_wrong_result() {
+    for name in ["crt-codepages-O0", "crt-codepages-O2"] {
+        let run = run_program(&crt_codepages(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(
+            run.stdout, "crt-codepages: 23/23 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_codepages("crt-codepages-break"), &[], &[]);
+    assert_eq!(run.code, Some(24), "control: {:?}", run.stdout);
+    assert_eq!(
+        run.stdout,
+        "check 24 failed: the control fails\r\ncrt-codepages: 1/24 checks failed, first 24\r\n"
+    );
+}
+
+#[test]
+fn a_program_using_the_locale_identity_runs_and_detects_a_wrong_result() {
+    for name in ["crt-locale-O0", "crt-locale-O2"] {
+        let run = run_program(&crt_locale(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(run.stdout, "crt-locale: 18/18 checks passed\r\n", "{name}");
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_locale("crt-locale-break"), &[], &[]);
+    assert_eq!(run.code, Some(19), "control: {:?}", run.stdout);
+    assert_eq!(
+        run.stdout,
+        "check 19 failed: the control fails\r\ncrt-locale: 1/19 checks failed, first 19\r\n"
+    );
+}
+
+#[test]
+fn a_program_comparing_strings_runs_and_detects_a_wrong_result() {
+    for name in ["crt-compare-O0", "crt-compare-O2"] {
+        let run = run_program(&crt_compare(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(run.stdout, "crt-compare: 26/26 checks passed\r\n", "{name}");
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_compare("crt-compare-break"), &[], &[]);
+    assert_eq!(run.code, Some(27), "control: {:?}", run.stdout);
+    assert_eq!(
+        run.stdout,
+        "check 27 failed: the control fails\r\ncrt-compare: 1/27 checks failed, first 27\r\n"
+    );
+}
+
+#[test]
+fn a_program_using_the_console_runs_and_detects_a_wrong_result() {
+    for name in ["crt-console-O0", "crt-console-O2"] {
+        let run = run_program(&crt_console(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert!(
+            run.stdout.contains("crt-console: 20/20 checks passed\r\n"),
+            "{name}: {:?}",
+            run.stdout
+        );
+        // printf and WriteConsole share one capture, in call order.
+        // WriteConsole writes its bytes raw: LF, not the CRT's CR LF.
+        let narrow = run.stdout.find("narrow\n").expect("narrow write");
+        let wide = run.stdout.find("wide\n").expect("wide write");
+        assert!(narrow < wide, "{name}: {:?}", run.stdout);
+        assert!(run.stderr.contains("to-error"), "{name}: {:?}", run.stderr);
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_console("crt-console-break"), &[], &[]);
+    assert_eq!(run.code, Some(21), "control: {:?}", run.stdout);
 }
 
 #[test]

@@ -43,6 +43,11 @@ before creating the object.
 | --- | --- | --- |
 | `XenoraCreateDevice` | `ppDevice` | Creates a device and writes its handle to `*ppDevice`. |
 | `XenoraCreateCommandQueue` | `device`, `listType`, `ppQueue` | Creates a command queue. `listType` must be `0` (direct). |
+| `XenoraCreateFence` | `device`, `initialValue`, `ppFence` | Creates a device-owned timeline fence at a `u64` value and writes its handle to `*ppFence`. |
+| `XenoraQueueSignal` | `queue`, `fence`, `value` | Signals the fence after earlier work and waits on that queue. |
+| `XenoraQueueWait` | `queue`, `fence`, `value` | Records a dependency for the next execute or signal on the queue. |
+| `XenoraGetFenceCompletedValue` | `fence`, `pValue` | Writes the completed `u64` value to eight writable guest bytes at `pValue`. |
+| `XenoraDestroyFence` | `fence` | Destroys a fence once all applicable queue waits have been consumed. |
 | `XenoraCreateCommandAllocator` | `device`, `listType`, `ppAllocator` | Creates a command allocator. `listType` must be `0`. |
 | `XenoraCreateCommandList` | `device`, `allocator`, `listType`, `ppList` | Creates a recording command list. `listType` must be `0`. |
 | `XenoraCreateBuffer` | `device`, `guestAddr`, `byteLength`, `ppResource` | Creates a buffer whose contents are the `byteLength` guest bytes at `guestAddr`. |
@@ -75,6 +80,21 @@ before creating the object.
 `0` for the deterministic software reference rasteriser and `1` for native
 Metal. A guest that reports the wrong backend has not run on the GPU, and the
 integration test checks this value rather than assuming it.
+
+## Timeline fences
+
+The queue and fence must belong to the same device. `XenoraQueueWait` records
+the dependency and returns immediately. The next execute or signal applies it.
+If its producer has yet to submit a sufficient signal, that operation returns
+`HRESULT_FROM_WIN32(ERROR_TIMEOUT)` (`0x800705B4`). The queue retains the wait so
+the guest can submit the producer signal and retry. Signals can repeat their
+current value or increase it. Decreasing signals and `UINT64_MAX` are invalid.
+The runtime allows 16 live fences and eight distinct pending fences per queue.
+
+A native graphics context uses its configured Metal shared-event factory. The
+software reference applies the same ordering with an in-memory timeline.
+A device with a live fence, or a fence with a pending queue wait, cannot be
+destroyed. Those refusals return `E_ACCESSDENIED`.
 
 ## Resource lifetime
 
@@ -150,8 +170,8 @@ reference rasteriser remains the default on hosts without a GPU.
 - Descriptor heaps, shader resource views, samplers and root signatures are
   reachable, but constant buffers, upload or readback heaps, render target
   views and depth views are not.
-- Execution is synchronous. There is no guest-visible fence or queue
-  overlap yet.
+- Draw execution and readback are synchronous. Fences order work across guest
+  queues.
 - The `x86_64` guest architecture is decoded by Xenora; the guest is not an
   Xbox title and no console behaviour is established here.
 
@@ -180,4 +200,10 @@ and exercised by
 cargo test --locked -p xenora-loader --test guest_textured_path -- --nocapture
 ```
 
-The native Metal variants need a GPU and are run by `scripts/test-gpu.sh`.
+`scripts/test-gpu.sh` runs the native Metal variants of the geometry and texture tests.
+
+The two-queue fence workload is
+[`fixtures/pe/guest-fence.c`](../../fixtures/pe/guest-fence.c). Rebuild or compare
+the checked-in PE with `fixtures/pe/build-guest-fence.sh --check`. Run the software
+reference test with `cargo test --locked -p xenora-loader --test guest_graphics_fences`.
+Add `--features gpu-tests` for the native shared-event test on Apple Silicon.

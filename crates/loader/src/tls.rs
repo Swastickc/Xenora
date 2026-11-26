@@ -109,6 +109,8 @@ pub struct TlsDirectory {
     pub callbacks: Vec<u64>,
 }
 
+const TLS_DIRECTORY_SIZE: usize = 40;
+
 /// Parse the TLS directory from raw PE file bytes.
 pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDirectory>, TlsError> {
     if bytes.len() < 0x40 {
@@ -155,22 +157,22 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
         return Ok(None);
     }
 
-    let tls_off = pe
-        .rva_to_file_offset(tls_rva)
-        .ok_or(TlsError::DirectoryOutOfBounds { rva: tls_rva })?;
-
-    if tls_off + 40 > bytes.len() {
+    if (tls_size as usize) < TLS_DIRECTORY_SIZE
+        || tls_rva
+            .checked_add(tls_size)
+            .is_none_or(|end| end > pe.size_of_image)
+    {
         return Err(TlsError::DirectoryOutOfBounds { rva: tls_rva });
     }
+    let directory = read_directory(bytes, pe, tls_rva)
+        .ok_or(TlsError::DirectoryOutOfBounds { rva: tls_rva })?;
 
-    let raw_data_start_va = u64::from_le_bytes(bytes[tls_off..tls_off + 8].try_into().unwrap());
-    let raw_data_end_va = u64::from_le_bytes(bytes[tls_off + 8..tls_off + 16].try_into().unwrap());
-    let index_address = u64::from_le_bytes(bytes[tls_off + 16..tls_off + 24].try_into().unwrap());
-    let callbacks_address =
-        u64::from_le_bytes(bytes[tls_off + 24..tls_off + 32].try_into().unwrap());
-    let size_of_zero_fill =
-        u32::from_le_bytes(bytes[tls_off + 32..tls_off + 36].try_into().unwrap());
-    let characteristics = u32::from_le_bytes(bytes[tls_off + 36..tls_off + 40].try_into().unwrap());
+    let raw_data_start_va = u64::from_le_bytes(directory[0..8].try_into().unwrap());
+    let raw_data_end_va = u64::from_le_bytes(directory[8..16].try_into().unwrap());
+    let index_address = u64::from_le_bytes(directory[16..24].try_into().unwrap());
+    let callbacks_address = u64::from_le_bytes(directory[24..32].try_into().unwrap());
+    let size_of_zero_fill = u32::from_le_bytes(directory[32..36].try_into().unwrap());
+    let characteristics = u32::from_le_bytes(directory[36..40].try_into().unwrap());
 
     let callbacks = read_callbacks(bytes, pe, callbacks_address)?;
 
@@ -183,6 +185,29 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
         characteristics,
         callbacks,
     }))
+}
+
+/// Read the known directory fields by RVA, across raw-backed sections if needed.
+fn read_directory(bytes: &[u8], pe: &ParsedPe, mut rva: u32) -> Option<[u8; TLS_DIRECTORY_SIZE]> {
+    let mut directory = [0; TLS_DIRECTORY_SIZE];
+    let mut remaining = directory.as_mut_slice();
+    while !remaining.is_empty() {
+        let (section, offset) = pe.sections.iter().find_map(|section| {
+            let offset = rva.checked_sub(section.virtual_address)?;
+            (section.raw_data_ptr != 0 && offset < section.raw_data_size)
+                .then_some((section, offset))
+        })?;
+        let len = remaining
+            .len()
+            .min((section.raw_data_size - offset) as usize);
+        let start = (section.raw_data_ptr as usize).checked_add(offset as usize)?;
+        let source = bytes.get(start..start.checked_add(len)?)?;
+        let (target, tail) = remaining.split_at_mut(len);
+        target.copy_from_slice(source);
+        remaining = tail;
+        rva = rva.checked_add(len as u32)?;
+    }
+    Some(directory)
 }
 
 /// Read the null-terminated callback array that `address` names.
@@ -646,6 +671,97 @@ mod tests {
             let directory = parse_tls_directory(&bytes[..length], &parsed(SECTION_SIZE));
             assert!(matches!(directory, Ok(None)), "length {length:#x}");
         }
+    }
+
+    #[test]
+    fn tls_directory_requires_the_fixed_size_and_fits_the_image() {
+        let mut bytes = file(ARRAY, ARRAY_RVA, &[FIRST, 0]);
+        let pe = parsed(SECTION_SIZE);
+        let size_at = OPTIONAL_HEADER + 188;
+        for size in [1u32, 39, pe.size_of_image - SECTION_RVA + 1, u32::MAX] {
+            bytes[size_at..size_at + 4].copy_from_slice(&size.to_le_bytes());
+            assert!(
+                matches!(
+                    parse_tls_directory(&bytes, &pe),
+                    Err(TlsError::DirectoryOutOfBounds { rva: SECTION_RVA })
+                ),
+                "size {size:#x}"
+            );
+        }
+        bytes[size_at..size_at + 4].fill(0);
+        assert!(parse_tls_directory(&bytes, &pe).unwrap().is_none());
+        for size in [40u32, pe.size_of_image - SECTION_RVA] {
+            bytes[size_at..size_at + 4].copy_from_slice(&size.to_le_bytes());
+            assert_eq!(callbacks_of(&bytes, &pe).unwrap(), [FIRST]);
+        }
+        bytes[OPTIONAL_HEADER + 184..size_at].fill(0);
+        assert!(parse_tls_directory(&bytes, &pe).unwrap().is_none());
+    }
+
+    #[test]
+    fn tls_directory_uses_file_backed_rvas_across_sections() {
+        const FIRST_SECTION_SIZE: u32 = 0x1000;
+        let mut bytes = file(ARRAY, ARRAY_RVA, &[FIRST, 0]);
+        let (start, end, index) = (
+            IMAGE_BASE + 0x1200,
+            IMAGE_BASE + 0x1210,
+            IMAGE_BASE + 0x1220,
+        );
+        for (field, value) in [start, end, index].into_iter().enumerate() {
+            let at = SECTION_FILE + field * 8;
+            bytes[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[SECTION_FILE + 32..SECTION_FILE + 36].copy_from_slice(&17u32.to_le_bytes());
+        bytes[SECTION_FILE + 36..SECTION_FILE + 40].copy_from_slice(&0x0050_0000u32.to_le_bytes());
+        let directory_rva = SECTION_RVA + FIRST_SECTION_SIZE - 16;
+        let first = SECTION_FILE + FIRST_SECTION_SIZE as usize - 16;
+        let second = first + 16 + 0x200;
+        bytes.resize(second + 0x200, 0);
+        bytes.copy_within(SECTION_FILE..SECTION_FILE + 40, first);
+        bytes.copy_within(first + 16..first + 40, second);
+        bytes[OPTIONAL_HEADER + 184..OPTIONAL_HEADER + 188]
+            .copy_from_slice(&directory_rva.to_le_bytes());
+
+        // The bytes beyond the first section form a plausible directory on
+        // disk, but represent a gap or a zero-filled tail in the image.
+        let mut pe = parsed(FIRST_SECTION_SIZE);
+        pe.sections[0].raw_data_size = FIRST_SECTION_SIZE;
+        for virtual_size in [FIRST_SECTION_SIZE, FIRST_SECTION_SIZE + 0x100] {
+            pe.sections[0].virtual_size = virtual_size;
+            assert!(matches!(
+                parse_tls_directory(&bytes, &pe),
+                Err(TlsError::DirectoryOutOfBounds { rva }) if rva == directory_rva
+            ));
+        }
+
+        // Offset zero also supplies no section bytes in the mapped image.
+        pe.sections[0].virtual_size = FIRST_SECTION_SIZE;
+        pe.sections[0].raw_data_ptr = 0;
+        assert!(matches!(
+            parse_tls_directory(&bytes, &pe),
+            Err(TlsError::DirectoryOutOfBounds { rva }) if rva == directory_rva
+        ));
+
+        pe.sections[0].raw_data_ptr = SECTION_FILE as u32;
+        pe.number_of_sections = 2;
+        pe.sections.push(PeSection {
+            name: ".cont".into(),
+            virtual_address: SECTION_RVA + FIRST_SECTION_SIZE,
+            virtual_size: 0x200,
+            raw_data_ptr: second as u32,
+            raw_data_size: 0x200,
+            characteristics: crate::pe::IMAGE_SCN_MEM_READ,
+            permissions: MemoryPermissions::READ_ONLY,
+        });
+        bytes[first + 16..first + 40].fill(0xCC);
+        let directory = parse_tls_directory(&bytes, &pe).unwrap().unwrap();
+        assert_eq!(directory.raw_data_start_va, start);
+        assert_eq!(directory.raw_data_end_va, end);
+        assert_eq!(directory.index_address, index);
+        assert_eq!(directory.callbacks_address, ARRAY);
+        assert_eq!(directory.size_of_zero_fill, 17);
+        assert_eq!(directory.characteristics, 0x0050_0000);
+        assert_eq!(directory.callbacks, [FIRST]);
     }
 
     const CODE: u64 = 0x40_0000;

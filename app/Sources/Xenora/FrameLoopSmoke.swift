@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import Combine
 import CoreGraphics
 import CXenora
 import Foundation
@@ -15,6 +16,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var next: xenora_session = 1
     private var codes: [Operation: Int32] = [:]
     private var calls: [Operation] = []
+    private var sentInputs: [(handle: xenora_session, input: xenora_controller_input)] = []
     private var invalidCalls = 0
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
 
@@ -29,6 +31,10 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     func count(_ operation: Operation) -> Int {
         lock.withLock { calls.filter { $0 == operation }.count }
     }
+
+    var inputs: [xenora_controller_input] { lock.withLock { sentInputs.map(\.input) } }
+
+    var lastInputHandle: xenora_session? { lock.withLock { sentInputs.last?.handle } }
 
     var clean: Bool { lock.withLock { live == 0 && invalidCalls == 0 } }
 
@@ -66,7 +72,10 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     }
 
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32 {
-        lock.withLock { call(.sendInput, handle) }
+        lock.withLock {
+            sentInputs.append((handle, input))
+            return call(.sendInput, handle)
+        }
     }
 
     func pause(_ handle: xenora_session) -> Int32 { lock.withLock { call(.pause, handle) } }
@@ -176,7 +185,8 @@ func checkFrameLoopFailures() async -> [String] {
            "teardown leaked its model or session")
     try? await Task.sleep(for: .milliseconds(35))
     expect(teardownAPI.count(.status) == 0, "poll ran after teardown")
-    return failures + (await checkFramePolling())
+    return failures + (await checkFramePolling()) + checkControllerComposition()
+        + checkControllerHandoffs() + checkControllerErrorRecovery()
 }
 
 @MainActor
@@ -250,6 +260,191 @@ private func checkFramePolling() async -> [String] {
     expect(model.state == XENORA_LOOP_STOPPED && model.canStart && model.image === second
            && api.count(.status) == 4,
            "stop did not immediately publish terminal status and retain the last frame")
+    return failures
+}
+
+@MainActor
+private func checkControllerComposition() -> [String] {
+    var failures: [String] = []
+    let left = UInt32(XENORA_INPUT_LEFT)
+    let right = UInt32(XENORA_INPUT_RIGHT)
+    let action = UInt32(XENORA_INPUT_ACTION_A)
+    let api = ScriptedFrameLoop()
+    let controller = DetectedController(
+        identity: ObjectIdentifier(api), name: "Held controller", supportsHaptics: false,
+        snapshot: ControllerSnapshot(
+            buttons: left | action, x: 1, y: -1, leftTrigger: 0.25, rightTrigger: 0.75
+        )
+    )
+    let model = FrameLoopModel(api: api, readController: { controller })
+    model.startInteractive()
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    model.sendInput(buttons: right)
+    model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
+    model.pause()
+
+    let inputs = api.inputs
+    let expectedButtons = [left | action, right | action, left | action]
+    let actualButtons = inputs.map { $0.state.buttons }
+    if actualButtons != expectedButtons {
+        failures.append("controller composition sent buttons \(actualButtons), expected \(expectedButtons)")
+    }
+    if !inputs.allSatisfy({ input in
+        input.state.connected == 1 && input.state.stick_x == 32767 && input.state.stick_y == -32767
+            && input.left_trigger == 16384 && input.right_trigger == 49151
+    }) {
+        failures.append("screen direction or release replaced the connected controller's analog input")
+    }
+    return failures
+}
+
+@MainActor
+private func checkControllerHandoffs() -> [String] {
+    var failures: [String] = []
+    let left = UInt32(XENORA_INPUT_LEFT)
+    let right = UInt32(XENORA_INPUT_RIGHT)
+    let up = UInt32(XENORA_INPUT_UP)
+    let action = UInt32(XENORA_INPUT_ACTION_B)
+    let api = ScriptedFrameLoop()
+    func controller(_ buttons: UInt32, x: Float, trigger: Float) -> DetectedController {
+        DetectedController(
+            identity: ObjectIdentifier(api), name: "Changing controller", supportsHaptics: false,
+            snapshot: ControllerSnapshot(buttons: buttons, x: x, y: 0, leftTrigger: trigger, rightTrigger: 0)
+        )
+    }
+    let probe = FramePollingProbe()
+    probe.controller = controller(left, x: 0, trigger: 0)
+    let model = FrameLoopModel(api: api, readController: { probe.controller })
+
+    func expectInput(_ count: Int, _ buttons: UInt32, connected: UInt8, x: Int16 = 0,
+                     trigger: UInt16 = 0, _ context: String) {
+        let inputs = api.inputs
+        guard inputs.count == count, let input = inputs.last else {
+            failures.append("\(context): sent \(inputs.count) inputs, expected \(count)")
+            return
+        }
+        if input.state.buttons != buttons || input.state.connected != connected
+            || input.state.stick_x != x || input.left_trigger != trigger {
+            failures.append("\(context): wrong effective controller input")
+        }
+    }
+
+    model.startInteractive()
+    model.sendInput(buttons: right)
+    expectInput(1, right, connected: 1, "screen takes directional priority")
+
+    probe.controller = controller(right, x: 0, trigger: 0)
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    expectInput(1, right, connected: 1, "physical direction masked by the screen stays deduplicated")
+
+    probe.controller = controller(up | action, x: -1, trigger: 0.5)
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
+    model.resume()
+    expectInput(2, right | up | action, connected: 1, x: -32767, trigger: 32768,
+                "physical Up, action and analog input pass through the horizontal overlay")
+
+    model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
+    expectInput(3, up | action, connected: 1, x: -32767, trigger: 32768,
+                "Release restores the changed physical direction")
+    model.sendInput(buttons: right)
+
+    probe.controller = nil
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    expectInput(5, right, connected: 1, "disconnect retains only the screen direction")
+
+    api.fail(.sendInput, Int32(XENORA_INVALID_STATE))
+    model.sendInput(buttons: UInt32(XENORA_INPUT_NONE))
+    expectInput(6, 0, connected: 0, "Release attempts disconnected neutral state")
+    if model.errorMessage != "Failed to send controller input (status 9)." {
+        failures.append("failed input update did not report its status")
+    }
+
+    api.report(XENORA_LOOP_RUNNING, completed: 1, frame: 0, pixel: 0)
+    model.resume()
+    expectInput(7, 0, connected: 0, "an unchanged snapshot is retried after a failed send")
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    expectInput(7, 0, connected: 0, "a successful retry is deduplicated")
+
+    probe.controller = controller(left, x: 0, trigger: 0)
+    model.sendInput(buttons: right)
+    expectInput(8, right, connected: 1, "screen direction before session replacement")
+    model.start()
+    model.pause()
+    expectInput(8, right, connected: 1, "standard session does not submit controller input")
+    model.startInteractive()
+    model.pause()
+    expectInput(9, left, connected: 1, "a replacement interactive session starts with only physical input")
+
+    let previousHandle = api.lastInputHandle
+    model.startInteractive()
+    model.pause()
+    expectInput(10, left, connected: 1, "another replacement resends the same held physical input")
+    if api.lastInputHandle == previousHandle {
+        failures.append("the identical physical input was not submitted to the new session")
+    }
+    return failures
+}
+
+@MainActor
+private func checkControllerErrorRecovery() -> [String] {
+    let api = ScriptedFrameLoop()
+    let model = FrameLoopModel(api: api, readController: { nil })
+    let left = UInt32(XENORA_INPUT_LEFT)
+    let release = UInt32(XENORA_INPUT_NONE)
+    let inputError = "Failed to send controller input (status 9)."
+    let stopError = "Failed to stop frame loop (status 4)."
+    let status = Int32(XENORA_INVALID_STATE)
+    var inputErrorPublications = 0
+    var failures: [String] = []
+    let observation = model.$errorMessage.sink { message in
+        if message == inputError { inputErrorPublications += 1 }
+    }
+    defer { observation.cancel() }
+
+    model.startInteractive()
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    if model.errorMessage != inputError || api.count(.sendInput) != 2 || inputErrorPublications != 1 {
+        failures.append("repeated rejection should retry the send without republishing its diagnostic")
+    }
+    model.sendInput(buttons: release)
+    if model.errorMessage != nil || api.count(.sendInput) != 2 {
+        failures.append("returning to the already accepted neutral input should clear the error without a send")
+    }
+
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    api.report(XENORA_LOOP_PAUSED, completed: 1, frame: 0, pixel: 0)
+    model.pause()
+    if model.errorMessage != nil || api.count(.sendInput) != 4 {
+        failures.append("an accepted retry should clear the controller input error")
+    }
+    api.report(XENORA_LOOP_FAILED, completed: 1, frame: 0, pixel: 0)
+    model.resume()
+    if model.errorMessage != "Fixture frame loop entered the failed state." {
+        failures.append("a recovered controller input error should not hide a later terminal failure")
+    }
+
+    model.startInteractive()
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    api.fail(.stop, Int32(XENORA_INTERNAL_ERROR))
+    model.stop()
+    api.fail(.sendInput, status)
+    model.sendInput(buttons: left)
+    if model.errorMessage != stopError {
+        failures.append("a repeated input rejection should not replace a later stop failure")
+    }
+    model.sendInput(buttons: left)
+    if model.errorMessage != stopError || api.count(.sendInput) != 7 {
+        failures.append("an accepted retry should preserve a later stop failure")
+    }
     return failures
 }
 

@@ -48,6 +48,7 @@ mod synch;
 pub mod sysinfo;
 mod task_fixture;
 pub(crate) mod threads;
+mod user32;
 mod winsock;
 
 use crate::runtime::HResult;
@@ -806,6 +807,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     errors::register(registry, &state);
     registry::register(registry, &state);
     file_mapping::register(registry, &state);
+    user32::register(registry, &state);
     advapi::register(registry, &state);
     advapi::register_tokens(registry, &state);
     advapi::register_safer(registry, &state);

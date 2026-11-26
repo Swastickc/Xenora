@@ -8,6 +8,11 @@ Xenora is an experimental Xbox Series X|S recompilation framework for Apple Sili
 - Discuss substantial changes in an issue before implementing them; small fixes do not require prior approval.
 - Claim an issue before working on it by replying on it in plain words, after checking its comments for an existing claim. Never claim over someone else. A claim with no pull request after about one week may be taken over with a reply saying so. Coding agents follow the same rules; see "Claiming work before you start" in `AGENTS.md`.
 - Use a native ARM64 macOS environment with Rust and the appropriate Xcode/Metal tools. LLVM AMDGPU tools are needed for ISA fixture generation; extra tooling depends on the subsystem.
+- Install the native mingw-w64 cross-compiler with `brew install mingw-w64`
+  before running workspace tests. The hosted PE fixture tests build their
+  inputs from source and fail if the compiler is missing. The freestanding
+  Gate A1 fixture uses clang and LLD. See
+  [Gate A toolchain setup](docs/testing/gate-a.md#toolchain-setup) for linker fallbacks.
 - Keep changes focused and preserve existing public interfaces unless a change is justified and documented.
 
 ## Development and verification
@@ -18,6 +23,16 @@ When the Cargo workspace exists, run from its root:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+When troubleshooting more than one failure, use
+`cargo test --locked --workspace --no-fail-fast` to let Cargo continue
+running the remaining test targets.
+
+The gfx1030 LLVM cross-checks are ignored in normal runs. Run them with Homebrew LLVM:
+
+```sh
+LLVM_BIN="$(brew --prefix llvm)/bin" cargo test --locked -p xenora-decoder --test gfx1030 -- --ignored --nocapture
 ```
 
 Follow repository documentation for actual GPU tests, fuzzing, mutation testing and benchmarks. Report commands, versions, pass/fail/skip counts and hardware used. A successful shader compile is not successful GPU execution. Do not report unavailable tools or skipped tests as passes.

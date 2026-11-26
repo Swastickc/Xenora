@@ -325,7 +325,9 @@ Progress is measured by reproducible tests rather than estimated game compatibil
 - Rust toolchain with `aarch64-apple-darwin` support.
 - Xcode and Metal development tools.
 - Python 3.11 or newer.
-- LLVM with AMDGPU support for applicable shader-fixture assembly and verification.
+- Native mingw-w64 for hosted PE tests (`brew install mingw-w64`).
+- LLVM with AMDGPU support for shader-fixture assembly and optional verification.
+  The LLVM comparisons are [opt-in](CONTRIBUTING.md#development-and-verification).
 
 The recorded Apple M5 environment uses Rust 1.100.0 and Xcode 27.2.
 
@@ -344,6 +346,11 @@ cargo build --locked -p xenora
 ```
 
 ### Run core tests
+
+The hosted tests compile their Windows PE fixtures from source and fail
+if `x86_64-w64-mingw32-gcc` is missing. For the separate
+Gate A1 clang and LLD requirements and linker fallbacks, see
+[Gate A toolchain setup](docs/testing/gate-a.md#toolchain-setup).
 
 ```sh
 cargo fmt --all -- --check

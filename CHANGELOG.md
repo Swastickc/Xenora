@@ -11,6 +11,7 @@ exact revision and known limitations.
 - Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
 
 ### Fixed
+- PE inspection and import binding now require the complete two-byte Hint before a named symbol in both ordinary and delayed import tables (#768).
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).
 - The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).
 - The native CI semantics test now distinguishes an unknown signedness from a valid category used on the wrong operation. This restores the check after binary32 rounding added the float category (#728).

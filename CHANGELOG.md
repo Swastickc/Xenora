@@ -9,8 +9,11 @@ exact revision and known limitations.
 ### Fixed
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).
 - The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).
+- The native CI semantics test now distinguishes an unknown signedness from a valid category used on the wrong operation. This restores the check after binary32 rounding added the float category (#728).
 
 - PE startup and static inspection now keep ordinary import descriptors within the declared directory. Startup reports a missing in-range terminator at import binding, and static inspection retains the imports found before the error.
+
+- The macOS app's interactive guest loop checks each frame against the direction sampled by the host. A guest frame for the wrong column leaves the last accepted image intact, even if its pixels match the column reported by the guest (#722).
 
 ### Added
 - The Wave32 VOP1 binary32 rounding forms `v_trunc_f32`, `v_ceil_f32`, `v_rndne_f32` and `v_floor_f32` (#710) go through the semantic registry, decoder, both CPU interpreters, IR and MSL. The MSL works on the register bits with integer operations only, so Metal math modes cannot flush subnormals or change NaNs. Subnormal inputs assume MODE input denormals allowed. `v_rndne_f32` follows the guide's round-to-nearest-even description, so a zero result keeps its sign. The interpreters refuse NaN inputs and integer inline constants. NaN inputs are recorded as an unsupported operand variant, because the MSL passes NaN bits through unquieted ([vector unary](docs/shaders/vector-unary.md)). A guide-derived oracle passes on both interpreters and in a local native Metal readback on Apple M4 (152 cases). Independent acceptance is pending.
@@ -159,6 +162,7 @@ remains unsupported.
 - Sampling the synthetic runtime task queue clock now makes expired queued operations available on the completion port. A background operation without a cancellation token reports an observed timeout once it exits (#621).
 - The PE loader ignores thread-local storage directory bytes outside the optional header's declared directory count, so padding is not treated as TLS metadata (#573).
 - The PE loader validates the declared TLS directory size and reads its fields by RVA, including across adjacent file-backed sections (#639).
+- PE startup places a large main-thread static TLS block after the thread environment block when their usual addresses would overlap (#705).
 - Sampler validation rejects texture metadata with more mip levels than its dimensions allow, including metadata constructed directly from public fields (#503).
 - Import generation preserves names containing quotes when reading probe CSV and writing its manifest CSV (#538).
 - The macOS interactive fixture combines on-screen directions with a connected gamepad's other buttons, axes, and triggers. Release restores the physical direction, starting a new fixture clears the on-screen direction, and a failed input update can be retried (#601).
@@ -172,6 +176,7 @@ remains unsupported.
 - The DBT no longer runs a stale translation after the guest rewrites its own code or runs against a different address space (#84). Each cached block now keeps the guest bytes it was translated from and is compared with the current executable bytes on every lookup; a mismatch, or bytes that are no longer readable, discards the block and translates it again, counted in the new `DbtMetrics::blocks_invalidated`. This makes the `cpu_known_answers` self-modifying-code case pass for the DBT, so it is no longer ignored as a known defect, and regression tests cover a rewritten block, a rewritten final byte, a budget-limited block and a second address space. The discarded native code stays in the JIT cache until cache reclamation exists (#99), and a store into a block's own later instructions during the same dispatch is not detected. Local verification only; not independently reviewed.
 - `xenora inspect` reports filesystem errors separately from invalid PE headers and refuses special files such as FIFOs. Symlinks to regular files still work (#557).
 - `xenora inspect` reads only declared PE metadata and checks raw section ranges against the opened file's size, so a large payload or sparse hole no longer has to be loaded (#700).
+- The PE loader rejects images whose rounded header mapping or section data would exceed `SizeOfImage`. Static PE inspection can still report their headers (#706).
 - Static PE inspection and guest startup now require an all-zero terminator in the ordinary import table (#629). A nonempty descriptor missing its DLL name or address table gets an explicit diagnostic, and inspection still reports the imports it read before the error.
 - An instruction longer than 15 bytes now stops both engines with a general-protection fault instead of an illegal-instruction exit (#384; Intel SDM Vol. 3A, 7.15). The decoder still stops before fetching a 16th byte, and the DBT translates the faulting instruction on its own so the instructions before it in a block complete first. The `defect_overlong_instruction` known answer from #155 is now verified, with three more cases.
 - The graphics shader compiler rejects image-sample coordinate and result spans that cross the VGPR limit (#569).

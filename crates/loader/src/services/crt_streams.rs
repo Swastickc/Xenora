@@ -814,6 +814,108 @@ impl StandardStreams {
         })
     }
 
+    /// `fread`. Reads up to `count` items of `size` bytes from the stream
+    /// and returns how many whole items it read, which is fewer at the end
+    /// of the file or when a read fails — not an error of its own, so the
+    /// indicators separate the two, as the documentation asks. A null buffer
+    /// or stream is `EINVAL` with a return of 0. More than this runtime
+    /// transfers at once stops the guest, as for `fwrite`.
+    pub(super) fn read_items(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &ObjectState,
+        buffer: u64,
+        size: u64,
+        count: u64,
+        file: u64,
+    ) -> Outcome<u64> {
+        if buffer == 0 || file == 0 {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        let stream = self.stream(file)?;
+        let Some(length) = size
+            .checked_mul(count)
+            .filter(|bytes| *bytes <= MAX_TRANSFER)
+        else {
+            return Err(RUNTIME_LIMIT);
+        };
+        if length == 0 {
+            return Ok(Ok(0));
+        }
+        let bytes = match stream {
+            Stream::Input => {
+                if !self.input.orient(false) {
+                    return Ok(Err(Failed(0, EBADF)));
+                }
+                self.input.take(length as usize)
+            }
+            Stream::File(file) => match self.opened.read_bytes(drive, file, length as usize) {
+                Ok(bytes) => {
+                    // A short read means the end of the file, as nothing
+                    // else shortens it here; the indicator separates it
+                    // from an error, which is what `feof` is for.
+                    if bytes.len() < length as usize {
+                        self.opened.note_end_of_file(file);
+                    }
+                    bytes
+                }
+                Err(errno) => return Ok(Err(Failed(0, errno))),
+            },
+            _ => return Ok(Err(Failed(0, EBADF))),
+        };
+        if bytes.is_empty() {
+            return Ok(Ok(0));
+        }
+        memory.write_bytes(buffer, &bytes).map_err(fault)?;
+        // Only whole items count, and the bytes of a partial one stay in
+        // the buffer, as the CRT leaves them.
+        Ok(Ok((bytes.len() as u64) / size.max(1)))
+    }
+
+    /// `fgetc`. The next byte of the stream as `unsigned char`, or `EOF` at
+    /// the end of the file. A null stream is `EINVAL` with a return of
+    /// `EOF`; reading a stream open for writing is `EBADF`.
+    pub(super) fn read_character_file(&mut self, drive: &ObjectState, file: u64) -> Outcome<i32> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::Input => Ok(Ok(match self.input.character() {
+                Some(byte) => i32::from(byte),
+                None => -1,
+            })),
+            Stream::File(file) => match self.opened.read_bytes(drive, file, 1) {
+                Ok(bytes) if !bytes.is_empty() => Ok(Ok(i32::from(bytes[0]))),
+                Ok(_) => {
+                    self.opened.note_end_of_file(file);
+                    Ok(Ok(-1))
+                }
+                Err(errno) => Ok(Err(Failed(-1, errno))),
+            },
+            _ => Ok(Err(Failed(-1, EBADF))),
+        }
+    }
+
+    /// `rewind`: back to the start of the stream, clearing the end-of-file
+    /// and error indicators as the documentation requires, which is what
+    /// separates it from a bare `fseek` to zero. A standard stream, which
+    /// seeking already refuses, is not modelled.
+    pub(super) fn rewind_file(&mut self, drive: &ObjectState, file: u64) -> Outcome<()> {
+        if file == 0 {
+            return Ok(Err(Failed((), EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::File(file) => match self.opened.seek(drive, file, 0, 0) {
+                Ok(()) => {
+                    self.opened.clear_errors(file);
+                    Ok(Ok(()))
+                }
+                Err(errno) => Ok(Err(Failed((), errno))),
+            },
+            _ => Err(RUNTIME_LIMIT),
+        }
+    }
+
     /// `_lock_file` and `_unlock_file`. The lock itself does nothing, and
     /// that is a consequence of the execution model rather than a swallowed
     /// error: Xenora's guest scheduler runs one guest thread at a time, so

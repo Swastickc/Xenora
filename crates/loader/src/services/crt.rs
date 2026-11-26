@@ -739,6 +739,7 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
 
     // `_strdup` is served by the typed registry since #655.
 
+    // `_strdup` is served by the typed registry since #655.
     // Case conversion and reversal in place, ASCII like the C locale.
     for (symbol, upper) in [("_strlwr", false), ("_strupr", true)] {
         registry.register(UCRT, symbol, move |args, _, memory| {

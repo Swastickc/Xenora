@@ -115,6 +115,12 @@ class CpuCoverage(unittest.TestCase):
         delta = compare_reports(payload, payload)
         self.assertEqual(delta["newly_supported"], [])
 
+    def test_blocker_manifest_includes_partial_imports(self):
+        report = build_report(ROOT)
+        blockers = blocker_manifest(report, limit=500)
+        partial = [b for b in blockers if b["kind"] == "import" and "partial" in b["task"]]
+        self.assertTrue(partial)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -252,7 +252,7 @@ def blocker_manifest(report: CoverageReport, *, limit: int = 50) -> list[dict[st
                 "task": f"Implement or document x86 opcode 0x{entry.opcode}",
             })
     for entry in report.imports:
-        if entry.kind in {"stub", "missing"}:
+        if entry.kind in {"partial", "stub", "missing"}:
             blockers.append({
                 "kind": "import",
                 "id": entry.name,

@@ -190,23 +190,81 @@ def scan_imports(text: str, *, source: str, default_dll: str = "unknown") -> lis
     return [best[k] for k in sorted(best)]
 
 
-def scan_symbols(text: str, pattern: str) -> list[str]:
-    return sorted(set(re.findall(pattern, text)))
+def _rust_production(text: str) -> str:
+    """Production Rust source with comments removed enough for token scanning."""
+    text = text.split("#[cfg(test)]", 1)[0]
+    text = re.sub(r"/\*[\s\S]*?\*/", " ", text)
+    return re.sub(r"//[^\n]*", " ", text)
+
+
+def _operation_tokens(text: str) -> list[str]:
+    return sorted({f"Op::{name}" for name in re.findall(r"\bOp::([A-Z][A-Za-z0-9]*)\b", text)})
+
+
+def scan_interpreter_operations(texts: list[str]) -> list[str]:
+    """Operations named by the shared semantic implementation modules.
+
+    This is intentionally operation-oriented evidence, not proof that every
+    encoding of an operation is correct or even accepted. It is still much more
+    meaningful than helper-function names because these modules are the only
+    semantic execution path.
+    """
+    tokens: set[str] = set()
+    for text in texts:
+        tokens.update(_operation_tokens(_rust_production(text)))
+    return sorted(tokens)
+
+
+def _rust_function_body(text: str, name: str) -> str:
+    match = re.search(rf"\b(?:pub\s+)?fn\s+{re.escape(name)}\s*\(", text)
+    if not match:
+        return ""
+    start = text.find("{", match.end())
+    if start < 0:
+        return ""
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return ""
+
+
+def scan_dbt_native_operations(text: str) -> list[str]:
+    """Operations the DBT native-eligibility path can lower to ARM64.
+
+    `is_native` is the gate. `neon_operation` and `neon_widening` are included
+    because the gate delegates SIMD eligibility to those mappings. Conditions
+    such as operand width or encoding are intentionally collapsed to operation
+    coverage; the report remains a heuristic summary.
+    """
+    production = _rust_production(text)
+    tokens: set[str] = set()
+    for name in ("is_native", "neon_operation", "neon_widening"):
+        tokens.update(_operation_tokens(_rust_function_body(production, name)))
+    return sorted(tokens)
 
 
 def build_report(root: Path) -> CoverageReport:
     report = CoverageReport(notes=[
         "Read-only scan of existing sources; not an architectural claim of completeness.",
-        "Statuses are heuristic over source text where no authoritative inventory file exists.",
+        "Operation coverage is a source-text heuristic, not proof of per-encoding semantic completeness.",
     ])
-    cpu = root / "crates" / "loader" / "src" / "cpu.rs"
+    semantic_names = ["x86_exec.rs", "x86_simd.rs", "x86_float.rs", "x86_avx.rs", "x86_strings.rs"]
+    semantic_texts = []
+    for name in semantic_names:
+        path = root / "crates" / "loader" / "src" / name
+        if path.exists():
+            semantic_texts.append(_read(path))
+    report.interpreter_symbols = scan_interpreter_operations(semantic_texts)
+
     dbt = root / "crates" / "loader" / "src" / "dbt.rs"
-    if cpu.exists():
-        text = _read(cpu)
-        report.interpreter_symbols = scan_symbols(text, r"\bfn\s+(execute_[a-z0-9_]+)\b")
     if dbt.exists():
-        text = _read(dbt)
-        report.dbt_symbols = scan_symbols(text, r"\bfn\s+(lower_[a-z0-9_]+|emit_[a-z0-9_]+)\b")
+        report.dbt_symbols = scan_dbt_native_operations(_read(dbt))
     registry = root / "crates" / "loader" / "x86" / "instructions.toml"
     if registry.exists():
         report.opcodes.extend(scan_opcodes(_read(registry), source=str(registry.relative_to(root))))

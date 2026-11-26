@@ -6886,3 +6886,66 @@ fn putc_writes_one_character_like_fputc() {
     assert_eq!(guest.call("putc", &[u64::from(b'C'), 0]), MINUS_ONE);
     assert_eq!(guest.errno(), EINVAL);
 }
+
+#[test]
+fn wcscpy_copies_and_wcsnicmp_compares_case_insensitively() {
+    let mut guest = Guest::new();
+    let wide = |text: &[u16]| -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for unit in text {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes
+    };
+    // `wcscpy` copies the terminator too and answers the destination.
+    guest
+        .memory
+        .write_bytes(SCRATCH, &wide(&[u16::from(b'H'), u16::from(b'i')]))
+        .unwrap();
+    assert_eq!(
+        guest.call("wcscpy", &[SCRATCH + 0x40, SCRATCH]),
+        SCRATCH + 0x40
+    );
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 0x40).unwrap(),
+        u16::from(b'H')
+    );
+    assert_eq!(guest.memory.read_u16(SCRATCH + 0x44).unwrap(), 0);
+    // `_wcsnicmp` folds ASCII case: "hi" equals "HI", and orders the rest.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x20, &wide(&[u16::from(b'h'), u16::from(b'I')]))
+        .unwrap();
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x40, 2]),
+        0
+    );
+    // The count bounds the comparison: a difference past it is unseen.
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x40, 1]),
+        0
+    );
+    // 'h' against 'H' alone are equal; ordering shows on real differences.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x20, &wide(&[u16::from(b'a')]))
+        .unwrap();
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x40, 1]) & 0xFFFF_FFFF,
+        u64::from(u32::MAX)
+    );
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x40, SCRATCH + 0x20, 1]),
+        1
+    );
+    // A unit outside ASCII compares exactly, with no folding.
+    guest
+        .memory
+        .write_bytes(SCRATCH + 0x20, &wide(&[0x100]))
+        .unwrap();
+    assert_eq!(
+        guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x20, 1]),
+        0
+    );
+}

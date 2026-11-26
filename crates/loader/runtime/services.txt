@@ -886,6 +886,24 @@ service ucrtbase.dll wcsncat(start: ptr, end: ptr, count: u64) -> ptr
     ref wchar.h wcsncat
     test wide_characters_convert_in_the_c_locale
 
+service ucrtbase.dll wcscpy(start: ptr, end: ptr) -> ptr
+    handler wcscpy
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; nothing bounds the copy, as the CRT does not bound it
+    ref wchar.h wcscpy
+    test wcscpy_copies_and_wcsnicmp_compares_case_insensitively
+
+service ucrtbase.dll _wcsnicmp(first: ptr, second: ptr, count: u64) -> i32
+    handler _wcsnicmp
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; the folding is the ASCII one of the C locale, the only locale modelled, and the answer is -1, 0 or 1 as the sign-only contract permits
+    ref wchar.h _wcsnicmp; Microsoft Learn documents the sign-only contract
+    test wcscpy_copies_and_wcsnicmp_compares_case_insensitively
+
 service ucrtbase.dll _wcsdup(text: ptr) -> ptr
     handler _wcsdup
     status implemented

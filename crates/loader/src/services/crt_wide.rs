@@ -396,6 +396,47 @@ pub(super) fn wcsncat(
     Ok(start)
 }
 
+/// `wcscpy`: the wide string copied over the destination, terminator
+/// included, and the destination answered. Nothing bounds the copy, exactly
+/// as the CRT does not.
+pub(super) fn wcscpy(memory: &mut GuestMemory, start: u64, end: u64) -> Result<u64, ExitReason> {
+    let wide = wide_string(memory, end, 65_536).map_err(fault)?;
+    write_wide(memory, start, &wide).map_err(fault)?;
+    Ok(start)
+}
+
+/// `_wcsnicmp`: the case-insensitive comparison of at most `count` wide
+/// characters. The C locale's folding is the ASCII one — the only locale
+/// the runtime models — and the answer is -1, 0 or 1, which the documented
+/// sign-only contract permits. The zero wide character compares like any
+/// other, so equal prefixes of exactly `count` characters are equal even
+/// without a terminator.
+pub(super) fn wcsnicmp(
+    memory: &GuestMemory,
+    first: u64,
+    second: u64,
+    count: u64,
+) -> Result<u64, ExitReason> {
+    let fold = |unit: u16| -> u16 {
+        if unit < 0x80 {
+            u16::from((unit as u8).to_ascii_lowercase())
+        } else {
+            unit
+        }
+    };
+    for index in 0..count {
+        let a = fold(read_wide(memory, first + 2 * index).map_err(fault)?);
+        let b = fold(read_wide(memory, second + 2 * index).map_err(fault)?);
+        if a != b {
+            return Ok(if a < b { u64::MAX } else { 1 });
+        }
+        if a == 0 {
+            break;
+        }
+    }
+    Ok(0)
+}
+
 /// `_wcsdup`: a copy of the wide string in memory the CRT allocates, which
 /// the guest frees. The CRT allocates with `malloc`; here the process heap
 /// stands in for it, as it does for the `FILE` objects.

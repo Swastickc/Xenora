@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 227 |
-| Generated adapters | 227 |
-| Unique handler implementations | 217 |
-| Implemented | 77 |
+| Services with a declared ABI | 229 |
+| Generated adapters | 229 |
+| Unique handler implementations | 219 |
+| Implemented | 79 |
 | Partial | 148 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 227 |
-| API-set aliases (not services) | 266 |
+| Conformance-tested through guest dispatch | 229 |
+| API-set aliases (not services) | 270 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -118,6 +118,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!towlower` | `(wide: u32) -> u32` | implemented | never |
 | `ucrtbase.dll!towupper` | `(wide: u32) -> u32` | implemented | never |
 | `ucrtbase.dll!wcsncat` | `(start: ptr, end: ptr, count: u64) -> ptr` | implemented | never; stops the guest for memory it cannot write |
+| `ucrtbase.dll!wcscpy` | `(start: ptr, end: ptr) -> ptr` | implemented | never; nothing bounds the copy, as the CRT does not bound it |
+| `ucrtbase.dll!_wcsnicmp` | `(first: ptr, second: ptr, count: u64) -> i32` | implemented | never; the folding is the ASCII one of the C locale, the only locale modelled, and the answer is -1, 0 or 1 as the sign-only contract permits |
 | `ucrtbase.dll!_wcsdup` | `(text: ptr) -> ptr` | implemented | null when the copy cannot be allocated |
 | `ucrtbase.dll!_strdup` | `(text: ptr) -> ptr` | partial | a string longer than 65536 bytes or an allocation failure answers null; errno is not set |
 | `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |

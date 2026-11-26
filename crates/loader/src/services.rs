@@ -3148,6 +3148,22 @@ pub(crate) mod handlers {
         crt_wide::wcsncat(context.memory, context.teb, start, end, count)
     }
 
+    pub fn wcscpy(context: &mut ServiceContext<'_>, start: u64, end: u64) -> Outcome<u64> {
+        crt_wide::wcscpy(context.memory, start, end)
+    }
+
+    pub fn _wcsnicmp(
+        context: &mut ServiceContext<'_>,
+        first: u64,
+        second: u64,
+        count: u64,
+    ) -> Outcome<i32> {
+        match crt_wide::wcsnicmp(context.memory, first, second, count) {
+            Ok(value) => Ok(value as u32 as i32),
+            Err(reason) => Err(reason),
+        }
+    }
+
     /// `_strdup` is the narrow form of `_wcsdup`: a copy of the string the
     /// CRT heap owns, as the CRT hands out.
     pub fn _strdup(context: &mut ServiceContext<'_>, text: u64) -> Outcome<u64> {

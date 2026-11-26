@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 227] = [
+pub static SERVICES: [ServiceMetadata; 229] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -1108,6 +1108,28 @@ pub static SERVICES: [ServiceMetadata; 227] = [
         failure: "never; stops the guest for memory it cannot write",
         reference: "wchar.h wcsncat",
         tests: &["wide_characters_convert_in_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "wcscpy",
+        parameters: &[Parameter { name: "start", kind: "ptr" }, Parameter { name: "end", kind: "ptr" }],
+        result: "ptr",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never; nothing bounds the copy, as the CRT does not bound it",
+        reference: "wchar.h wcscpy",
+        tests: &["wcscpy_copies_and_wcsnicmp_compares_case_insensitively"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_wcsnicmp",
+        parameters: &[Parameter { name: "first", kind: "ptr" }, Parameter { name: "second", kind: "ptr" }, Parameter { name: "count", kind: "u64" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never; the folding is the ASCII one of the C locale, the only locale modelled, and the answer is -1, 0 or 1 as the sign-only contract permits",
+        reference: "wchar.h _wcsnicmp; Microsoft Learn documents the sign-only contract",
+        tests: &["wcscpy_copies_and_wcsnicmp_compares_case_insensitively"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -3396,6 +3418,25 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a2 = call.u64(2)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u64 = handlers::wcsncat(&mut context, a0, a1, a2)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "wcscpy", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: u64 = handlers::wcscpy(&mut context, a0, a1)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_wcsnicmp", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.u64(2)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_wcsnicmp(&mut context, a0, a1, a2)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

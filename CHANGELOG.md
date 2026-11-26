@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- `GetProcessTimes` answers the machine's mock clock for its one live process, with a zero exit time, and `GetCompressedFileSizeA` answers the plain size since nothing on the drive is compressed. Verified through the unit tests of `runtime_snapshot.rs` and `runtime_file_types.rs`.
 - The toolhelp process snapshot of a machine with one process: `CreateToolhelp32Snapshot` for TH32CS_SNAPPROCESS, `Process32First/Next` of both widths enumerating the machine's one process with ERROR_NO_MORE_FILES at the end of the list, and `IsWow64Process` answering false since nothing runs under WOW64. Verified through the unit tests of `runtime_snapshot.rs`.
 - `MoveFileExW`, the wide width of the extended rename, sharing the narrow form's replace-existing and reboot-refusal behavior. Verified through the unit tests of `runtime_file_types.rs`.
 - The narrow attribute forms `GetFileAttributesA`/`SetFileAttributesA` share the wide forms' answers and their documented subset: the drive does not track attribute bits, so the set accepts only the normal and archive forms and refuses the rest with ERROR_NOT_SUPPORTED. Verified through the unit tests of `runtime_file_types.rs`.

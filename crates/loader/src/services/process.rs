@@ -180,6 +180,28 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(1)
     });
 
+    let times = Arc::clone(state);
+    registry.register(KERNEL32, "GetProcessTimes", move |args, cpu, memory| {
+        // The four FILETIME outputs are creation, exit, kernel and user in
+        // rdx, r8, r9 and the first stack argument. A live process has no
+        // exit time; the mock clock answers the rest, kernel and user time
+        // being the whole run as far as the guest can measure.
+        if args.rcx != super::CURRENT_PROCESS {
+            return times.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        }
+        let now = times.clock.now_filetime();
+        let user = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+        for (pointer, value) in [(args.rdx, now), (args.r8, 0), (args.r9, now), (user, now)] {
+            if pointer == 0 {
+                return times.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            memory
+                .write_u64(pointer, value)
+                .map_err(ExitReason::MemoryFault)?;
+        }
+        Ok(1)
+    });
+
     for symbol in ["TerminateProcess", "GetExitCodeProcess"] {
         registry.alias(PROCESS_THREADS_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);

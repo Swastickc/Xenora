@@ -38,6 +38,7 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "GetFileAttributesA"),
     (KERNEL32, "SetFileAttributesA"),
     (KERNEL32, "MoveFileExW"),
+    (KERNEL32, "GetCompressedFileSizeA"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -296,6 +297,27 @@ fn move_file_ex_of_the_wide_width() {
     narrow_at(&mut guest, OUT5, "wide-renamed.bin");
     assert_ne!(
         guest.call("GetFileAttributesA", &[OUT5]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+}
+
+/// Nothing on the drive is compressed: the compressed size is the size.
+#[test]
+fn the_compressed_size_is_the_size() {
+    const NAME6: u64 = SCRATCH;
+    const OUT6: u64 = SCRATCH + 0x400;
+    const GOT6: u64 = SCRATCH + 0x808;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "plain.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(OUT6, b"12345").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT6, 5, GOT6, 0]), 1);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    narrow_at(&mut guest, NAME6, "plain.bin");
+    assert_eq!(guest.call("GetCompressedFileSizeA", &[NAME6, 0]), 5);
+    narrow_at(&mut guest, NAME6, "absent.bin");
+    assert_eq!(
+        guest.call("GetCompressedFileSizeA", &[NAME6, 0]) & 0xFFFF_FFFF,
         0xFFFF_FFFF
     );
 }

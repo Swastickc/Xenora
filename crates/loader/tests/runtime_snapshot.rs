@@ -23,6 +23,7 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "Process32Next"),
     (KERNEL32, "IsWow64Process"),
     (KERNEL32, "GetCurrentProcessId"),
+    (KERNEL32, "GetProcessTimes"),
 ];
 
 const ENTRY: u64 = SCRATCH;
@@ -80,4 +81,32 @@ fn nothing_runs_under_wow64() {
     const OUT: u64 = SCRATCH;
     assert_eq!(guest.call("IsWow64Process", &[u64::MAX, OUT]), 1);
     assert_eq!(guest.u32_at(OUT), 0);
+}
+
+/// The process times of the machine's one process read the mock clock:
+/// a live process has no exit time.
+#[test]
+fn the_process_times_of_the_one_process() {
+    let mut guest = Guest::new(IMPORTS, &[]);
+    const CREATION: u64 = SCRATCH;
+    const EXIT: u64 = SCRATCH + 8;
+    const KERNEL: u64 = SCRATCH + 0x10;
+    const USER: u64 = SCRATCH + 0x18;
+    // Each output lands at its own pointer: exit at the r8 argument is
+    // zero for a live process, creation, kernel and user read the clock.
+    for pointer in [CREATION, EXIT, KERNEL, USER] {
+        guest.memory.write_u64(pointer, 0xFF).unwrap();
+    }
+    assert_eq!(
+        guest.call("GetProcessTimes", &[u64::MAX, CREATION, EXIT, KERNEL, USER]),
+        1
+    );
+    assert_eq!(guest.u64_at(KERNEL), guest.u64_at(CREATION));
+    assert_eq!(guest.u64_at(USER), guest.u64_at(CREATION));
+    assert_eq!(guest.u64_at(EXIT), 0, "a live process has no exit time");
+    // An unknown handle is refused.
+    assert_eq!(
+        guest.call("GetProcessTimes", &[0xDEAD, CREATION, EXIT, KERNEL, USER]),
+        0
+    );
 }

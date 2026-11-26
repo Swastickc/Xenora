@@ -1413,6 +1413,34 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(length & 0xFFFF_FFFF)
     });
 
+    let compressed = Arc::clone(state);
+    registry.register(
+        KERNEL32,
+        "GetCompressedFileSizeA",
+        move |args, cpu, memory| {
+            // Nothing on the drive is compressed: the compressed size is the
+            // size, and the high word of a memory drive's file is always zero.
+            let Some(path) = guest_path_a(memory, args.rcx).map_err(ExitReason::MemoryFault)?
+            else {
+                return compressed.fail(cpu.gs_base, INVALID_NAME, 0);
+            };
+            let objects = compressed.objects.lock().expect("guest object state");
+            let Some(data) = objects.files.get(&path) else {
+                return compressed.fail(cpu.gs_base, FILE_NOT_FOUND, 0xFFFF_FFFF);
+            };
+            let length = data.len() as u64;
+            if args.rdx != 0 {
+                if memory.check_write(args.rdx, 4).is_err() {
+                    return compressed.fail(cpu.gs_base, ERROR_NOACCESS, 0xFFFF_FFFF);
+                }
+                memory
+                    .write_u32(args.rdx, (length >> 32) as u32)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            Ok(length & 0xFFFF_FFFF)
+        },
+    );
+
     let flush = Arc::clone(state);
     registry.register(KERNEL32, "FlushFileBuffers", move |args, cpu, _| {
         let objects = flush.objects.lock().expect("guest object state");

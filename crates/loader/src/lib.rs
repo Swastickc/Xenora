@@ -9,6 +9,7 @@ pub mod arm64;
 pub mod cpu;
 pub mod dbt;
 pub(crate) mod exceptions;
+pub mod export_table;
 pub mod graphics;
 pub mod import_table;
 pub mod imports;

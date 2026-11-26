@@ -66,6 +66,15 @@ cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs --no-run
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs -- \
     --nocapture --test-threads=1
 
+# Verify both the persistent CLI session and the hosted runner's final Metal frame.
+cargo test --locked -p xenora --test persistent_session_cli --no-run
+timeout 30s cargo test --locked -p xenora --test persistent_session_cli -- \
+    default_metal_backend_draws_every_frame_natively --ignored --exact --nocapture --test-threads=1
+
+cargo test --locked -p xenora --test run_program --no-run
+timeout 30s cargo test --locked -p xenora --test run_program -- \
+    startup_report_ends_in_verified_metal_frame --ignored --exact --nocapture --test-threads=1
+
 # Native Metal known answers of the independent semantic review, including SOP2 scalar ALU
 # and VOPC compares.
 cargo test --locked -p xenora-semantic-review --no-run

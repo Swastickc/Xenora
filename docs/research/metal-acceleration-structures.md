@@ -91,11 +91,16 @@ application layer. `MetalAccelerationStructureProbe.buildSingleTriangle()`:
 - requires the command buffer to finish in `.completed` state.
 
 The local Apple Silicon development host completed the build twice with the
-same positive allocation and scratch sizes. That establishes only this narrow
-fact: on that host, the public classic Metal API accepted and completed one
-single-triangle primitive build with the tested buffer ownership pattern. It
-does not establish ray intersection correctness, visual behavior, performance,
-compact/refit behavior, cross-generation support or console compatibility.
+same positive allocation and scratch sizes. The test also has an explicit
+unsupported-device path: if runtime detection reports no ray-tracing support,
+the probe must fail with `unsupportedRayTracing` and the test verifies that
+negative capability report rather than counting a build as run. Only the
+positive path is construction evidence. The positive result establishes only
+this narrow fact: on that host, the public classic Metal API accepted and
+completed one single-triangle primitive build with the tested buffer ownership
+pattern. It does not establish ray intersection correctness, visual behavior,
+performance, compact/refit behavior, cross-generation support or console
+compatibility.
 
 ## Required independent fixtures
 

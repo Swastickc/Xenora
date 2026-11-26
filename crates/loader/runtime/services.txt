@@ -108,6 +108,14 @@ service kernel32.dll CloseHandle(object: handle) -> bool32
     ref handleapi.h CloseHandle
     test thread_handles_check_access_and_are_rejected_once_closed
 
+service kernel32.dll CreatePipe(read_end: ptr, write_end: ptr, attributes: ptr, size: u32) -> bool32
+    handler create_pipe
+    status implemented
+    fails ERROR_NOT_SUPPORTED for security attributes, ERROR_INVALID_PARAMETER for a null output, ERROR_NOACCESS for memory it cannot write
+    ref namedpipeapi.h CreatePipe
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+
 service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
     handler get_system_time_as_file_time
     status implemented
@@ -537,6 +545,24 @@ service ucrtbase.dll _lseeki64(fd: i32, offset: u64, origin: i32) -> u64
     fails -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start
     ref io.h _lseeki64
     test legacy_descriptor_seek_and_tell_positions
+
+service ucrtbase.dll _open_osfhandle(osfhandle: handle, flags: i32) -> i32
+    handler _open_osfhandle
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one
+    ref io.h _open_osfhandle
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+service ucrtbase.dll _get_osfhandle(fd: i32) -> u64
+    handler _get_osfhandle
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included
+    ref io.h _get_osfhandle
+    test osfhandle_interop_wraps_a_kernel_pipe
 
 service ucrtbase.dll ungetc(c: i32, stream: ptr) -> i32
     handler ungetc

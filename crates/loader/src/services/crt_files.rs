@@ -18,6 +18,7 @@
 //! that `_ftelli64` or `fgetpos` returned can be given back to `_fseeki64` or
 //! `fsetpos` ("fseek, _fseeki64", "ftell, _ftelli64", "fgetpos", "fsetpos").
 
+use super::GuestObject;
 use super::ObjectState;
 use super::files::DriveEntry;
 use crate::memory::{GuestMemory, PROCESS_HEAP};
@@ -162,6 +163,9 @@ enum Descriptor {
     PipeRead(u32),
     /// The write end of one.
     PipeWrite(u32),
+    /// `_open_osfhandle` made it: the state is a kernel object's, as the
+    /// CRT takes ownership of the handle it wraps.
+    Handle(u64),
 }
 
 /// An anonymous pipe's shared state: the bytes written and not yet read,
@@ -852,6 +856,10 @@ impl FileStreams {
             let file = *file;
             return self.read_bytes(drive, file, limit);
         }
+        // A handle descriptor drains the kernel pipe it wraps.
+        if let Some(Descriptor::Handle(handle)) = self.descriptors.get(&fd) {
+            return handle_read(drive, *handle, limit);
+        }
         let stream = self.descriptor_stream(fd)?;
         if !stream.readable {
             return Err(EBADF);
@@ -891,6 +899,9 @@ impl FileStreams {
         if let Some(Descriptor::Shared(file)) = self.descriptors.get(&fd) {
             let file = *file;
             return self.write(drive, file, bytes);
+        }
+        if let Some(Descriptor::Handle(handle)) = self.descriptors.get(&fd) {
+            return handle_write(drive, *handle, bytes);
         }
         let path = self.descriptor_stream(fd)?.path.clone();
         let stream = self.descriptor_stream(fd)?;
@@ -947,6 +958,10 @@ impl FileStreams {
             self.seek(drive, file, i64::from(offset), origin)?;
             return self.tell(file).map(|position| position as i64);
         }
+        if matches!(self.descriptors.get(&fd), Some(Descriptor::Handle(_))) {
+            // A pipe has no position to move, as the CRT answers for one.
+            return Err(EINVAL);
+        }
         let path = self.descriptor_stream(fd)?.path.clone();
         let stream = self.descriptor_stream(fd)?;
         let base = match origin {
@@ -982,6 +997,10 @@ impl FileStreams {
             self.seek(drive, file, offset, origin)?;
             return self.tell(file).map(|position| position as i64);
         }
+        if matches!(self.descriptors.get(&fd), Some(Descriptor::Handle(_))) {
+            // A pipe has no position to move, as the CRT answers for one.
+            return Err(EINVAL);
+        }
         let path = self.descriptor_stream(fd)?.path.clone();
         let stream = self.descriptor_stream(fd)?;
         let base = match origin {
@@ -1016,6 +1035,31 @@ impl FileStreams {
 
     /// `_close`. Closing a shared descriptor closes the underlying file, so
     /// the stream it came from fails afterwards, as it does in the CRT.
+    /// `_open_osfhandle`: the descriptor wrapping a kernel object handle,
+    /// which the CRT takes ownership of. `EBADF` for a handle that is no
+    /// pipe end — the only kernel object this interop knows so far.
+    pub(super) fn descriptor_open_handle(
+        &mut self,
+        drive: &ObjectState,
+        handle: u64,
+    ) -> Result<u32, u32> {
+        if !matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. })) {
+            return Err(EBADF);
+        }
+        self.insert_descriptor(Descriptor::Handle(handle))
+    }
+
+    /// `_get_osfhandle`: the kernel handle a descriptor wraps. The CRT owns
+    /// one for the `_open_osfhandle` descriptors only; its own streams and
+    /// files have no kernel object behind them, so the answer is -1 with
+    /// `EBADF` there, as the hosted runtime answers for a bad descriptor.
+    pub(super) fn descriptor_handle(&self, fd: u32) -> Result<u64, u32> {
+        match self.descriptors.get(&fd) {
+            Some(Descriptor::Handle(handle)) => Ok(*handle),
+            _ => Err(EBADF),
+        }
+    }
+
     pub(super) fn descriptor_close(
         &mut self,
         memory: &mut GuestMemory,
@@ -1047,6 +1091,18 @@ impl FileStreams {
                 } else if stream.temporary {
                     drive.drive_remove(&stream.path);
                 }
+                true
+            }
+            Some(Descriptor::Handle(handle)) => {
+                // The CRT owns the handle now: closing the descriptor closes
+                // it, and a write end closing marks the pipe's end of stream,
+                // as CloseHandle does.
+                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
+                    && *write
+                {
+                    state.lock().expect("pipe state").write_open = false;
+                }
+                drive.handles.remove(&handle);
                 true
             }
             Some(Descriptor::Alias(_)) => true,
@@ -1170,6 +1226,48 @@ impl FileStreams {
         }
         Ok(Some(line))
     }
+}
+
+/// The pipe cap of the kernel pipes, so a CRT write plays by the same
+/// rules as a `WriteFile` one.
+const PIPE_CAP: usize = 16 * 1024 * 1024;
+
+/// `_read` of a handle descriptor: the pipe drains, the oldest byte first.
+/// An empty pipe with its write end still open cannot block — the guest is
+/// the only thread that could fill it — so the read answers what is there,
+/// and the end-of-file emptiness is honest only once the write end closes.
+fn handle_read(drive: &super::ObjectState, handle: u64, limit: usize) -> Result<Vec<u8>, u32> {
+    let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle) else {
+        return Err(EBADF);
+    };
+    if *write {
+        return Err(EACCES);
+    }
+    let mut pipe = state.lock().expect("pipe state");
+    let mut bytes = Vec::new();
+    while bytes.len() < limit {
+        let Some(byte) = pipe.buffer.pop_front() else {
+            break;
+        };
+        bytes.push(byte);
+    }
+    Ok(bytes)
+}
+
+/// `_write` of one: the pipe fills, within the same cap the kernel applies.
+fn handle_write(drive: &super::ObjectState, handle: u64, bytes: &[u8]) -> Result<(), u32> {
+    let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle) else {
+        return Err(EBADF);
+    };
+    if !*write {
+        return Err(EACCES);
+    }
+    let mut pipe = state.lock().expect("pipe state");
+    if pipe.buffer.len() + bytes.len() > PIPE_CAP {
+        return Err(ENOSPC);
+    }
+    pipe.buffer.extend(bytes);
+    Ok(())
 }
 
 #[cfg(test)]

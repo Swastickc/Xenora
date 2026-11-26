@@ -1383,6 +1383,29 @@ impl StandardStreams {
         })
     }
 
+    /// `_open_osfhandle`: the descriptor number wrapping the kernel handle,
+    /// which the CRT takes ownership of. -1 with `EBADF` for a handle that
+    /// is no kernel pipe end — the only object this interop knows.
+    pub(super) fn open_osfhandle(&mut self, drive: &ObjectState, handle: u64) -> Outcome<i32> {
+        Ok(match self.opened.descriptor_open_handle(drive, handle) {
+            std::result::Result::Ok(fd) => Ok(fd as i32),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_get_osfhandle`: the kernel handle a descriptor wraps, as an
+    /// `intptr_t`. -1 with `EBADF` for one that wraps no kernel object —
+    /// the CRT's own files have none behind them.
+    pub(super) fn get_osfhandle(&mut self, fd: i32) -> Outcome<u64> {
+        if fd < 0 {
+            return Ok(Err(Failed(u64::MAX, EBADF)));
+        }
+        Ok(match self.opened.descriptor_handle(fd as u32) {
+            std::result::Result::Ok(handle) => Ok(handle),
+            std::result::Result::Err(errno) => Err(Failed(u64::MAX, errno)),
+        })
+    }
+
     /// `_access`. 0 when the name is a file or a directory; the files the
     /// drive holds are always readable and writable, so the mode only
     /// decides the answer for what is missing. -1 with `ENOENT` then, or

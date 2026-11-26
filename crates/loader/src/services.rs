@@ -1139,6 +1139,72 @@ pub(crate) mod handlers {
         Ok(true)
     }
 
+    /// `CreatePipe`. The security attributes are meaningless inside the
+    /// guest — there is no other process to inherit to — and the size hint
+    /// is a hint. Both ends answer together, or neither does.
+    pub fn create_pipe(
+        context: &mut ServiceContext<'_>,
+        read_end: u64,
+        write_end: u64,
+        attributes: u64,
+        size: u32,
+    ) -> Outcome<bool> {
+        let _ = size;
+        if attributes != 0 {
+            return context.state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
+        }
+        if read_end == 0 || write_end == 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        if context.memory.check_write(read_end, 8).is_err()
+            || context.memory.check_write(write_end, 8).is_err()
+        {
+            return context.state.fail(context.teb, ERROR_NOACCESS, false);
+        }
+        let state_shared = std::sync::Arc::new(std::sync::Mutex::new(files::PipeState {
+            write_open: true,
+            ..files::PipeState::default()
+        }));
+        let mut objects = context.state.objects.lock().expect("guest object state");
+        let Some(read_value) = objects.next_handle() else {
+            return context
+                .state
+                .fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, false);
+        };
+        objects.insert_handle(
+            read_value,
+            GuestObject::Pipe {
+                state: std::sync::Arc::clone(&state_shared),
+                write: false,
+            },
+        );
+        let Some(write_value) = objects.next_handle() else {
+            objects.handles.remove(&read_value);
+            return context
+                .state
+                .fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, false);
+        };
+        objects.insert_handle(
+            write_value,
+            GuestObject::Pipe {
+                state: state_shared,
+                write: true,
+            },
+        );
+        drop(objects);
+        context
+            .memory
+            .write_u64(read_end, read_value)
+            .map_err(ExitReason::MemoryFault)?;
+        context
+            .memory
+            .write_u64(write_end, write_value)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(true)
+    }
+
     pub fn close_handle(context: &mut ServiceContext<'_>, handle: u64) -> Outcome<bool> {
         let mut objects = context.state.objects.lock().expect("guest object state");
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
@@ -1836,6 +1902,34 @@ pub(crate) mod handlers {
 
     pub fn ungetc(context: &mut ServiceContext<'_>, c: i32, stream: u64) -> Outcome<i32> {
         let outcome = context.state.crt_streams().ungetc(c, stream);
+        or_errno(context, outcome)
+    }
+
+    /// `_open_osfhandle`. The descriptor number wrapping the kernel handle,
+    /// which the CRT takes ownership of. The flags are the stream mode bits
+    /// the hosted runtime's descriptors do not carry: the pipe ends know
+    /// their direction already, so only the append bit would matter and no
+    /// pipe honors it.
+    pub fn _open_osfhandle(
+        context: &mut ServiceContext<'_>,
+        osfhandle: u64,
+        flags: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let drive = context.state.objects.lock().expect("guest object state");
+            context
+                .state
+                .crt_streams()
+                .open_osfhandle(&drive, osfhandle)
+        };
+        let _ = flags;
+        or_errno(context, outcome)
+    }
+
+    /// `_get_osfhandle`. The kernel handle a descriptor wraps, or -1 with
+    /// `EBADF` — the CRT's own files have no kernel object behind them.
+    pub fn _get_osfhandle(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<u64> {
+        let outcome = context.state.crt_streams().get_osfhandle(fd);
         or_errno(context, outcome)
     }
 

@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 231 |
-| Generated adapters | 231 |
-| Unique handler implementations | 221 |
-| Implemented | 80 |
+| Services with a declared ABI | 234 |
+| Generated adapters | 234 |
+| Unique handler implementations | 224 |
+| Implemented | 83 |
 | Partial | 149 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 231 |
-| API-set aliases (not services) | 273 |
+| Conformance-tested through guest dispatch | 234 |
+| API-set aliases (not services) | 277 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -29,6 +29,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!GetThreadPriority` | `(thread: handle) -> i32` | partial | THREAD_PRIORITY_ERROR_RETURN with ERROR_INVALID_HANDLE or ERROR_ACCESS_DENIED |
 | `kernel32.dll!SetThreadPriority` | `(thread: handle, priority: i32) -> bool32` | partial | 0 with ERROR_INVALID_HANDLE, ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER |
 | `kernel32.dll!CloseHandle` | `(object: handle) -> bool32` | partial | 0 with ERROR_INVALID_HANDLE |
+| `kernel32.dll!CreatePipe` | `(read_end: ptr, write_end: ptr, attributes: ptr, size: u32) -> bool32` | implemented | ERROR_NOT_SUPPORTED for security attributes, ERROR_INVALID_PARAMETER for a null output, ERROR_NOACCESS for memory it cannot write |
 | `kernel32.dll!GetSystemTimeAsFileTime` | `(time: out<8>) -> void` | implemented | guest fault on an invalid pointer |
 | `ucrtbase.dll!__acrt_iob_func` | `(index: u32) -> ptr` | partial | stops the guest for an index above 2 or when the streams cannot be allocated |
 | `ucrtbase.dll!__stdio_common_vfprintf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled |
@@ -72,6 +73,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_fileno` | `(stream: ptr) -> i32` | implemented | -1 with errno EINVAL for a null stream; stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!_isatty` | `(fd: i32) -> i32` | implemented | 0 always, as nothing here is a character device; errno EBADF for a descriptor that is not open |
 | `ucrtbase.dll!_lseeki64` | `(fd: i32, offset: u64, origin: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start |
+| `ucrtbase.dll!_open_osfhandle` | `(osfhandle: handle, flags: i32) -> i32` | implemented | -1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one |
+| `ucrtbase.dll!_get_osfhandle` | `(fd: i32) -> u64` | implemented | -1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included |
 | `ucrtbase.dll!ungetc` | `(c: i32, stream: ptr) -> i32` | implemented | EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream |
 | `ucrtbase.dll!_telli64` | `(fd: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one |
 | `ucrtbase.dll!_setmode` | `(fd: i32, mode: i32) -> i32` | partial | -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented |

@@ -362,6 +362,29 @@ pub(super) fn register_conversions(registry: &mut ImportRegistry) {
 /// key is to stop, while a program that merely imports the forms - the
 /// common case, since the legacy CRT binds them transitively - runs
 /// undisturbed.
+/// The spawn family. A spawn creates another process, and the machine is
+/// one process: there is no loader for a child and no kernel to schedule it.
+/// The honest answer is the error the CRT documents for a failure, ENOSYS,
+/// not a pretend success nothing ever runs behind. busybox imports
+/// `_spawnve` for its applet spawning; programs that never spawn bind the
+/// import undisturbed.
+pub(super) fn register_spawn_refusal(registry: &mut ImportRegistry) {
+    const ENOSYS: u32 = 40;
+    for (module, symbol) in [
+        (UCRT, "_spawnve"),
+        (UCRT, "_wspawnve"),
+        (MSVCRT, "_spawnve"),
+        ("api-ms-win-crt-process-l1-1-0.dll", "_spawnve"),
+        ("api-ms-win-crt-process-l1-1-0.dll", "_wspawnve"),
+    ] {
+        registry.register(module, symbol, move |_, cpu, memory| {
+            set_errno(memory, cpu.gs_base, ENOSYS)?;
+            Ok(u64::MAX)
+        });
+        registry.set_status(module, symbol, ServiceStatus::Partial);
+    }
+}
+
 pub(super) fn register_conio(registry: &mut ImportRegistry) {
     for symbol in ["_getch", "_getche"] {
         registry.register(MSVCRT, symbol, |_, _, _| {
@@ -1355,4 +1378,56 @@ fn the_legacy_crt_aliases_the_integer_parses_and_the_console_keys_stop() {
         .expect("_getch resolves");
     let result = (service.handler)(&Win64Args::new(&cpu), &mut CpuState::default(), &mut memory);
     assert!(matches!(result, Err(ExitReason::IllegalInstruction(0xFE))));
+}
+
+#[cfg(test)]
+#[test]
+fn spawnve_refuses_honestly_with_enosys() {
+    use super::ServicesState;
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::{GuestMemory, MemoryPermissions};
+    use crate::services::MockClock;
+    use std::sync::Arc;
+
+    let mut registry = ImportRegistry::new();
+    let _state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register_spawn_refusal(&mut registry);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, module: &str, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(module, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+
+    // The refusal is the documented failure shape: minus one, ENOSYS in
+    // errno. No pretend success ever stands in for a child process.
+    for (module, symbol) in [
+        (UCRT, "_spawnve"),
+        (UCRT, "_wspawnve"),
+        (MSVCRT, "_spawnve"),
+    ] {
+        assert_eq!(
+            call(&mut memory, module, symbol, &[1, 0x1100, 0x1200, 0]),
+            u64::MAX
+        );
+    }
 }

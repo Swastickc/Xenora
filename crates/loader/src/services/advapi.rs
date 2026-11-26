@@ -296,6 +296,84 @@ pub(super) struct SaferLevels {
     live: std::collections::BTreeMap<u64, u32>,
 }
 
+/// The security-descriptor query. The machine carries one identity, so the
+/// owner and group of every object are honestly the machine's user. Access
+/// control lists are a different matter: nothing in the machine models them,
+/// so a caller asking for a DACL, SACL or a full descriptor gets the honest
+/// refusal rather than an invented empty list - an empty DACL means "deny
+/// everyone", a null DACL means "allow everyone", and neither is true here.
+pub(super) fn register_security_query(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let query = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "GetSecurityInfo",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            use crate::memory::PROCESS_HEAP;
+            const OWNER_SECURITY_INFORMATION: u32 = 1;
+            const GROUP_SECURITY_INFORMATION: u32 = 2;
+            const DACL_SECURITY_INFORMATION: u32 = 4;
+            const SACL_SECURITY_INFORMATION: u32 = 8;
+            let handle = args.rcx;
+            let _object_type = args.rdx as u32;
+            let requested = args.r8 as u32;
+            let owner_out = args.r9;
+            let group_out = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            let dacl_out = args.get(5, memory).map_err(ExitReason::MemoryFault)?;
+            let sacl_out = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
+            let descriptor_out = args.get(7, memory).map_err(ExitReason::MemoryFault)?;
+            // GetSecurityInfo returns the error code itself, so a failure
+            // is the error, not zero.
+            let fail = |error: u32| query.fail(cpu.gs_base, error, error as u64);
+            if handle == 0 {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            // Unknown bits are rejected; the DACL/SACL/descriptor shapes are
+            // refused because the machine models no access control lists.
+            let modelled = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION;
+            if requested & !(modelled | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION) != 0
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            if requested & (DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION) != 0
+                || descriptor_out != 0
+            {
+                return fail(ERROR_NOT_SUPPORTED);
+            }
+            if requested & OWNER_SECURITY_INFORMATION != 0 {
+                if owner_out == 0 {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                let sid = match memory.map_heap_allocation(PROCESS_HEAP, MACHINE_SID.len()) {
+                    Ok(base) => base,
+                    Err(_) => return fail(8), // ERROR_NOT_ENOUGH_MEMORY
+                };
+                if memory.write_bytes(sid, &MACHINE_SID).is_err()
+                    || memory.write_u64(owner_out, sid).is_err()
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+            }
+            if requested & GROUP_SECURITY_INFORMATION != 0 {
+                if group_out == 0 {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                let sid = match memory.map_heap_allocation(PROCESS_HEAP, MACHINE_SID.len()) {
+                    Ok(base) => base,
+                    Err(_) => return fail(8), // ERROR_NOT_ENOUGH_MEMORY
+                };
+                if memory.write_bytes(sid, &MACHINE_SID).is_err()
+                    || memory.write_u64(group_out, sid).is_err()
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+            }
+            let _ = (dacl_out, sacl_out);
+            Ok(0)
+        },
+    );
+}
+
 pub(super) fn register_safer(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     let levels = Arc::new(Mutex::new(SaferLevels::default()));
 
@@ -708,4 +786,79 @@ fn the_safer_levels_validate_and_compute_the_one_token() {
         call(&mut memory, "SetTokenInformation", &[0xDEAD, 1, 0x1200, 4]),
         0
     );
+}
+
+#[cfg(test)]
+#[test]
+fn security_info_answers_the_one_identity_and_refuses_acls() {
+    use super::ServicesState;
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::{GuestMemory, MemoryPermissions};
+    use crate::services::MockClock;
+    use std::sync::Arc;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register_security_query(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, module: &str, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(module, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+
+    // Owner and group of any object are the machine's one identity.
+    let result = call(
+        &mut memory,
+        MODULE,
+        "GetSecurityInfo",
+        &[0x70C0DE, 1, 3, 0x1100, 0x1108, 0, 0, 0],
+    );
+    assert_eq!(result, 0, "ERROR_SUCCESS for the modelled query");
+    let owner = memory.read_u64(0x1100).unwrap();
+    let group = memory.read_u64(0x1108).unwrap();
+    assert_ne!(owner, 0);
+    assert_ne!(group, 0);
+    let mut sid = vec![0u8; MACHINE_SID.len()];
+    memory.read_bytes(owner, &mut sid).unwrap();
+    assert_eq!(
+        sid[..],
+        MACHINE_SID[..],
+        "the owner is the machine identity"
+    );
+    memory.read_bytes(group, &mut sid).unwrap();
+    assert_eq!(
+        sid[..],
+        MACHINE_SID[..],
+        "the group is the machine identity"
+    );
+    // A DACL query is the honest refusal: the machine models no ACLs, and
+    // the error comes back in the return value itself.
+    const ERROR_NOT_SUPPORTED: u32 = 50;
+    let result = call(
+        &mut memory,
+        MODULE,
+        "GetSecurityInfo",
+        &[0x70C0DE, 1, 4, 0x1100, 0, 0x1110, 0, 0],
+    );
+    assert_eq!(result, ERROR_NOT_SUPPORTED as u64);
 }

@@ -7,6 +7,9 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- The CRT spawn family refuses honestly: `_spawnve` and `_wspawnve` answer minus one with ENOSYS in errno across ucrtbase, msvcrt and the process API set, since the machine is one process and cannot host a child. Local in-module tests cover the refusal shape.
+- `GetSecurityInfo` answers the owner and group of any object as the machine's one identity and honestly refuses access-control-list queries (ERROR_NOT_SUPPORTED in the return value), since the machine models no ACLs. Local in-module tests cover both directions.
+- `getservbyname` resolves service names from the standard Internet assignment table (http, https, ssh, ftp, smtp, domain, and others) with ports in network byte order and misses unknown services honestly. Local in-module tests cover the resolution and the miss.
 
 - The legacy `msvcrt.dll` view of the integer-parse family: `strtol`, `strtoul`, the 64-bit `strtoll`/`strtoull` and the `_strtoi64`/`_strtoui64` spellings resolve through the Universal CRT engine they share, and the console key forms `_getch`/`_getche` are registered with their honest semantics - the machine's console input is empty and a key read would block the one executor forever, so a program that calls one stops while the common import-without-calling case runs. Measured with `xenora probe` on busybox64.exe: unresolved standard imports drop 76 to 70 of 322. Locally tested on Apple Silicon only; not compared with Windows and not independently reviewed.
 

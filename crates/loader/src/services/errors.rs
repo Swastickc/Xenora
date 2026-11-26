@@ -400,15 +400,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.set_status(KERNEL32, symbol, ServiceStatus::Implemented);
     }
 
-    // DebugBreak raises the breakpoint exception in the calling thread.
-    // With no debugger attached and no guest trap dispatch yet, the
-    // documented end of that road is the unhandled breakpoint: the process
-    // ends with its code, as the exception policy states. Programs break
-    // here only on assertion failures, so reaching this is itself the
-    // observable failure a user needs.
-    registry.register(KERNEL32, "DebugBreak", move |_, _, _| {
-        Err(ExitReason::UnhandledException(0x8000_0003))
-    });
-    registry.alias(ERRHANDLING_API, KERNEL32, "DebugBreak");
-    registry.set_status(KERNEL32, "DebugBreak", ServiceStatus::Partial);
+    registry.register_context_service(
+        KERNEL32,
+        "DebugBreak",
+        ServiceStatus::Partial,
+        crate::exceptions::debug_break,
+    );
+    registry.alias("api-ms-win-core-debug-l1-1-2.dll", KERNEL32, "DebugBreak");
 }

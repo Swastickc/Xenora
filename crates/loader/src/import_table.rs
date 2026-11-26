@@ -73,6 +73,10 @@ pub enum ImportTableError {
     OutOfBounds {
         rva: u32,
     },
+    /// A nonempty ordinary descriptor omits its DLL name or address table RVA.
+    IncompleteImportDescriptor {
+        rva: u32,
+    },
     /// A name is empty, unterminated, too long or not printable ASCII.
     MalformedName {
         rva: u32,
@@ -100,6 +104,9 @@ pub enum ImportTableError {
     DelayDirectoryEnd {
         rva: u32,
     },
+    ImportDirectoryEnd {
+        rva: u32,
+    },
     TooManyDescriptors,
     TooManyImports,
 }
@@ -110,6 +117,10 @@ impl fmt::Display for ImportTableError {
             Self::OutOfBounds { rva } => write!(
                 f,
                 "import data at RVA 0x{rva:08x} is truncated or outside the section data"
+            ),
+            Self::IncompleteImportDescriptor { rva } => write!(
+                f,
+                "import descriptor at RVA 0x{rva:08x} is missing a DLL name or import address table RVA"
             ),
             Self::MalformedName { rva } => write!(f, "malformed import name at RVA 0x{rva:08x}"),
             Self::ReservedBits { rva } => {
@@ -132,6 +143,10 @@ impl fmt::Display for ImportTableError {
             Self::DelayDirectoryEnd { rva } => write!(
                 f,
                 "delay-load directory ends at RVA 0x{rva:08x} before its empty descriptor"
+            ),
+            Self::ImportDirectoryEnd { rva } => write!(
+                f,
+                "import directory ends at RVA 0x{rva:08x} before its empty descriptor"
             ),
             Self::TooManyDescriptors => write!(f, "more than {MAX_DESCRIPTORS} import descriptors"),
             Self::TooManyImports => write!(f, "more than {MAX_IMPORTS} imported symbols"),
@@ -186,13 +201,14 @@ impl<F: Fn(u32) -> Option<usize>> Reader<'_, F> {
     }
 }
 
-/// Parse the import directory at `directory_rva`.
+/// Parse the import descriptors within the declared directory extent.
 ///
 /// Returns every import before the first problem, and the problem. Callers that
 /// execute an image must refuse it if there is one; inspection may report both.
 pub fn parse_imports(
     bytes: &[u8],
     directory_rva: u32,
+    directory_size: u32,
     rva_to_offset: impl Fn(u32) -> Option<usize>,
 ) -> (Vec<ImportEntry>, Option<ImportTableError>) {
     let reader = Reader {
@@ -200,25 +216,34 @@ pub fn parse_imports(
         rva_to_offset,
     };
     let mut entries = Vec::new();
-    let error = collect(&reader, directory_rva, &mut entries).err();
+    let error = collect(&reader, directory_rva, directory_size, &mut entries).err();
     (entries, error)
 }
 
 fn collect<F: Fn(u32) -> Option<usize>>(
     reader: &Reader<'_, F>,
     directory_rva: u32,
+    directory_size: u32,
     entries: &mut Vec<ImportEntry>,
 ) -> Result<(), ImportTableError> {
+    let end = directory_rva
+        .checked_add(directory_size)
+        .ok_or(ImportTableError::OutOfBounds { rva: directory_rva })?;
     let mut descriptor = directory_rva;
     for _ in 0..MAX_DESCRIPTORS {
-        // Reading the whole descriptor also proves its field RVAs do not overflow.
-        reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
-        let lookup_rva = reader.u32(descriptor)?;
-        let name_rva = reader.u32(descriptor + 12)?;
-        let address_rva = reader.u32(descriptor + 16)?;
-        // The table ends with an empty descriptor.
-        if lookup_rva == 0 && name_rva == 0 && address_rva == 0 {
+        if end - descriptor < DESCRIPTOR_LEN {
+            return Err(ImportTableError::ImportDirectoryEnd { rva: end });
+        }
+        let fields = reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
+        // The timestamp and forwarder chain are part of the zero terminator.
+        if fields == [0; DESCRIPTOR_LEN as usize] {
             return Ok(());
+        }
+        let lookup_rva = u32::from_le_bytes(fields[0..4].try_into().unwrap());
+        let name_rva = u32::from_le_bytes(fields[12..16].try_into().unwrap());
+        let address_rva = u32::from_le_bytes(fields[16..20].try_into().unwrap());
+        if name_rva == 0 || address_rva == 0 {
+            return Err(ImportTableError::IncompleteImportDescriptor { rva: descriptor });
         }
         let module = reader.name(name_rva)?;
         collect_symbols(reader, &module, lookup_rva, address_rva, false, entries)?;

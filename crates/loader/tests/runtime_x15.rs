@@ -2723,7 +2723,91 @@ fn guest_byte_range_locks_follow_windows_conflict_rules() {
         1
     );
     assert_eq!(rax("UnlockFileEx", &[second, 0, 0, 1, overlapped]), 1);
+
+    // The same handle may place a shared lock over its exclusive lock. The
+    // first exact unlock removes the exclusive lock and leaves the shared one.
+    assert_eq!(
+        rax("LockFileEx", &[first, EXCLUSIVE, 0, 4, 0, overlapped]),
+        1
+    );
+    assert_eq!(rax("LockFileEx", &[first, SHARED, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("LockFileEx", &[second, SHARED, 0, 4, 0, overlapped]), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+    assert_eq!(rax("UnlockFileEx", &[first, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("LockFileEx", &[second, SHARED, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("UnlockFileEx", &[second, 0, 4, 0, overlapped]), 1);
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 4, 0, overlapped]),
+        0
+    );
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+    assert_eq!(rax("UnlockFileEx", &[first, 0, 4, 0, overlapped]), 1);
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 4, 0, overlapped]),
+        1
+    );
+    assert_eq!(rax("UnlockFileEx", &[second, 0, 4, 0, overlapped]), 1);
     assert_eq!(rax("LockFile", &[0xdead, 0, 0, 1, 0]), 0);
+    assert_eq!(rax("CloseHandle", &[first]), 1);
+    assert_eq!(rax("CloseHandle", &[second]), 1);
+}
+
+#[test]
+fn closing_a_guest_file_releases_only_that_handles_locks() {
+    const ERROR_INVALID_HANDLE: u64 = 6;
+    const ERROR_LOCK_VIOLATION: u64 = 33;
+    const CURRENT_PROCESS: u64 = u64::MAX;
+    const DUPLICATE_SAME_ACCESS: u64 = 2;
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call =
+        |symbol: &str, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);
+    let rax =
+        |symbol: &str, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    let first = create_fixture_file(&state, "C:/close-locks.db");
+    let second = create_fixture_file(&state, "C:/close-locks.db");
+    let observer = create_fixture_file(&state, "C:/close-locks.db");
+    let lock = |handle, offset| rax("LockFile", &[handle, offset, 0, 4, 0]);
+    let last_error = || rax("GetLastError", &[]);
+    assert_eq!(lock(first, 0), 1);
+    assert_eq!(lock(second, 4), 1);
+
+    let result = call(
+        "DuplicateHandle",
+        &[
+            CURRENT_PROCESS,
+            first,
+            CURRENT_PROCESS,
+            PROCESS_FIXTURE_OUTPUT,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        ],
+    );
+    assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+    let duplicate = result
+        .image
+        .memory
+        .read_u64(PROCESS_FIXTURE_OUTPUT)
+        .unwrap();
+    assert_ne!(duplicate, first);
+    assert_eq!(rax("CloseHandle", &[duplicate]), 1);
+    assert_eq!(lock(observer, 0), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+
+    assert_eq!(rax("CloseHandle", &[first]), 1);
+    assert_eq!(lock(first, 0), 0);
+    assert_eq!(last_error(), ERROR_INVALID_HANDLE);
+    assert_eq!(lock(observer, 0), 1);
+    assert_eq!(lock(observer, 4), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+
+    assert_eq!(rax("CloseHandle", &[second]), 1);
+    assert_eq!(lock(observer, 4), 1);
+    assert_eq!(rax("CloseHandle", &[observer]), 1);
+    let later = create_fixture_file(&state, "C:/close-locks.db");
+    assert_eq!(lock(later, 0), 1);
+    assert_eq!(lock(later, 4), 1);
+    assert_eq!(rax("CloseHandle", &[later]), 1);
 }
 
 #[test]

@@ -29,11 +29,12 @@ pub(super) struct CrtStartup {
     per_thread_locale: bool,
     user_math_error: u64,
     invalid_parameter_handler: u64,
-    unhandled_exception_filter: u64,
     /// Handlers other than the default, `SIG_DFL`, which is zero.
     signals: BTreeMap<i32, u64>,
     /// Guest address of `_fmode`. `_commode` is the `int` after it.
     file_modes: Option<u64>,
+    /// Guest address of the legacy `_timezone` cell.
+    timezone: Option<u64>,
 }
 
 impl CrtStartup {
@@ -79,10 +80,6 @@ impl CrtStartup {
         std::mem::replace(&mut self.invalid_parameter_handler, handler)
     }
 
-    pub(super) fn set_unhandled_exception_filter(&mut self, filter: u64) -> u64 {
-        std::mem::replace(&mut self.unhandled_exception_filter, filter)
-    }
-
     /// The previous handler, or `None` for a signal the documentation does not
     /// list. One table serves the whole process.
     pub(super) fn signal(&mut self, signal: i32, handler: u64) -> Option<u64> {
@@ -112,5 +109,21 @@ impl CrtStartup {
             }
         };
         Ok(base + 4 * index)
+    }
+
+    /// Guest address of `_timezone`, allocated from the process heap on first
+    /// use. The legacy variable is the seconds west of UTC of the host time
+    /// zone; the runtime clock is documented UTC, so the cell stays zero.
+    pub(super) fn timezone_address(&mut self, memory: &mut GuestMemory) -> Result<u64, ExitReason> {
+        match self.timezone {
+            Some(base) => Ok(base),
+            None => {
+                let base = memory
+                    .map_heap_allocation(PROCESS_HEAP, 8)
+                    .map_err(ExitReason::MemoryFault)?;
+                self.timezone = Some(base);
+                Ok(base)
+            }
+        }
     }
 }

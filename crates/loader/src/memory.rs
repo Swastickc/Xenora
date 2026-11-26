@@ -155,6 +155,9 @@ pub struct GuestMemory {
     /// fault at this address was a write, which an access-violation record
     /// reports; [`MemoryError::UnmappedAddress`] does not say.
     pub(crate) write_fault: Option<u64>,
+    /// The filter `SetUnhandledExceptionFilter` stored, or 0 for none. One
+    /// filter serves every guest thread of the process.
+    pub(crate) unhandled_filter: u64,
 }
 
 impl GuestMemory {

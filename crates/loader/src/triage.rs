@@ -5,9 +5,10 @@
 //! Provides diagnostic reports for executable binaries without loading or executing them.
 
 use crate::pe::{ParsedPe, PeError, PeSection};
+use std::borrow::Cow;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// High-level diagnostic report from inspecting a PE32+ binary.
@@ -79,6 +80,12 @@ impl std::error::Error for TriageFileError {
     }
 }
 
+impl From<PeError> for TriageFileError {
+    fn from(error: PeError) -> Self {
+        Self::Parse(error)
+    }
+}
+
 fn require_regular_file(metadata: fs::Metadata) -> io::Result<()> {
     if metadata.is_file() {
         Ok(())
@@ -95,7 +102,7 @@ fn require_regular_file(metadata: fs::Metadata) -> io::Result<()> {
     }
 }
 
-fn read_executable(path: &Path) -> io::Result<Vec<u8>> {
+fn open_executable(path: &Path) -> io::Result<(fs::File, u64)> {
     // Follow symlinks, but avoid opening an input already known to be special.
     require_regular_file(fs::metadata(path)?)?;
     let mut options = fs::OpenOptions::new();
@@ -107,29 +114,46 @@ fn read_executable(path: &Path) -> io::Result<Vec<u8>> {
         // A path may be replaced with a FIFO after the metadata check.
         options.custom_flags(libc::O_NONBLOCK);
     }
-    let mut file = options.open(path)?;
-    require_regular_file(file.metadata()?)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+    require_regular_file(metadata)?;
+    Ok((file, len))
 }
 
-/// Inspect a regular PE32+ binary file from disk in read-only mode.
+/// Inspect the headers of a regular PE32+ binary file in read-only mode.
 pub fn triage_file<P: AsRef<Path>>(path: P) -> Result<TriageReport, TriageFileError> {
-    let bytes = read_executable(path.as_ref()).map_err(TriageFileError::Read)?;
-    triage_bytes(&bytes).map_err(TriageFileError::Parse)
+    let (mut file, len) = open_executable(path.as_ref()).map_err(TriageFileError::Read)?;
+    let file_size = usize::try_from(len).map_err(|_| {
+        TriageFileError::Read(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "executable length does not fit in a file-size report",
+        ))
+    })?;
+    let pe = ParsedPe::parse_headers(len, |offset, size| -> Result<_, TriageFileError> {
+        let mut bytes = vec![0; size];
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.read_exact(&mut bytes))
+            .map_err(TriageFileError::Read)?;
+        Ok(Cow::Owned(bytes))
+    })?;
+    Ok(report_from_pe(pe, file_size))
 }
 
 /// Inspect in-memory PE32+ bytes in read-only mode.
 pub fn triage_bytes(bytes: &[u8]) -> Result<TriageReport, PeError> {
     let pe = ParsedPe::parse(bytes)?;
-    Ok(TriageReport {
-        file_size: bytes.len(),
+    Ok(report_from_pe(pe, bytes.len()))
+}
+
+fn report_from_pe(pe: ParsedPe, file_size: usize) -> TriageReport {
+    TriageReport {
+        file_size,
         machine: pe.machine,
         is_amd64: pe.machine == crate::pe::IMAGE_FILE_MACHINE_AMD64,
         image_base: pe.image_base,
         entry_point_rva: pe.entry_point_rva,
         size_of_image: pe.size_of_image,
         sections: pe.sections,
-    })
+    }
 }

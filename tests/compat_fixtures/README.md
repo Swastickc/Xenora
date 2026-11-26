@@ -313,6 +313,31 @@ the standard, legacy and secure forms, the guards before and after the
 buffer included. It is built at `-O0` and `-O2`, and once at `-O1` with
 `CRT_SPRINTF_BREAK`, which expects a wrong length on purpose as a control.
 `crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+
+## The encoding conversions
+
+`tests/compat_fixtures/crt_codepages.c` (package 7 of #459) is a hosted C
+program that converts between bytes and wide characters with
+`MultiByteToWideChar` and `WideCharToMultiByte` in UTF-8 and in
+Windows-1252, queries the pages with `GetACP`, `GetOEMCP`,
+`IsValidCodePage` and `GetCPInfo`, and checks the documented error codes
+of the strict and small-buffer failures. Built by `build-crt-codepages.sh`
+with mingw-w64, the calls are imports of `kernel32.dll`. It is built at
+`-O0` and `-O2`, and once at `-O1` with `CRT_CODEPAGES_BREAK`, which
+expects a wrong count on purpose as a control.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+
+## The locale identity
+
+`tests/compat_fixtures/crt_locale.c` (package 7 of #459) is a hosted C
+program that asks the runtime for its one locale with the LCID, LANGID and
+locale-name getters and for the en-US strings of `GetLocaleInfo` in its
+three forms, checking the documented failures for other locales, unknown
+types and small buffers. Built by `build-crt-locale.sh` with mingw-w64,
+the calls are imports of `kernel32.dll`. It is built at `-O0` and `-O2`,
+and once at `-O1` with `CRT_LOCALE_BREAK`, which expects a wrong count on
+purpose as a control. `crates/cli/tests/run_program.rs` runs all three
+through `xenora run`.
 Provenance is as for Gate A2: the source and script are Xenora's, and the
 executables are test output that contains mingw-w64 startup code.
 
@@ -353,6 +378,79 @@ with mingw-w64 (UCRT flavour) at `-O0` and `-O2`, and once at `-O1` with
 `CRT_TMP_BREAK`, whose control check must fail.
 `crates/cli/tests/run_program.rs` runs all three through `xenora run`.
 Provenance is as for Gate A2.
+
+## The descriptor layer
+
+`tests/compat_fixtures/crt_fds.c` (#493, third part) is a hosted C program
+that opens files with `_open`, moves through them with `_lseek`, reads and
+writes with `_read` and `_write` in binary and text mode, takes the
+descriptor of a stream with `_fileno` and writes through it so the stream's
+position moves, and checks `_isatty`, `_access` and `_unlink`. Every
+expected value follows from the bytes it writes and the Microsoft pages for
+each function. `build-crt-fds.sh` builds it with mingw-w64 (UCRT flavour)
+at `-O0` and `-O2`, and once at `-O1` with `CRT_FDS_BREAK`, whose control
+check must fail. `crates/cli/tests/run_program.rs` runs all three through
+`xenora run`. Provenance is as for Gate A2.
+
+## The secure open and stream indicators
+
+`tests/compat_fixtures/crt_secure.c` (#493, second part) is a hosted C
+program that opens with `fopen_s`, reads a file to its end so the end-of-file
+indicator is set, and clears it with `clearerr`. Every expected value follows
+from the bytes it writes and the Microsoft pages for `fopen_s`, `feof` and
+`clearerr`; it exits with the number of the first failed check, or 0.
+`build-crt-secure.sh` builds it with mingw-w64 (UCRT flavour) at `-O0` and
+`-O2`, and once at `-O1` with `CRT_SECURE_BREAK`, whose control check must
+fail. `crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+Provenance is as for Gate A2.
+
+## The C clock
+
+`tests/compat_fixtures/crt_clock.c` (#459, package 5) is a hosted C program
+that breaks down and composes known seconds since the epoch, checks the
+CRT's string forms and `strftime`, and verifies `mktime`'s normalization.
+`build-crt-clock.sh` builds it with mingw-w64 (UCRT flavour) at `-O0` and
+`-O2`, and once at `-O1` with `CRT_CLOCK_BREAK`, whose control check must
+fail. `crates/cli/tests/run_program.rs` runs all three through
+`xenora run`. Provenance is as for Gate A2.
+
+## Wide characters
+
+`tests/compat_fixtures/crt_wide.c` (#459, package 6, first part) is a
+hosted C program that converts between multibyte and wide strings in both
+directions, checks the failure above character 255, the pointer advance
+of the restartable forms, and the ASCII classification.
+`build-crt-wide.sh` builds it with mingw-w64 (UCRT flavour) at `-O0` and
+`-O2`, and once at `-O1` with `CRT_WIDE_BREAK`, whose control check must
+fail. `crates/cli/tests/run_program.rs` runs all three through
+`xenora run`. Provenance is as for Gate A2.
+
+## C runtime wide stream io
+
+`tests/compat_fixtures/crt_wstream.c` (#459) is a hosted C program that writes
+and reads wide strings on file streams with `fputws` and `fgetws` in the C
+locale, checks the C orientation both ways — byte io refused on a
+wide-oriented stream, wide io refused on a byte-oriented one — and writes one
+wide character to stdout with `putwchar`. Diagnostics go to stderr so stdout
+stays unoriented until `putwchar` fixes it wide. Every expected value follows
+from the bytes it writes; it exits with the number of the first failed check,
+or 0. `build-crt-wstream.sh` builds it with mingw-w64 (UCRT flavour) at `-O0`
+and `-O2`, and once at `-O1` with `CRT_WSTREAM_BREAK`, which expects `fputws`
+to fail where it succeeds, so check 2 fails, as a control.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+Provenance is as for Gate A2.
+
+## C runtime wide buffer formatting
+
+`tests/compat_fixtures/crt_swprintf.c` (#459) is a hosted C program that
+formats into wide buffers with `swprintf`: both string kinds and both
+character kinds, padding, bases, a width from the arguments, a precision on
+a wide string, and the CRT's default truncation behavior — count characters
+without a terminator and -1, no size query. `build-crt-swprintf.sh` builds
+it with mingw-w64 (UCRT flavour) at `-O0` and `-O2`, and once at `-O1` with
+`CRT_SWPRINTF_BREAK`, which expects the integer conversion to fail, so check
+1 fails, as a control. `crates/cli/tests/run_program.rs` runs all three
+through `xenora run`. Provenance is as for Gate A2.
 
 ## C runtime mathematics
 
@@ -426,5 +524,28 @@ constraints, the character classes, the integer formatting family and
 with mingw-w64, the calls are imports of `ucrtbase.dll`. It is built at
 `-O0` and `-O2`, and once at `-O1` with `CRT_CRTUTILS_BREAK` as a control.
 `crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+
+## String comparison and case mapping
+
+`tests/compat_fixtures/crt_compare.c` (package 7 of #459) is a hosted C
+program that compares, classifies and case-maps strings with the `lstrcmp`
+family, `CompareString`, `GetStringTypeW` and `LCMapStringW`, checking the
+byte order, the ASCII fold, the terminator counting and each documented
+failure. Built by `build-crt-compare.sh` with mingw-w64, the calls are
+imports of `kernel32.dll`. It is built at `-O0` and `-O2`, and once at `-O1`
+with `CRT_COMPARE_BREAK`, which expects a wrong count on purpose as a
+control. `crates/cli/tests/run_program.rs` runs all three through
+`xenora run`.
+
+## The console
+
+`tests/compat_fixtures/crt_console.c` (package 8 of #459) is a hosted C
+program that asks for the standard handles, the console code pages and the
+modes, writes narrow and wide text interleaved with `printf` to prove the
+one capture, reads an input line, and checks each documented failure.
+Built by `build-crt-console.sh` with mingw-w64, the calls are imports of
+`kernel32.dll`. It is built at `-O0` and `-O2`, and once at `-O1` with
+`CRT_CONSOLE_BREAK` as a control. `crates/cli/tests/run_program.rs` runs
+all three through `xenora run`.
 Provenance is as for Gate A2: the source and scripts are Xenora's, and the
 executables are test output that contains mingw-w64 startup code.

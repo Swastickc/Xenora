@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Build the guest C structured-exception program,
-# tests/compat_fixtures/guest_c_seh.c (#453), as freestanding x86-64 PE32+
+# tests/compat_fixtures/guest_c_seh.c (#453, #476), as freestanding x86-64 PE32+
 # executables: one per case and optimisation level, named
 # guest-c-seh-<case>-<level>.exe.
 #
@@ -96,13 +96,15 @@ cd "$out"
     link --version | head -1
 } > toolchain.txt
 
-# Import libraries for the four imported services. xenora_seh.dll is not a
+# Import libraries for the guest services. xenora_seh.dll is not a
 # real module: the test registers its one service, xenora_note.
 cat > kernel32.def <<'DEF'
 LIBRARY kernel32.dll
 EXPORTS
     ExitProcess
     RaiseException
+    DebugBreak
+    SetUnhandledExceptionFilter
 DEF
 cat > ucrtbase.def <<'DEF'
 LIBRARY ucrtbase.dll
@@ -118,9 +120,11 @@ for module in kernel32 ucrtbase xenora_seh; do
     link /lib /machine:x64 "/def:$module.def" "/out:$module.lib" > /dev/null
 done
 
-for level in O0 O1 O2; do
+for level in O0 O1 O2 Os; do
     for case in divide search unhandled write_fault read_fault execute_fault \
-        illegal finally_across_frames finally_same_frame continue_execution; do
+        illegal finally_across_frames finally_same_frame continue_execution \
+        filter_continue filter_execute filter_search filter_context \
+        except_context filter_nested debug_break; do
         name="guest-c-seh-$case-$level"
         "$clang" --target=x86_64-pc-windows-msvc "-$level" -fasync-exceptions \
             -ffreestanding -fno-stack-protector -Wall -Wextra -Werror \

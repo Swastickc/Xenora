@@ -32,6 +32,8 @@ Critical sections, SRW locks, condition variables and one-time initialization bl
 
 `Sleep` and `SleepEx` delay only the calling thread. Zero gives up the rest of the turn, and `INFINITE` sleeps until the thread is terminated.
 
+A worker thread that returns from its start routine or calls `ExitThread` under the scheduler runs fiber-local storage (FLS) callbacks before its object is signaled and before its TEB and stack are reclaimed. Each callback runs on the exiting thread and receives the slot's non-null value. Xenora takes one snapshot of the thread's callback and value pairs in slot order. Changes made from a callback do not change that snapshot or trigger another cleanup pass. A callback that calls `ExitThread` ends the worker immediately with the requested code. `TerminateThread` and scheduler teardown discard the remaining FLS state and cancel any cleanup already in progress.
+
 `GetCurrentThreadStackLimits` reads the bounds from the calling thread's TEB. Affinity has one group whose mask is every processor the guest is shown; setting that mask succeeds, a processor or group that does not exist fails with `ERROR_INVALID_PARAMETER`, and a narrower mask fails with `ERROR_NOT_SUPPORTED`. `TerminateProcess` and `GetExitCodeProcess` (in `services/process.rs`) accept only the current-process pseudo-handle and fail with `ERROR_INVALID_HANDLE` for any other; `TerminateProcess` ends the guest as `ExitProcess` does and never touches a host process. `tests/compat_fixtures/process_lifecycle.c` exercises them (`crates/loader/tests/process_lifecycle.rs`).
 
 All are partial. Without an attached scheduler `CreateThread` fails with `ERROR_NOT_SUPPORTED` and waits behave as before.
@@ -43,11 +45,11 @@ All are partial. Without an attached scheduler `CreateThread` fails with `ERROR_
 - `XTaskQueueDispatch` and `WSAPoll` still delay every guest thread. `XTaskQueueDispatch` uses host time, so interleaving is not deterministic across it.
 - The budget bounds guest instructions and service calls, not host time: with nothing else to run, a long timeout sleeps the host thread for all of it.
 - The mock clock advances only when nothing can run or a service sleeps, so a guest that spins until a timed wait expires uses up its budget.
-- PE static TLS and DLL thread-attach and detach callbacks for new threads, and FLS callbacks at thread exit.
+- PE static TLS, DLL thread-attach and detach callbacks, and FLS cleanup on process exit.
 - Waiting on a handle to the main thread or on a pseudo handle, thread priorities of worker threads, APCs and alertable waits, security attributes and inherited handles.
 - A wait is not satisfied while its thread is suspended.
 - Faults are not delivered to the guest (no SEH).
 
 ## Tests
 
-`crates/loader/tests/runtime_threads.rs` runs C programs from `tests/threads/program.c`, compiled for x86-64 Windows by `compile.py` with clang, as translated guest code at several quanta. `compile.py --check` rebuilds the committed listing.
+`crates/loader/tests/runtime_threads.rs` runs original C programs from `crates/loader/tests/threads/`, compiled for x86-64 Windows by `compile.py` with clang, as translated guest code at several quanta. `compile.py --check` checks the original fixture. Use `compile.py --check fls` for the thread-exit fixture.

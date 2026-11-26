@@ -24,7 +24,10 @@ use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile
 
 #[path = "runner_diagnostics.rs"]
 mod diagnostics;
+#[path = "runner_export.rs"]
+mod export;
 use diagnostics::{Collector, FailurePhase, Reporter, Stage, Termination};
+use export::SupervisorExport;
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/trusted-runner.exe");
 const SERVICES_FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/runtime-services.exe");
@@ -48,8 +51,20 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [-- <program argument>...]
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
+       a hosted export copies up to 16 MiB from the synthetic C: drive to a new UTF-8 filename in an existing directory
        an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
+
+enum GuestExport {
+    Host {
+        guest_path: String,
+        destination: PathBuf,
+    },
+    Worker {
+        guest_path: String,
+        descriptor: RawFd,
+    },
+}
 
 struct Options {
     path: PathBuf,
@@ -62,11 +77,19 @@ struct Options {
     trace: bool,
     startup_report: bool,
     report_fd: Option<RawFd>,
+    export: Option<GuestExport>,
     hud: bool,
     /// If given, the file runs only when its SHA-256 is this.
     digest: Option<[u8; 32]>,
     /// What the program receives after its own name.
     arguments: Vec<String>,
+}
+
+fn export_guest_path(argument: Option<OsString>) -> Result<String, String> {
+    argument
+        .and_then(|path| path.into_string().ok())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "guest file path must be nonempty UTF-8".to_owned())
 }
 
 fn parse_sha256(text: &str) -> Option<[u8; 32]> {
@@ -98,6 +121,7 @@ impl Options {
         let mut program = false;
         let mut startup_report = false;
         let mut report_fd = None;
+        let mut export = None;
         let mut wall_seconds = None;
         while let Some(arg) = args.next() {
             match arg.to_str() {
@@ -124,6 +148,22 @@ impl Options {
                             .and_then(|arg| parse_sha256(arg.to_str()?))
                             .ok_or("--sha256 needs 64 hexadecimal digits")?,
                     );
+                }
+                Some("--export-guest-file") if export.is_none() => {
+                    export = Some(GuestExport::Host {
+                        guest_path: export_guest_path(args.next())?,
+                        destination: PathBuf::from(args.next().ok_or("missing host export path")?),
+                    });
+                }
+                Some("--guest-file-export-worker") if export.is_none() => {
+                    export = Some(GuestExport::Worker {
+                        guest_path: export_guest_path(args.next())?,
+                        descriptor: args
+                            .next()
+                            .and_then(|arg| arg.to_str()?.parse().ok())
+                            .filter(|&fd| fd > 2)
+                            .ok_or("invalid guest file export descriptor")?,
+                    });
                 }
                 Some("--") => {
                     for argument in args.by_ref() {
@@ -159,6 +199,17 @@ impl Options {
         if (worker && startup_report) || (!worker && report_fd.is_some()) {
             return Err("invalid startup report option for this runner".into());
         }
+        match &export {
+            Some(GuestExport::Host { .. }) if worker => {
+                return Err("--export-guest-file applies to the run supervisor".into());
+            }
+            Some(GuestExport::Worker { descriptor, .. })
+                if !program || report_fd == Some(*descriptor) =>
+            {
+                return Err("invalid guest file export option for this runner".into());
+            }
+            _ => {}
+        }
         Ok(Self {
             path: path.ok_or("missing --pe path")?,
             max_steps,
@@ -168,6 +219,7 @@ impl Options {
             trace,
             startup_report,
             report_fd,
+            export,
             hud,
             digest,
             arguments,
@@ -185,6 +237,9 @@ impl Options {
             }
             if self.wall_seconds.is_some() {
                 return Err("--wall-seconds applies to a program, not an embedded fixture".into());
+            }
+            if self.export.is_some() {
+                return Err("--export-guest-file applies to a hosted program".into());
             }
             return Ok((steps, WALL_LIMIT));
         }
@@ -230,6 +285,15 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Some(GuestExport::Worker { descriptor, .. }) = &options.export
+        && let Err(error) = diagnostics::validate_endpoint(
+            *descriptor,
+            "guest export descriptor must be outside stdio",
+        )
+    {
+        eprintln!("run failed: cannot open guest file export channel: {error}");
+        return ExitCode::from(FAILURE_CODE);
+    }
     let reporter = if let Some(fd) = options.report_fd {
         // SAFETY: only the fresh worker process accepts this internal option.
         // It has not adopted any inherited non-stdio descriptors or started
@@ -309,28 +373,51 @@ fn launch_worker(
     } else {
         None
     };
+    let staged_export = if let Some(GuestExport::Host {
+        guest_path,
+        destination,
+    }) = &options.export
+    {
+        SupervisorExport::attach(&mut command, destination).map(|(export, fd)| {
+            command
+                .arg("--guest-file-export-worker")
+                .arg(guest_path)
+                .arg(fd.to_string());
+            Some(export)
+        })
+    } else {
+        Ok(None)
+    };
     command.arg("--pe").arg(&options.path);
     if program {
         command.arg("--").args(&options.arguments);
     }
 
-    let child = command.spawn();
-    // Release the supervisor's copies of the worker endpoint even if spawn failed.
+    let launched = staged_export.and_then(|export| command.spawn().map(|child| (child, export)));
+    // Release the supervisor's copies of the worker endpoints even if launch failed.
     drop(command);
-    let stopped = child.and_then(|child| wait_for_worker(child, started, limit));
+    let (stopped, staged_export) = match launched {
+        Ok((child, export)) => (wait_for_worker(child, started, limit), export),
+        Err(error) => (Err(error), None),
+    };
+    let publication = match (&stopped, staged_export) {
+        (Ok(Some(status)), Some(export)) if status.success() => export.publish(),
+        _ => Ok(()),
+    };
     // Emit after the worker's output has ended. The leading newline isolates
     // this record even when guest stderr ends with an unterminated line.
     if let Some(collector) = collector {
-        let termination = match &stopped {
-            Ok(Some(status)) => Termination::Exited(*status),
-            Ok(None) => Termination::Deadline,
-            Err(error) => Termination::SupervisorError(error),
+        let termination = match (&stopped, &publication) {
+            (_, Err(error)) | (Err(error), _) => Termination::SupervisorError(error),
+            (Ok(Some(status)), Ok(())) => Termination::Exited(*status),
+            (Ok(None), Ok(())) => Termination::Deadline,
         };
         eprintln!(
             "\nxenora-startup {}",
             collector.report(termination, program).json()
         );
     }
+    publication?;
     match stopped? {
         Some(status) => match status.code() {
             Some(code) => Ok(ExitCode::from(u8::try_from(code)?)),
@@ -478,6 +565,18 @@ fn run_program(
     wall: Duration,
     reporter: &Reporter,
 ) -> Result<ExitCode, Box<dyn Error>> {
+    let guest_export = if let Some(GuestExport::Worker {
+        guest_path,
+        descriptor,
+    }) = &options.export
+    {
+        // SAFETY: the fresh worker owns the inherited non-stdio descriptor.
+        // The options parser keeps it distinct from the startup report socket.
+        let stage = unsafe { export::from_inherited(*descriptor) }?;
+        Some((guest_path.as_str(), stage))
+    } else {
+        None
+    };
     let state = Arc::new(ServicesState::new(Arc::new(SystemClock)));
     let finishing = Arc::new(Mutex::new(()));
     start_deadline(
@@ -574,6 +673,12 @@ fn run_program(
     }
     match execution.exit_reason {
         ExitReason::ProcessExit(status) => {
+            if status == 0
+                && let Some((guest_path, stage)) = guest_export
+            {
+                export::stage_copy(stage, &state, guest_path)
+                    .inspect_err(|error| reporter.failed(FailurePhase::Verification, error))?;
+            }
             let code = host_exit_code(status);
             if u32::from(code) != status {
                 eprintln!("guest exit status {status} ({status:#x}); host exit code {code}");
@@ -815,7 +920,75 @@ fn draw() -> Result<Frame, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hex, host_exit_code, parse_sha256};
+    use super::{GuestExport, Options, hex, host_exit_code, parse_sha256};
+    use std::ffi::OsString;
+
+    #[test]
+    fn guest_export_options_keep_supervisor_worker_and_guest_arguments_distinct() {
+        fn parse(extra: &[&str]) -> Result<Options, String> {
+            Options::parse(
+                ["--pe", "fixture.exe", "--experimental"]
+                    .into_iter()
+                    .chain(extra.iter().copied())
+                    .map(OsString::from),
+            )
+        }
+
+        assert!(parse(&["--export-guest-file", "source"]).is_err());
+        assert!(
+            parse(&[
+                "--export-guest-file",
+                "source",
+                "output",
+                "--export-guest-file",
+                "again",
+                "second"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["--guest-file-export-worker", "source", "4"]).is_err());
+        assert!(
+            parse(&[
+                "--worker",
+                "--program",
+                "--export-guest-file",
+                "source",
+                "output"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--worker",
+                "--program",
+                "--startup-report-worker",
+                "4",
+                "--guest-file-export-worker",
+                "source",
+                "4"
+            ])
+            .is_err()
+        );
+        let worker = parse(&[
+            "--worker",
+            "--program",
+            "--startup-report-worker",
+            "4",
+            "--guest-file-export-worker",
+            "source",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            worker.export,
+            Some(GuestExport::Worker { descriptor: 5, .. })
+        ));
+        let embedded = parse(&["--export-guest-file", "source", "output"]).unwrap();
+        assert!(embedded.limits(false).is_err());
+        let guest = parse(&["--", "--export-guest-file", "source", "output"]).unwrap();
+        assert!(guest.export.is_none());
+        assert_eq!(guest.arguments, ["--export-guest-file", "source", "output"]);
+    }
 
     #[test]
     fn a_nonzero_status_never_becomes_a_zero_exit_code() {

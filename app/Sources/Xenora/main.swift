@@ -111,6 +111,9 @@ struct TexturedFrame {
 
 /// The frame and audio status produced by running the audio/VFS fixture (Gate 6, #284).
 struct AudioVfsFrame {
+    static let expectedSamples: UInt32 = 256
+    static let expectedPCMBytes = Int(expectedSamples) * 2
+
     let status: Int32
     let width: Int
     let height: Int
@@ -118,12 +121,20 @@ struct AudioVfsFrame {
     let totalAudioBytes: UInt64
     let rgba: [UInt8]
     let pcm: [UInt8]
+    let audioCaptureError: String?
 
-    static func run(captureAudio: Bool = false) -> AudioVfsFrame {
+    var previewPCM: [UInt8]? {
+        guard status == XENORA_OK, audioCaptureError == nil, pcm.count == Self.expectedPCMBytes else { return nil }
+        return pcm
+    }
+
+    static func run() -> AudioVfsFrame {
         var session: xenora_session = 0
         var status = xenora_session_create(XENORA_ABI_VERSION, &session)
         guard status == XENORA_OK else {
-            return AudioVfsFrame(status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0, rgba: [], pcm: [])
+            return AudioVfsFrame(
+                status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0,
+                rgba: [], pcm: [], audioCaptureError: nil)
         }
         defer { _ = xenora_session_destroy(session) }
         var rgba = [UInt8](repeating: 0, count: 16)
@@ -137,16 +148,28 @@ struct AudioVfsFrame {
         var queued: UInt32 = 0
         var underruns: UInt32 = 0
         var total: UInt64 = 0
-        _ = xenora_session_audio_status(session, &queued, &underruns, &total)
         var pcm: [UInt8] = []
-        if captureAudio && status == XENORA_OK && queued > 0 && queued <= 256 * 1024 {
-            pcm = [UInt8](repeating: 0, count: Int(queued))
-            var read: UInt64 = 0
-            let readStatus = pcm.withUnsafeMutableBufferPointer { buffer in
-                xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
-            }
-            if readStatus != XENORA_OK || read != UInt64(queued) {
-                pcm.removeAll()
+        var audioCaptureError: String?
+        if status == XENORA_OK {
+            let audioStatus = xenora_session_audio_status(session, &queued, &underruns, &total)
+            if audioStatus != XENORA_OK {
+                audioCaptureError = "Could not read the fixture audio status (status \(audioStatus))."
+            } else if samples != expectedSamples || queued != UInt32(expectedPCMBytes)
+                        || total != UInt64(expectedPCMBytes) || underruns != 0 {
+                audioCaptureError = "The fixture returned an unexpected audio length or an underrun."
+            } else {
+                var bytes = [UInt8](repeating: 0, count: expectedPCMBytes)
+                var read: UInt64 = 0
+                let readStatus = bytes.withUnsafeMutableBufferPointer { buffer in
+                    xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
+                }
+                if readStatus != XENORA_OK {
+                    audioCaptureError = "Could not capture fixture audio (status \(readStatus))."
+                } else if read != UInt64(expectedPCMBytes) {
+                    audioCaptureError = "The fixture audio sample was incomplete."
+                } else {
+                    pcm = bytes
+                }
             }
         }
         return AudioVfsFrame(
@@ -156,7 +179,8 @@ struct AudioVfsFrame {
             samples: samples,
             totalAudioBytes: total,
             rgba: status == XENORA_OK ? rgba : [],
-            pcm: pcm
+            pcm: pcm,
+            audioCaptureError: audioCaptureError
         )
     }
 
@@ -175,7 +199,7 @@ struct AudioVfsFrame {
     }
 }
 
-private enum FixturePlaybackError: Error {
+private enum FixturePlaybackError: LocalizedError {
     case invalidPCM
     case noDefaultOutput(OSStatus)
     case deviceDiscovery(OSStatus)
@@ -185,7 +209,41 @@ private enum FixturePlaybackError: Error {
     case unexpectedOutput(AudioDeviceID)
     case queueFailure(Int32)
     case queueShortfall(UInt64)
+    case interrupted
     case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPCM:
+            "The fixture audio sample is invalid."
+        case .noDefaultOutput(let status):
+            "No default audio output is available (status \(status))."
+        case .deviceDiscovery(let status):
+            "Could not list audio outputs (status \(status))."
+        case .unavailableOutput(let device):
+            "Audio output \(device) is unavailable."
+        case .outputUnitUnavailable:
+            "The audio engine has no output unit."
+        case .outputRouting(let status):
+            "Could not route audio to the output device (status \(status))."
+        case .unexpectedOutput(let device):
+            "The audio engine reported unexpected output \(device)."
+        case .queueFailure(let status):
+            "The fixture audio queue failed (status \(status))."
+        case .queueShortfall(let supplied):
+            "The fixture audio queue returned only \(supplied) bytes."
+        case .interrupted:
+            "Audio output stopped before the preview completed."
+        case .timedOut:
+            "Audio playback did not complete before the deadline."
+        }
+    }
+}
+
+private enum FixturePlaybackMode {
+    case sample
+    case preview
+    case stream
 }
 
 private struct FixturePlayback {
@@ -252,20 +310,22 @@ private func audioOutputDevices() throws -> [AudioDeviceID] {
 }
 
 private func playFixturePCM(
-    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, streamingFixture: Bool = false
+    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, mode: FixturePlaybackMode
 ) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
-    guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
+    guard pcm.count == AudioVfsFrame.expectedPCMBytes,
           let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
         throw FixturePlaybackError.invalidPCM
     }
     let sourceFrames = pcm.count / 2
-    let frames = sourceFrames * (streamingFixture ? 32 : 1)
-    let framesPerBuffer = streamingFixture ? 1024 : 128
+    // The single sample block is shorter than six milliseconds. Repeat it
+    // for a short preview at a fixed, low player gain.
+    let frames = sourceFrames * (mode == .sample ? 1 : 32)
+    let framesPerBuffer = mode == .sample ? 128 : 1024
     let bufferWindow = 3
     var streamSession: xenora_session = 0
     let producer = DispatchQueue(label: "xenora.fixture.pcm")
-    if streamingFixture {
+    if mode == .stream {
         let createStatus = xenora_session_create(XENORA_ABI_VERSION, &streamSession)
         guard createStatus == XENORA_OK else { throw FixturePlaybackError.queueFailure(createStatus) }
     }
@@ -295,6 +355,9 @@ private func playFixturePCM(
         guard status == noErr else { throw FixturePlaybackError.outputRouting(status) }
     }
     let player = AVAudioPlayerNode()
+    if mode == .preview {
+        player.volume = 0.15
+    }
     let played = DispatchSemaphore(value: 0)
     engine.attach(player)
     engine.connect(player, to: engine.mainMixerNode, format: format)
@@ -322,7 +385,7 @@ private func playFixturePCM(
         let firstByte = first * 2
         let byteCount = count * 2
         if session == 0 {
-            return Array(pcm[firstByte..<(firstByte + byteCount)])
+            return (0..<byteCount).map { pcm[(firstByte + $0) % pcm.count] }
         }
         let submitted = DispatchSemaphore(value: 0)
         producer.async {
@@ -378,6 +441,10 @@ private func playFixturePCM(
         guard played.wait(timeout: deadline) == .success else {
             throw FixturePlaybackError.timedOut
         }
+        // A player stop can invoke pending completion handlers too.
+        if mode == .preview && (!engine.isRunning || !player.isPlaying) {
+            throw FixturePlaybackError.interrupted
+        }
         completedBuffers += 1
         if nextFrame < frames {
             try scheduleNextBuffer()
@@ -410,12 +477,9 @@ final class FrameModel: ObservableObject {
     @Published var running = false
     @Published var texturedFrame: TexturedFrame?
     @Published var runningTextured = false
-    @Published var audioVfsFrame: AudioVfsFrame?
-    @Published var runningAudioVfs = false
     /// Host wall time of the latest run of each fixture, measured here, for the HUD.
     @Published var frameMs: Double?
     @Published var texturedMs: Double?
-    @Published var audioVfsMs: Double?
 
     private static func timed<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> (T, Double) {
         await Task.detached {
@@ -439,14 +503,6 @@ final class FrameModel: ObservableObject {
         Task {
             (texturedFrame, texturedMs) = await Self.timed { TexturedFrame.run() }
             runningTextured = false
-        }
-    }
-
-    func runAudioVfs() {
-        runningAudioVfs = true
-        Task {
-            (audioVfsFrame, audioVfsMs) = await Self.timed { AudioVfsFrame.run() }
-            runningAudioVfs = false
         }
     }
 }
@@ -589,6 +645,7 @@ struct ContentView: View {
     let probe = RuntimeProbe.run()
     @ObservedObject var model: FrameModel
     @ObservedObject var loop: FrameLoopModel
+    @ObservedObject var audio: AudioVfsPlaybackModel
     @ObservedObject var inspection = InspectionModel.shared
     @ObservedObject var programRun = ProgramRunModel.shared
     @ObservedObject var hud = HudSettings.shared
@@ -637,27 +694,14 @@ struct ContentView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-                if let aImage = model.audioVfsFrame?.image {
-                    Image(decorative: aImage, scale: 1)
-                        .resizable()
-                        .interpolation(.none)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
-                        .metalHud(hud.enabled, ["2x2 audio/VFS", ms(model.audioVfsMs)])
-                        .accessibilityLabel("Audio/VFS guest frame, 2 by 2 pixels")
-                    Text("Audio/VFS fixture ran: asset.bin loaded through sandboxed VFS, \(model.audioVfsFrame!.samples) audio samples queued (\(model.audioVfsFrame!.totalAudioBytes) bytes), texture rendered on Metal.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
                 HStack {
                     Button(running ? "Running…" : "Run trusted fixture") { model.run() }
                         .disabled(running || !probe.connected)
                     Button(model.runningTextured ? "Running…" : "Run textured fixture") { model.runTextured() }
                         .disabled(model.runningTextured || !probe.connected)
-                    Button(model.runningAudioVfs ? "Running…" : "Run Audio/VFS fixture") { model.runAudioVfs() }
-                        .disabled(model.runningAudioVfs || !probe.connected)
                 }
             }
+            AudioVfsFixtureView(model: audio, connected: probe.connected, hudEnabled: hud.enabled)
             Section("Persistent frame loop") {
                 if let image = loop.image {
                     Image(decorative: image, scale: 1)
@@ -734,9 +778,14 @@ struct XenoraApp: App {
     @ObservedObject var hud = HudSettings.shared
     let model = FrameModel()
     let loop = FrameLoopModel()
+    let audio = AudioVfsPlaybackModel { pcm in
+        try await Task.detached(priority: .userInitiated) {
+            _ = try playFixturePCM(pcm, mode: .preview)
+        }.value
+    }
 
     var body: some Scene {
-        WindowGroup("Xenora") { ContentView(model: model, loop: loop) }
+        WindowGroup("Xenora") { ContentView(model: model, loop: loop, audio: audio) }
             .commands {
                 CommandGroup(after: .newItem) {
                     Button("Open Executable…") { InspectionModel.shared.requestImport() }
@@ -803,7 +852,8 @@ if CommandLine.arguments.contains("--list-audio-outputs") {
 }
 
 let nativeAudioStreamSmoke = CommandLine.arguments.contains("--smoke-native-audio-stream")
-if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke {
+let nativeAudioPreviewSmoke = CommandLine.arguments.contains("--smoke-native-audio-preview")
+if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke || nativeAudioPreviewSmoke {
     var requestedOutput: AudioDeviceID?
     if let index = CommandLine.arguments.firstIndex(of: "--audio-output") {
         let values = CommandLine.arguments
@@ -813,17 +863,25 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
         }
         requestedOutput = device
     }
-    let frame = AudioVfsFrame.run(captureAudio: true)
-    guard frame.status == XENORA_OK, frame.samples == 256, frame.pcm.count == 512 else {
+    let frame = AudioVfsFrame.run()
+    guard let pcm = frame.previewPCM else {
+        print(frame.audioCaptureError ?? "Audio/VFS fixture failed (status \(frame.status)).")
         print("smoke-native-audio: fixture PCM unavailable")
         exit(1)
     }
     do {
-        let played = try playFixturePCM(
-            frame.pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
-        )
+        let mode: FixturePlaybackMode = if nativeAudioPreviewSmoke {
+            .preview
+        } else if nativeAudioStreamSmoke {
+            .stream
+        } else {
+            .sample
+        }
+        // Exercise the native preview schedule without emitting the fixture tone.
+        let source = nativeAudioPreviewSmoke ? [UInt8](repeating: 0, count: pcm.count) : pcm
+        let played = try playFixturePCM(source, requestedOutput: requestedOutput, mode: mode)
         print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) queueUnderruns=\(played.underruns) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
-        let expected = nativeAudioStreamSmoke ? (8192, 8, 5) : (256, 2, 0)
+        let expected = mode == .sample ? (256, 2, 0) : (8192, 8, 5)
         exit((played.frames, played.buffers, played.refills) == expected
              && played.underruns == 0 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
@@ -832,11 +890,33 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
     }
 }
 
+if CommandLine.arguments.contains("--smoke-audio-vfs-controls") {
+    Task.detached {
+        do {
+            try await Task.sleep(for: .seconds(5))
+        } catch {
+            return
+        }
+        print("smoke-audio-vfs-controls: timed out")
+        exit(1)
+    }
+    Task { @MainActor in
+        let failures = await checkAudioVfsPlayback()
+        for failure in failures { print("smoke-audio-vfs-controls: FAILED \(failure)") }
+        print("smoke-audio-vfs-controls: \(failures.isEmpty ? "ok" : "failed")")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+    dispatchMain()
+}
+
 if CommandLine.arguments.contains("--smoke-audio-vfs") {
     let frame = AudioVfsFrame.run()
     print("smoke-audio-vfs: \(frame.summary)")
     let expected: [UInt8] = [255, 128, 0, 255, 128, 0, 255, 255, 0, 255, 128, 255, 255, 0, 128, 255]
-    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256 && frame.rgba == expected && frame.totalAudioBytes == 512 ? 0 : 1)
+    let pcmPrefix: [UInt8] = [0x00, 0x00, 0xaf, 0x03, 0x5b, 0x07, 0x00, 0x0b]
+    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256
+         && frame.rgba == expected && frame.totalAudioBytes == 512
+         && frame.previewPCM?.starts(with: pcmPrefix) == true ? 0 : 1)
 }
 
 // `--smoke-interactive` runs 60 frames with queued inputs on the Metal device and exits.

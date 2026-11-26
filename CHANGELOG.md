@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Console screen buffers: `CreateConsoleScreenBuffer` creates a bounded 80x25 grid of character cells, `GetConsoleScreenBufferInfo` reports the grid, cursor, attribute and window, `SetConsoleCursorPosition` moves the cursor inside the grid, `SetConsoleTextAttribute` round-trips the color pair, `SetConsoleScreenBufferSize` resizes keeping the content, `FillConsoleOutputCharacterA/W` and `FillConsoleOutputAttribute` fill a run of cells, stopping at the grid end, and `SetConsoleActiveScreenBuffer` selects the active buffer. Verified through the unit tests of `runtime_console_buffer.rs`.
 - `GetProcessTimes` answers the machine's mock clock for its one live process, with a zero exit time, and `GetCompressedFileSizeA` answers the plain size since nothing on the drive is compressed. Verified through the unit tests of `runtime_snapshot.rs` and `runtime_file_types.rs`.
 - The toolhelp process snapshot of a machine with one process: `CreateToolhelp32Snapshot` for TH32CS_SNAPPROCESS, `Process32First/Next` of both widths enumerating the machine's one process with ERROR_NO_MORE_FILES at the end of the list, and `IsWow64Process` answering false since nothing runs under WOW64. Verified through the unit tests of `runtime_snapshot.rs`.
 - `MoveFileExW`, the wide width of the extended rename, sharing the narrow form's replace-existing and reboot-refusal behavior. Verified through the unit tests of `runtime_file_types.rs`.

@@ -192,11 +192,13 @@ enum GuestObject {
     /// A toolhelp snapshot of the machine's one process: no data, the
     /// enumeration reads the live state.
     Snapshot,
+    ConsoleBuffer(Arc<Mutex<console::ScreenBuffer>>),
 }
 
 #[derive(Default)]
 struct ObjectState {
     priority: i32,
+    active_screen_buffer: u64,
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
@@ -678,7 +680,8 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                 Some(
                     GuestObject::Search(_)
                     | GuestObject::FileMapping { .. }
-                    | GuestObject::Snapshot,
+                    | GuestObject::Snapshot
+                    | GuestObject::ConsoleBuffer(_),
                 ) => {
                     return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
                 }
@@ -706,7 +709,10 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             // A pipe end's rights are positional: its read or write end decides
             // what the handle can do, not the duplication rights.
             GuestObject::Pipe { .. } => {}
-            GuestObject::Search(_) | GuestObject::FileMapping { .. } | GuestObject::Snapshot => {
+            GuestObject::Search(_)
+            | GuestObject::FileMapping { .. }
+            | GuestObject::Snapshot
+            | GuestObject::ConsoleBuffer(_) => {
                 unreachable!("these handles cannot be duplicated")
             }
         }
@@ -720,6 +726,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     synch::register(registry, &state);
     sysinfo::register(registry, &state);
     files::register(registry, &state);
+    console::register(registry, &state);
     graphics::register(registry, &state);
     crt::register(registry);
     crt::register_heap(registry);

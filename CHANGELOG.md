@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- The toolhelp process snapshot of a machine with one process: `CreateToolhelp32Snapshot` for TH32CS_SNAPPROCESS, `Process32First/Next` of both widths enumerating the machine's one process with ERROR_NO_MORE_FILES at the end of the list, and `IsWow64Process` answering false since nothing runs under WOW64. Verified through the unit tests of `runtime_snapshot.rs`.
 - `MoveFileExW`, the wide width of the extended rename, sharing the narrow form's replace-existing and reboot-refusal behavior. Verified through the unit tests of `runtime_file_types.rs`.
 - The narrow attribute forms `GetFileAttributesA`/`SetFileAttributesA` share the wide forms' answers and their documented subset: the drive does not track attribute bits, so the set accepts only the normal and archive forms and refuses the rest with ERROR_NOT_SUPPORTED. Verified through the unit tests of `runtime_file_types.rs`.
 - `CreateFileA` opens the same drive as the wide form with narrow path names, sharing rules and dispositions identical across the widths. Verified through the unit tests of `runtime_file_types.rs`.

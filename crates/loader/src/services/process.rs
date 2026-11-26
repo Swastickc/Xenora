@@ -6,8 +6,8 @@
 //! current-process pseudo-handle. No service here reaches a host process.
 
 use super::{
-    CURRENT_PROCESS, ERROR_INVALID_HANDLE, ERROR_NOACCESS, ERROR_NOT_SUPPORTED, KERNEL32,
-    ServicesState,
+    CURRENT_PROCESS, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
+    ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, KERNEL32, ServicesState,
 };
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -83,6 +83,102 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.alias(PROCESS_THREADS_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
+
+    // The toolhelp snapshot of a machine with one process: the snapshot is
+    // a handle kind of its own, and the enumeration reads the live state
+    // rather than a frozen copy, which no correct consumer can tell apart
+    // on a machine whose process list cannot change.
+    const SNAPPROCESS: u64 = 2;
+    let snapshot = Arc::clone(state);
+    registry.register(KERNEL32, "CreateToolhelp32Snapshot", move |args, cpu, _| {
+        if args.rcx != SNAPPROCESS {
+            return snapshot.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+        }
+        if args.rdx != 0 && args.rdx != u64::from(snapshot.process_id) {
+            // A snapshot of another process's space: there is none.
+            return snapshot.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+        }
+        let mut objects = snapshot.objects.lock().expect("guest object state");
+        let Some(handle) = objects.next_handle() else {
+            return snapshot.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+        };
+        objects.insert_handle(handle, super::GuestObject::Snapshot);
+        Ok(handle)
+    });
+
+    // PROCESSENTRY32W layout: dwSize, cntUsage, th32ProcessID,
+    // th32DefaultHeapID, th32ModuleID, cntThreads, th32ParentProcessID,
+    // pcPriClassBase, dwFlags, then 260 UTF-16 units of exe file name.
+    for (symbol, wide) in [
+        ("Process32FirstW", true),
+        ("Process32NextW", true),
+        ("Process32First", false),
+        ("Process32Next", false),
+    ] {
+        let enumerate = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let first = symbol.contains("First");
+            {
+                let objects = enumerate.objects.lock().expect("guest object state");
+                if !matches!(
+                    objects.handles.get(&args.rcx),
+                    Some(super::GuestObject::Snapshot)
+                ) {
+                    return enumerate.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+                }
+            }
+            if !first {
+                // The machine's one process is the whole list.
+                return enumerate.fail(cpu.gs_base, 259, 0); // ERROR_NO_MORE_FILES
+            }
+            if args.rdx == 0 || memory.check_write(args.rdx, 8).is_err() {
+                return enumerate.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            let size = memory.read_u32(args.rdx).map_err(ExitReason::MemoryFault)?;
+            let entry_size = if wide { 0x248u32 } else { 0x128u32 };
+            if size < entry_size {
+                return enumerate.fail(cpu.gs_base, 111, 0); // ERROR_BUFFER_OVERFLOW... actually ERROR_BAD_LENGTH is 24; docs: ERROR_NO_MORE_FILES? use 24
+            }
+            let zero = vec![0u8; entry_size as usize];
+            if memory.write_bytes(args.rdx, &zero).is_err() {
+                return enumerate.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            memory
+                .write_u32(args.rdx, entry_size)
+                .map_err(ExitReason::MemoryFault)?;
+            memory
+                .write_u32(args.rdx + 8, enumerate.process_id)
+                .map_err(ExitReason::MemoryFault)?;
+            memory
+                .write_u32(args.rdx + 0x18, 1)
+                .map_err(ExitReason::MemoryFault)?; // cntThreads
+            let name: Vec<u8> = if wide {
+                "xenora-guest.exe"
+                    .encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect()
+            } else {
+                b"xenora-guest.exe\0".to_vec()
+            };
+            memory
+                .write_bytes(args.rdx + 0x28, &name)
+                .map_err(ExitReason::MemoryFault)?;
+            Ok(1)
+        });
+    }
+
+    let wow64 = Arc::clone(state);
+    registry.register(KERNEL32, "IsWow64Process", move |args, cpu, memory| {
+        // The machine is x64 throughout: nothing runs under WOW64.
+        if args.rdx == 0 || memory.check_write(args.rdx, 4).is_err() {
+            return wow64.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+        }
+        memory
+            .write_u32(args.rdx, 0)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(1)
+    });
 
     for symbol in ["TerminateProcess", "GetExitCodeProcess"] {
         registry.alias(PROCESS_THREADS_API, KERNEL32, symbol);

@@ -189,6 +189,9 @@ enum GuestObject {
         state: Arc<Mutex<files::PipeState>>,
         write: bool,
     },
+    /// A toolhelp snapshot of the machine's one process: no data, the
+    /// enumeration reads the live state.
+    Snapshot,
 }
 
 #[derive(Default)]
@@ -672,7 +675,11 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                         write: *write,
                     },
                 ),
-                Some(GuestObject::Search(_) | GuestObject::FileMapping { .. }) => {
+                Some(
+                    GuestObject::Search(_)
+                    | GuestObject::FileMapping { .. }
+                    | GuestObject::Snapshot,
+                ) => {
                     return s.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
                 }
                 None => return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
@@ -699,7 +706,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             // A pipe end's rights are positional: its read or write end decides
             // what the handle can do, not the duplication rights.
             GuestObject::Pipe { .. } => {}
-            GuestObject::Search(_) | GuestObject::FileMapping { .. } => {
+            GuestObject::Search(_) | GuestObject::FileMapping { .. } | GuestObject::Snapshot => {
                 unreachable!("these handles cannot be duplicated")
             }
         }

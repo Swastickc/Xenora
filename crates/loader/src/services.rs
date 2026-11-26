@@ -711,7 +711,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     file_mapping::register(registry, &state);
     // The legacy CRT's printf family, which the variadic calling convention
     // keeps out of the typed table (#459).
-    crt_streams::register_legacy(registry);
+    crt_streams::register_legacy(registry, &state);
     crt_legacy::register(registry, &state);
     heap::register(registry, &state);
     cxx::register(registry, &state);

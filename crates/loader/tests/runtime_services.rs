@@ -4344,8 +4344,10 @@ const LEGACY_DATA_SYMBOLS: [&str; 7] = [
 /// Legacy-linked binaries import these services from `msvcrt.dll`, where the
 /// compatibility mapping resolves them to the same handlers as the modern
 /// runtime.
-const LEGACY_FUNCTION_SYMBOLS: [&str; 18] = [
+const LEGACY_FUNCTION_SYMBOLS: [&str; 20] = [
     "__iob_func",
+    "fprintf",
+    "vfprintf",
     "strlen",
     "memcpy",
     "malloc",
@@ -6811,4 +6813,39 @@ fn legacy_iob_array_carries_the_standard_descriptors() {
     assert_eq!(guest.memory.read_u64(base).unwrap(), 0);
     assert_eq!(guest.memory.read_u64(base + 8).unwrap(), 0);
     assert_eq!(guest.memory.read_u64(base + 16).unwrap(), 0);
+}
+
+#[test]
+fn legacy_fprintf_writes_through_the_iob_streams() {
+    let mut guest = Guest::new();
+    // `stdout` is the second object of the `__iob_func` array, 48 bytes
+    // after the first, as the mingw-w64 `_iobuf` stride fixes it.
+    let base = guest.call("__iob_func", &[0]);
+    assert_ne!(base, 0);
+    let stdout = base + 48;
+    let stderr = base + 96;
+    // `fprintf` reads its variadic arguments from the calling convention.
+    let work = guest.call("malloc", &[0x100]);
+    assert_ne!(work, 0);
+    guest.memory.write_bytes(SCRATCH, b"%d-%s\0").unwrap();
+    guest.memory.write_bytes(work + 0x40, b"fin\0").unwrap();
+    let len = guest.call("fprintf", &[stdout, SCRATCH, 42, work + 0x40]);
+    assert_eq!(len, 6);
+    assert_eq!(guest.state.standard_output(), b"42-fin");
+    // stderr is the third object, captured apart.
+    assert_eq!(guest.call("fprintf", &[stderr, SCRATCH, 7, work + 0x40]), 5);
+    // `vfprintf` formats through the argument pointer: the slots sit
+    // contiguously in memory, as a Win64 va_list does.
+    guest.memory.write_u64(work + 0x80, 42).unwrap();
+    guest.memory.write_u64(work + 0x88, work + 0x40).unwrap();
+    assert_eq!(guest.call("vfprintf", &[stdout, SCRATCH, work + 0x80]), 6);
+    assert_eq!(guest.state.standard_output(), b"42-fin42-fin");
+    // A null stream is invalid: -1 with EINVAL, and nothing is written.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("fprintf", &[0, SCRATCH, 42, work + 0x40]),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(guest.errno(), EINVAL);
+    assert_eq!(guest.state.standard_output(), b"42-fin42-fin");
 }

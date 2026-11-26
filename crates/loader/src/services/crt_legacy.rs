@@ -29,35 +29,16 @@ fn fault(error: MemoryError) -> crate::cpu::ExitReason {
 /// CRT keeps it, and starts at the same value as an unseeded process: 1.
 struct RandState(Mutex<u64>);
 
-pub(super) const LEGACY_FILE_BYTES: u64 = 48;
-
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
-    // `__iob_func` answers the legacy CRT's array of three `FILE` objects.
-    // The legacy struct is 48 bytes — the mingw-w64 header's `_iobuf` fixes
-    // it — and the fields a caller reads are the flags at 24 and the file
-    // descriptor at 28: stdin, stdout and stderr carry theirs. The buffer
-    // fields are zero, so a legacy binary that reads or writes through the
-    // struct falls back to `_filbuf`/`_flsbuf` for every byte, exactly what
-    // an unbuffered stream does on Windows. The array is allocated once
-    // from the process heap.
-    let iob = Arc::new(Mutex::new(Option::<u64>::None));
-    let array = Arc::clone(&iob);
+    // `__iob_func` answers the legacy CRT's array of three `FILE` objects,
+    // materialized in the shared streams so the legacy stream services
+    // recognize the pointers: the direction flag sits at offset 24 and the
+    // file descriptor at 28, as the mingw-w64 `_iobuf` header fixes them,
+    // and the zero buffer fields make every stream unbuffered, exactly as
+    // on Windows.
+    let iob_state = Arc::clone(state);
     registry.register(MSVCRT, "__iob_func", move |_, _, memory| {
-        let mut kept = array.lock().expect("legacy iob array");
-        if let Some(base) = *kept {
-            return Ok(base);
-        }
-        let base = memory
-            .map_heap_allocation(crate::memory::PROCESS_HEAP, 3 * LEGACY_FILE_BYTES as usize)
-            .map_err(fault)?;
-        for index in 0..3u64 {
-            let entry = base + LEGACY_FILE_BYTES * index;
-            let flags: u32 = if index == 0 { 1 } else { 2 }; // _IOREAD / _IOWRT
-            memory.write_u32(entry + 24, flags).map_err(fault)?;
-            memory.write_u32(entry + 28, index as u32).map_err(fault)?;
-        }
-        *kept = Some(base);
-        Ok(base)
+        iob_state.crt_streams().materialize_legacy_files(memory)
     });
 
     // `_time64` answers the seconds since the Unix epoch and stores them

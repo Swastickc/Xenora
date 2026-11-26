@@ -19,11 +19,12 @@
 //! A pointer that is no stream, reading `stdin` and closing a standard stream
 //! are not modelled and stop the guest with the runtime-limit fault.
 
-use super::ObjectState;
 use super::crt_files::{self, EACCES, EBADF, EEXIST, EINVAL, ENOENT, ERANGE, FileStreams};
 use super::crt_format::{self, Floats, FormatError, Source};
 use super::files::DriveEntry;
+use super::{ObjectState, ServicesState};
 use crate::cpu::ExitReason;
+use std::sync::Arc;
 
 /// The legacy CRT module that pre-UCRT mingw binaries import directly.
 const MSVCRT: &str = "msvcrt.dll";
@@ -78,6 +79,9 @@ enum Stream {
 pub(super) struct StandardStreams {
     /// Guest address of the three `FILE` objects, `stdin` first.
     files: Option<u64>,
+    /// Guest address of the legacy CRT's `__iob_func` array: three 48-byte
+    /// `_iobuf` objects. Allocated on first use, as on Windows.
+    legacy_files: Option<u64>,
     output: Vec<u8>,
     error: Vec<u8>,
     /// The streams `fopen` has open.
@@ -549,6 +553,47 @@ impl StandardStreams {
         Ok(base + FILE_BYTES * u64::from(index))
     }
 
+    /// `__iob_func`: the legacy CRT's array of three 48-byte `_iobuf`
+    /// objects, allocated once. The direction flag sits at offset 24 and the
+    /// file descriptor at 28, as the mingw-w64 header fixes them; the buffer
+    /// fields stay zero, so a legacy stream is unbuffered and every byte
+    /// goes through `_filbuf`/`_flsbuf`, exactly as on Windows.
+    pub(super) fn materialize_legacy_files(
+        &mut self,
+        memory: &mut GuestMemory,
+    ) -> Result<u64, ExitReason> {
+        if let Some(base) = self.legacy_files {
+            return Ok(base);
+        }
+        let base = memory
+            .map_heap_allocation(PROCESS_HEAP, 3 * LEGACY_FILE_BYTES as usize)
+            .map_err(fault)?;
+        for index in 0..3u64 {
+            let entry = base + LEGACY_FILE_BYTES * index;
+            let flags: u32 = if index == 0 { 1 } else { 2 }; // _IOREAD / _IOWRT
+            memory.write_u32(entry + 24, flags).map_err(fault)?;
+            memory.write_u32(entry + 28, index as u32).map_err(fault)?;
+        }
+        self.legacy_files = Some(base);
+        Ok(base)
+    }
+
+    /// The standard stream a pointer into the legacy `__iob_func` array is,
+    /// when it is exactly one of the three objects.
+    fn legacy_stream(&self, file: u64) -> Option<Stream> {
+        let base = self.legacy_files?;
+        let offset = file.wrapping_sub(base);
+        if offset % LEGACY_FILE_BYTES != 0 {
+            return None;
+        }
+        match offset / LEGACY_FILE_BYTES {
+            0 => Some(Stream::Input),
+            1 => Some(Stream::Output),
+            2 => Some(Stream::Error),
+            _ => None,
+        }
+    }
+
     /// Which stream a non-null `FILE*` is: a standard stream, or one `fopen`
     /// returned. Any other pointer is no stream.
     fn stream(&self, file: u64) -> Result<Stream, ExitReason> {
@@ -557,7 +602,7 @@ impl StandardStreams {
             Some(8) => Ok(Stream::Output),
             Some(16) => Ok(Stream::Error),
             _ if self.opened.contains(file) => Ok(Stream::File(file)),
-            _ => Err(RUNTIME_LIMIT),
+            _ => self.legacy_stream(file).ok_or(RUNTIME_LIMIT),
         }
     }
 
@@ -637,6 +682,21 @@ impl StandardStreams {
         };
         // "A negative value if an output error occurs."
         Ok(match self.write(drive, stream, &text)? {
+            Ok(()) => Ok(text.len() as i32),
+            Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// Write already formatted text to a stream the way `fprintf` does:
+    /// the character count, or -1 with the errno of the failed write.
+    pub(super) fn write_formatted(
+        &mut self,
+        drive: &mut ObjectState,
+        file: u64,
+        text: &[u8],
+    ) -> Outcome<i32> {
+        let stream = self.writable(file)?;
+        Ok(match self.write(drive, stream, text)? {
             Ok(()) => Ok(text.len() as i32),
             Err(errno) => Err(Failed(-1, errno)),
         })
@@ -1890,6 +1950,10 @@ impl StandardStreams {
 const LEGACY_PRINTF_OPTIONS: u64 =
     LEGACY_WIDE_SPECIFIERS | LEGACY_THREE_DIGIT_EXPONENTS | LEGACY_VSPRINTF_NULL_TERMINATION;
 
+/// The legacy stream forms carry no buffer behaviour bits: their options
+/// are the wide-specifier and exponent ones only.
+const LEGACY_STREAM_PRINTF_OPTIONS: u64 = LEGACY_WIDE_SPECIFIERS | LEGACY_THREE_DIGIT_EXPONENTS;
+
 /// Arguments of a legacy variadic form, read from the calling convention:
 /// the positions after the fixed ones, registers first and then the stack,
 /// as `Win64Args` extracts them. A floating-point variadic argument reaches
@@ -1933,7 +1997,11 @@ fn printf_answer(
 /// says, and `_vscprintf` is the size query. `sprintf` is uncounted: the
 /// terminator always follows the text, and a short buffer is the guest's
 /// own overrun, exactly as on Windows.
-pub(super) fn register_legacy(registry: &mut ImportRegistry) {
+/// The legacy CRT's `_iobuf` is 48 bytes on x64, as the mingw-w64 header
+/// fixes it: `_ptr` 0, `_cnt` 8, `_base` 16, `_flag` 24, `_file` 28.
+pub(super) const LEGACY_FILE_BYTES: u64 = 48;
+
+pub(super) fn register_legacy(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     registry.register(MSVCRT, "_vsnprintf", |args, cpu, memory| {
         let outcome = print_to_buffer(
             memory,
@@ -1981,5 +2049,66 @@ pub(super) fn register_legacy(registry: &mut ImportRegistry) {
         text.push(0);
         memory.write_bytes(args.rcx, &text).map_err(fault)?;
         Ok(u64::from(len))
+    });
+
+    // `vfprintf` formats through the argument pointer the caller passes, in
+    // the same shape the modern common entry point receives — the Win64
+    // `va_list` is that pointer in both CRTs.
+    let vfprintf_state = Arc::clone(state);
+    registry.register(MSVCRT, "vfprintf", move |args, cpu, memory| {
+        let outcome = {
+            let mut streams = vfprintf_state.crt_streams();
+            let mut drive = vfprintf_state.objects.lock().expect("guest object state");
+            streams.print(
+                memory,
+                &mut drive,
+                LEGACY_STREAM_PRINTF_OPTIONS,
+                args.rcx,
+                args.rdx,
+                0,
+                args.r8,
+            )
+        };
+        printf_answer(memory, cpu.gs_base, outcome)
+    });
+
+    // `fprintf` reads its variadic arguments from the calling convention:
+    // the stream and the format take the first two slots, so the arguments
+    // start at the third. The formatted text is then written as the modern
+    // entry point writes it.
+    let fprintf_state = Arc::clone(state);
+    registry.register(MSVCRT, "fprintf", move |args, cpu, memory| {
+        if args.rcx == 0 || args.rdx == 0 {
+            super::crt::set_errno(memory, cpu.gs_base, EINVAL)?;
+            return Ok(u64::from(u32::MAX));
+        }
+        let formatted = {
+            let mut source = VariadicArguments {
+                args,
+                memory,
+                next: 2,
+            };
+            format_with(
+                memory,
+                LEGACY_STREAM_PRINTF_OPTIONS,
+                args.rdx,
+                0,
+                &mut source,
+                false,
+            )?
+        };
+        let text = match formatted {
+            Formatted::Invalid => {
+                super::crt::set_errno(memory, cpu.gs_base, EINVAL)?;
+                return Ok(u64::from(u32::MAX));
+            }
+            Formatted::Text(text) => text,
+        };
+        let outcome = {
+            let mut streams = fprintf_state.crt_streams();
+            let mut drive = fprintf_state.objects.lock().expect("guest object state");
+            streams.write_formatted(&mut drive, args.rcx, &text)
+        };
+        printf_answer(memory, cpu.gs_base, outcome)
     });
 }

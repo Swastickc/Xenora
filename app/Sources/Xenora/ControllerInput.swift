@@ -144,8 +144,9 @@ func pollGameController(current: GCController?, controllers: [GCController]) -> 
 func pollGameControllers(current: GCController?, controllers: [GCController]) -> [DetectedController] {
     var ordered: [GCController] = []
     func appendPlayable(_ controller: GCController) {
+        let identity = ObjectIdentifier(controller)
         guard controller.extendedGamepad != nil || controller.microGamepad != nil,
-              !ordered.contains(where: { $0 === controller }) else { return }
+              !ordered.contains(where: { ObjectIdentifier($0) == identity }) else { return }
         ordered.append(controller)
     }
     if let current, current.extendedGamepad != nil { appendPlayable(current) }

@@ -334,7 +334,7 @@ final class FrameLoopModel: ObservableObject {
                 vibrationSupported: vibrationSupported
             )
             guard desired != lastSentXInputs[slot] else { continue }
-            var wire = xinputValues.ffi(
+            let wire = xinputValues.ffi(
                 connected: connected,
                 vibrationSupported: connected && vibrationSupported
             )

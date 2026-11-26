@@ -762,6 +762,11 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         u16::from_le_bytes(bytes[coff_offset + 2..coff_offset + 4].try_into().unwrap());
     let time_date_stamp =
         u32::from_le_bytes(bytes[coff_offset + 4..coff_offset + 8].try_into().unwrap());
+    let characteristics = u16::from_le_bytes(
+        bytes[coff_offset + 18..coff_offset + 20]
+            .try_into()
+            .unwrap(),
+    );
     let size_of_optional_header = u16::from_le_bytes(
         bytes[coff_offset + 16..coff_offset + 18]
             .try_into()
@@ -1134,6 +1139,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         machine,
         number_of_sections,
         time_date_stamp,
+        characteristics,
         image_base,
         section_alignment,
         file_alignment,

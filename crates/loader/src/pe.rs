@@ -82,12 +82,14 @@ pub struct PeSection {
     pub permissions: MemoryPermissions,
 }
 
-/// Parsed metadata from a PE32+ executable.
+/// Parsed metadata from a PE32+ executable or DLL image.
 #[derive(Clone, Debug)]
 pub struct ParsedPe {
     pub machine: u16,
     pub number_of_sections: u16,
     pub time_date_stamp: u32,
+    /// The COFF characteristics word, including `IMAGE_FILE_DLL`.
+    pub characteristics: u16,
     pub image_base: u64,
     pub section_alignment: u32,
     pub file_alignment: u32,
@@ -101,6 +103,8 @@ pub struct ParsedPe {
 pub struct LoadedImage {
     pub pe: ParsedPe,
     pub memory: GuestMemory,
+    /// Load base plus `entry_point_rva`. A zero entry RVA means the image has
+    /// no entry point; it is valid only for a DLL.
     pub entry_point: u64,
     /// Guest address of the `ImageBase` field in the mapped optional header.
     /// Startup writes the load base there once relocations have been applied.
@@ -115,6 +119,8 @@ pub const IMAGE_SCN_MEM_WRITE: u32 = 0x80000000;
 
 // Standard Constants
 pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+/// COFF characteristics bit identifying a DLL rather than an executable image.
+pub const IMAGE_FILE_DLL: u16 = 0x2000;
 pub const PE32_PLUS_MAGIC: u16 = 0x020B;
 /// PE32+ optional header length up to and including NumberOfRvaAndSizes.
 const PE32_PLUS_MIN_OPTIONAL_HEADER: usize = 112;
@@ -135,6 +141,89 @@ fn read_u16(bytes: &[u8], at: usize) -> u16 {
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+/// A nonzero entry must lie inside executable image code. Entry RVA zero is
+/// the documented absence of an entry point and is admissible only for a DLL.
+fn entry_point_is_valid(
+    characteristics: u16,
+    entry_point_rva: u32,
+    sections: &[PeSection],
+) -> bool {
+    if entry_point_rva == 0 {
+        return characteristics & IMAGE_FILE_DLL != 0;
+    }
+    sections.iter().any(|section| {
+        section.permissions.execute
+            && entry_point_rva >= section.virtual_address
+            && entry_point_rva - section.virtual_address
+                < section.virtual_size.max(section.raw_data_size)
+    })
+}
+
+fn section_initial_data<'a>(bytes: &'a [u8], section: &PeSection) -> Result<&'a [u8], PeError> {
+    if section.raw_data_size == 0 || section.raw_data_ptr == 0 {
+        return Ok(&[]);
+    }
+    let start = section.raw_data_ptr as usize;
+    let end = start
+        .checked_add(section.raw_data_size as usize)
+        .ok_or(PeError::InvalidSectionHeaders)?;
+    bytes.get(start..end).ok_or(PeError::InvalidSectionHeaders)
+}
+
+struct SectionMapping<'a> {
+    base: u64,
+    size: usize,
+    permissions: MemoryPermissions,
+    initial_data: &'a [u8],
+}
+
+struct MappingPlan<'a> {
+    headers: &'a [u8],
+    header_map_size: usize,
+    image_base_field: u64,
+    entry_point: u64,
+    sections: Vec<SectionMapping<'a>>,
+}
+
+struct MappingOutcome {
+    entry_point: u64,
+    image_base_field: u64,
+}
+
+fn map_plan(
+    base: u64,
+    memory: &mut GuestMemory,
+    plan: MappingPlan<'_>,
+) -> Result<MappingOutcome, PeError> {
+    // Windows maps the headers read-only at the image base, and programs read
+    // them: a C runtime finds its own sections this way before `main`. The
+    // file bytes are the initial data of the mapping.
+    memory
+        .map_region_with_data(
+            base,
+            plan.header_map_size,
+            MemoryPermissions::READ_ONLY,
+            plan.headers,
+        )
+        .map_err(PeError::SectionMappingError)?;
+
+    for section in plan.sections {
+        memory
+            .map_region_with_data(
+                section.base,
+                section.size,
+                section.permissions,
+                section.initial_data,
+            )
+            .map_err(PeError::SectionMappingError)?;
+    }
+
+    Ok(MappingOutcome {
+        entry_point: plan.entry_point,
+        image_base_field: plan.image_base_field,
+    })
 }
 
 impl ParsedPe {
@@ -180,6 +269,7 @@ impl ParsedPe {
         }
         let number_of_sections = read_u16(&coff, 6);
         let time_date_stamp = read_u32(&coff, 8);
+        let coff_characteristics = read_u16(&coff, 22);
         let size_of_optional_header = usize::from(read_u16(&coff, 20));
 
         let section_table_offset = opt_offset + size_of_optional_header as u64;
@@ -279,13 +369,7 @@ impl ParsedPe {
             }
         }
 
-        // The entry point must lie inside an executable section.
-        let entry_ok = sections.iter().any(|s| {
-            s.permissions.execute
-                && entry_point_rva >= s.virtual_address
-                && entry_point_rva - s.virtual_address < s.virtual_size.max(s.raw_data_size)
-        });
-        if !entry_ok {
+        if !entry_point_is_valid(coff_characteristics, entry_point_rva, &sections) {
             return Err(PeError::InvalidEntryPoint.into());
         }
 
@@ -293,6 +377,7 @@ impl ParsedPe {
             machine,
             number_of_sections,
             time_date_stamp,
+            characteristics: coff_characteristics,
             image_base,
             section_alignment,
             file_alignment,
@@ -301,6 +386,19 @@ impl ParsedPe {
             entry_point_rva,
             sections,
         })
+    }
+
+    /// Whether the COFF characteristics mark this image as a DLL.
+    pub fn is_dll(&self) -> bool {
+        self.characteristics & IMAGE_FILE_DLL != 0
+    }
+
+    fn validate_entry_point(&self) -> Result<(), PeError> {
+        if entry_point_is_valid(self.characteristics, self.entry_point_rva, &self.sections) {
+            Ok(())
+        } else {
+            Err(PeError::InvalidEntryPoint)
+        }
     }
 
     /// Translate a Relative Virtual Address (RVA) to a raw file offset.
@@ -338,6 +436,8 @@ impl ParsedPe {
             let agrees = u16_at(optional)? == PE32_PLUS_MAGIC
                 && optional_size >= PE32_PLUS_MIN_OPTIONAL_HEADER
                 && sections == self.number_of_sections
+                && u16_at(coff.checked_add(18)?)? == self.characteristics
+                && u32_at(optional.checked_add(16)?)? == self.entry_point_rva
                 && u64::from_le_bytes(field(image_base, 8)?.try_into().ok()?) == self.image_base
                 && u32_at(optional.checked_add(OPTIONAL_SIZE_OF_IMAGE)?)? == self.size_of_image
                 && u32_at(optional.checked_add(OPTIONAL_SIZE_OF_HEADERS)?)? == self.size_of_headers;
@@ -363,6 +463,118 @@ impl ParsedPe {
         Ok((len, mapped, image_base))
     }
 
+    /// Validate the input and arithmetic of a mapping without changing memory.
+    /// The plan borrows section data from `bytes`, so the mapping itself does
+    /// not need to rediscover file-slice errors.
+    fn mapping_plan<'a>(&self, bytes: &'a [u8], base: u64) -> Result<MappingPlan<'a>, PeError> {
+        let (headers_len, headers_mapped, image_base_field_offset) = self.headers_for(bytes)?;
+
+        // Count allocated bytes and measure the full image span separately.
+        // RVA gaps do not consume host memory.
+        let mut mapped = headers_mapped;
+        let mut required = headers_mapped;
+        for sec in &self.sections {
+            let size = u64::from(sec.virtual_size.max(sec.raw_data_size));
+            mapped = mapped
+                .checked_add(size)
+                .ok_or(PeError::SectionMappingError(MemoryError::AllocationFailed))?;
+            if size != 0 {
+                required = required.max(u64::from(sec.virtual_address) + size);
+            }
+        }
+        if mapped > MAX_MAPPED_IMAGE_BYTES {
+            return Err(PeError::SectionMappingError(MemoryError::AllocationFailed));
+        }
+        let declared = self.size_of_image;
+        if required > u64::from(declared) {
+            return Err(PeError::InvalidImageSize { declared, required });
+        }
+
+        base.checked_add(headers_mapped)
+            .ok_or(PeError::SectionMappingError(MemoryError::Overflow))?;
+        let image_base_field = base
+            .checked_add(image_base_field_offset as u64)
+            .ok_or(PeError::InvalidHeaderSize)?;
+        let header_map_size = usize::try_from(headers_mapped)
+            .map_err(|_| PeError::SectionMappingError(MemoryError::AllocationFailed))?;
+
+        let mut sections = Vec::with_capacity(self.sections.len());
+        for sec in &self.sections {
+            let size = u64::from(sec.virtual_size.max(sec.raw_data_size));
+            if size == 0 {
+                continue;
+            }
+            let section_base = base
+                .checked_add(u64::from(sec.virtual_address))
+                .ok_or(PeError::SectionMappingError(MemoryError::Overflow))?;
+            section_base
+                .checked_add(size)
+                .ok_or(PeError::SectionMappingError(MemoryError::Overflow))?;
+            let size = usize::try_from(size)
+                .map_err(|_| PeError::SectionMappingError(MemoryError::AllocationFailed))?;
+            sections.push(SectionMapping {
+                base: section_base,
+                size,
+                permissions: sec.permissions,
+                initial_data: section_initial_data(bytes, sec)?,
+            });
+        }
+
+        let entry_point = base
+            .checked_add(u64::from(self.entry_point_rva))
+            .ok_or(PeError::InvalidEntryPoint)?;
+        self.validate_entry_point()?;
+
+        Ok(MappingPlan {
+            headers: &bytes[..headers_len],
+            header_map_size,
+            image_base_field,
+            entry_point,
+            sections,
+        })
+    }
+
+    /// Map this parsed image into an existing guest address space at `base`.
+    ///
+    /// Only the image headers and sections are mapped. Relocations, import
+    /// binding, exception-directory registration, TLS initialization and entry
+    /// execution remain separate steps. The mapping is transactional: if any
+    /// region cannot be mapped, `memory` is restored to its prior state.
+    ///
+    /// This insertion-only implementation snapshots the address space before
+    /// mapping, so its cost and peak host memory use scale with the existing
+    /// memory rather than only the new image. It is a batch-local mechanism,
+    /// not the ownership or rollback design for dynamic module loading.
+    ///
+    /// The result is the entry address for a nonzero entry RVA, or `None` for
+    /// a DLL whose entry RVA is zero.
+    pub fn map_into_memory(
+        &self,
+        bytes: &[u8],
+        memory: &mut GuestMemory,
+        base: u64,
+    ) -> Result<Option<u64>, PeError> {
+        let mapped = self.map_transactional(bytes, memory, base)?;
+        Ok((self.entry_point_rva != 0).then_some(mapped.entry_point))
+    }
+
+    fn map_transactional(
+        &self,
+        bytes: &[u8],
+        memory: &mut GuestMemory,
+        base: u64,
+    ) -> Result<MappingOutcome, PeError> {
+        let plan = self.mapping_plan(bytes, base)?;
+        let before = memory.clone();
+        match map_plan(base, memory, plan) {
+            Ok(mapped) => Ok(mapped),
+            Err(error) => {
+                *memory = before;
+                Err(error)
+            }
+        }
+    }
+
     /// Load this parsed PE into a fresh `GuestMemory` instance, mapping the
     /// headers and all sections.
     pub fn load_into_memory(&self, bytes: &[u8]) -> Result<LoadedImage, PeError> {
@@ -386,75 +598,9 @@ impl ParsedPe {
     }
 
     fn map_at_base(&self, bytes: &[u8], base: u64) -> Result<(GuestMemory, u64, u64), PeError> {
-        let (headers_len, headers_mapped, image_base_field) = self.headers_for(bytes)?;
-
-        // Count allocated bytes and measure the full image span separately.
-        // RVA gaps do not consume host memory.
-        let mut mapped = headers_mapped;
-        let mut required = headers_mapped;
-        for sec in &self.sections {
-            let size = u64::from(sec.virtual_size.max(sec.raw_data_size));
-            mapped += size;
-            if size != 0 {
-                required = required.max(u64::from(sec.virtual_address) + size);
-            }
-        }
-        if mapped > MAX_MAPPED_IMAGE_BYTES {
-            return Err(PeError::SectionMappingError(MemoryError::AllocationFailed));
-        }
-        let declared = self.size_of_image;
-        if required > u64::from(declared) {
-            return Err(PeError::InvalidImageSize { declared, required });
-        }
-
         let mut memory = GuestMemory::new();
-
-        // Windows maps the headers read-only at the image base, and programs read
-        // them: a C runtime finds its own sections this way before `main`. The
-        // file bytes are the initial data of the mapping.
-        memory
-            .map_region_with_data(
-                base,
-                headers_mapped as usize,
-                MemoryPermissions::READ_ONLY,
-                &bytes[..headers_len],
-            )
-            .map_err(PeError::SectionMappingError)?;
-        let image_base_field = base
-            .checked_add(image_base_field as u64)
-            .ok_or(PeError::InvalidHeaderSize)?;
-
-        for sec in &self.sections {
-            let base_addr = base
-                .checked_add(u64::from(sec.virtual_address))
-                .ok_or(PeError::InvalidSectionHeaders)?;
-            let map_size = std::cmp::max(sec.virtual_size, sec.raw_data_size) as usize;
-            if map_size == 0 {
-                continue;
-            }
-
-            let initial_data = if sec.raw_data_size > 0 && sec.raw_data_ptr > 0 {
-                let start = sec.raw_data_ptr as usize;
-                let end = start
-                    .checked_add(sec.raw_data_size as usize)
-                    .ok_or(PeError::InvalidSectionHeaders)?;
-                bytes
-                    .get(start..end)
-                    .ok_or(PeError::InvalidSectionHeaders)?
-            } else {
-                &[]
-            };
-
-            memory
-                .map_region_with_data(base_addr, map_size, sec.permissions, initial_data)
-                .map_err(PeError::SectionMappingError)?;
-        }
-
-        let entry_point = base
-            .checked_add(u64::from(self.entry_point_rva))
-            .ok_or(PeError::InvalidEntryPoint)?;
-
-        Ok((memory, entry_point, image_base_field))
+        let mapped = self.map_transactional(bytes, &mut memory, base)?;
+        Ok((memory, mapped.entry_point, mapped.image_base_field))
     }
 }
 
@@ -557,6 +703,51 @@ mod tests {
         assert!(expected.next().is_none());
         assert_eq!(positional.unwrap_err(), error);
         assert_eq!(ParsedPe::parse(bytes).unwrap_err(), error);
+    }
+
+    #[test]
+    fn failed_existing_memory_mapping_restores_layout_and_metadata() {
+        const BASE: u64 = 0x1_6000_0000;
+        const BLOCKED_BYTE: u8 = 0xEE;
+        let pe = ParsedPe::parse(FIXTURE).unwrap();
+        let first = pe
+            .sections
+            .iter()
+            .find(|section| section.virtual_size.max(section.raw_data_size) != 0)
+            .expect("fixture has a nonempty section");
+        let blocker = BASE + u64::from(first.virtual_address);
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region_with_data(blocker, 1, MemoryPermissions::READ_WRITE, &[BLOCKED_BYTE])
+            .unwrap();
+        memory.main_image = Some(crate::memory::MainImage {
+            base: 0x1234_0000,
+            size: 0x5678,
+            entry_point: 0x1234_1000,
+        });
+        memory.write_fault = Some(0x2222_3333);
+        memory.unhandled_filter = 0x4444_5555;
+        let usage = memory.usage();
+
+        let error = pe
+            .map_into_memory(FIXTURE, &mut memory, BASE)
+            .expect_err("the blocker overlaps the first section");
+        assert!(matches!(
+            error,
+            PeError::SectionMappingError(MemoryError::OverlappingRegion { .. })
+        ));
+        assert_eq!(memory.usage(), usage);
+        assert_eq!(memory.read_u8(blocker), Ok(BLOCKED_BYTE));
+        assert_eq!(
+            memory.read_u8(BASE),
+            Err(MemoryError::UnmappedAddress(BASE))
+        );
+        let main = memory.main_image.expect("main image metadata survives");
+        assert_eq!(main.base, 0x1234_0000);
+        assert_eq!(main.size, 0x5678);
+        assert_eq!(main.entry_point, 0x1234_1000);
+        assert_eq!(memory.write_fault, Some(0x2222_3333));
+        assert_eq!(memory.unhandled_filter, 0x4444_5555);
     }
 
     #[test]

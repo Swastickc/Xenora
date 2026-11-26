@@ -38,6 +38,7 @@ const MAX_ADDITIONAL_HEADER_UNITS: usize = 4096;
 const MAX_HEADER_LINE_BYTES: usize = 8192;
 const MAX_RESPONSE_HEAD_BYTES: usize = 64 * 1024;
 const MAX_READ_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_OPTIONAL_BODY_BYTES: u32 = 16 * 1024 * 1024;
 
 const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: u32 = 0;
 const WINHTTP_ACCESS_TYPE_NO_PROXY: u32 = 1;
@@ -801,6 +802,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             }
             if total_length != optional_length {
                 return send.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+            }
+            if optional_length > MAX_OPTIONAL_BODY_BYTES {
+                return send.fail(cpu.gs_base, ERROR_OUTOFMEMORY, 0);
             }
             let mut body = vec![0; optional_length as usize];
             if optional_length != 0 {

@@ -791,6 +791,8 @@ name and value. `Host`, `Content-Length`, `Connection` and
 additional-header block. Xenora emits `Connection: close`; there is no
 connection reuse or keep-alive pool. `dwTotalLength` must equal the optional
 body length because `WinHttpWriteData` streaming is not implemented. The
+pre-send copy is bounded at 16 MiB; larger inline bodies fail with
+`ERROR_OUTOFMEMORY`. The
 public default timeout values are applied as an initial 60-second connect
 timeout and 30-second send/receive timeouts. Resolution uses the host system
 resolver, and a request may connect to whatever address that resolver returns;

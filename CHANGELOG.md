@@ -151,6 +151,7 @@ remains unsupported.
 - Sampling the synthetic runtime task queue clock now makes expired queued operations available on the completion port. A background operation without a cancellation token reports an observed timeout once it exits (#621).
 - The PE loader ignores thread-local storage directory bytes outside the optional header's declared directory count, so padding is not treated as TLS metadata (#573).
 - The PE loader validates the declared TLS directory size and reads its fields by RVA, including across adjacent file-backed sections (#639).
+- PE startup places a large main-thread static TLS block after the thread environment block when their usual addresses would overlap (#705).
 - Sampler validation rejects texture metadata with more mip levels than its dimensions allow, including metadata constructed directly from public fields (#503).
 - Import generation preserves names containing quotes when reading probe CSV and writing its manifest CSV (#538).
 - The macOS interactive fixture combines on-screen directions with a connected gamepad's other buttons, axes, and triggers. Release restores the physical direction, starting a new fixture clears the on-screen direction, and a failed input update can be retried (#601).

@@ -691,6 +691,31 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
     });
 
+    let rename_ex_w = Arc::clone(state);
+    registry.register(KERNEL32, "MoveFileExW", move |args, cpu, memory| {
+        // MOVEFILE_DELAY_UNTIL_REBOOT is meaningless without a boot to wait
+        // for; the copy-across-volumes flag is inert with the one drive.
+        const REPLACE_EXISTING: u64 = 1;
+        const DELAY_UNTIL_REBOOT: u64 = 4;
+        if args.r8 & DELAY_UNTIL_REBOOT != 0 {
+            return rename_ex_w.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+        }
+        let Some(source) = guest_path(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            return rename_ex_w.fail(cpu.gs_base, INVALID_NAME, 0);
+        };
+        let Some(target) = guest_path(memory, args.rdx).map_err(ExitReason::MemoryFault)? else {
+            return rename_ex_w.fail(cpu.gs_base, INVALID_NAME, 0);
+        };
+        let mut objects = rename_ex_w.objects.lock().expect("guest object state");
+        if args.r8 & REPLACE_EXISTING != 0 {
+            objects.files.remove(&target);
+        }
+        match move_file(&mut objects, &source, &target) {
+            Ok(()) => Ok(1),
+            Err(error) => rename_ex_w.fail(cpu.gs_base, error, 0),
+        }
+    });
+
     // LockFileEx and UnlockFileEx of a single-process machine: no other owner
     // can contend for a byte range, so a valid file handle locks and unlocks
     // successfully and the overlapped offsets do not matter. What the calls

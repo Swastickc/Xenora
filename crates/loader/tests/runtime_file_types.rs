@@ -37,6 +37,7 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "CreateFileA"),
     (KERNEL32, "GetFileAttributesA"),
     (KERNEL32, "SetFileAttributesA"),
+    (KERNEL32, "MoveFileExW"),
 ];
 
 const WIDE: u64 = SCRATCH;
@@ -266,6 +267,35 @@ fn narrow_attributes_round_trip() {
     narrow_at(&mut guest, NAME4, "absent.bin");
     assert_eq!(
         guest.call("GetFileAttributesA", &[NAME4]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+}
+
+/// MoveFileExW is the wide width of the same extended rename.
+#[test]
+fn move_file_ex_of_the_wide_width() {
+    const GOT5: u64 = SCRATCH + 0x808;
+    const OUT5: u64 = SCRATCH + 0x400;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "wide-move.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    guest.memory.write_bytes(OUT5, b"w").unwrap();
+    assert_eq!(guest.call("WriteFile", &[handle, OUT5, 1, GOT5, 0]), 1);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    let source = wide(&mut guest, "wide-move.bin");
+    // The target goes past the source in memory: use a second slot.
+    const TARGET: u64 = SCRATCH + 0x200;
+    let units: Vec<u8> = "wide-renamed.bin"
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    guest.memory.write_bytes(TARGET, &units).unwrap();
+    assert_eq!(guest.call("MoveFileExW", &[source, TARGET, 0]), 1);
+    // The rename happened: the narrow width sees the new name.
+    narrow_at(&mut guest, OUT5, "wide-renamed.bin");
+    assert_ne!(
+        guest.call("GetFileAttributesA", &[OUT5]) & 0xFFFF_FFFF,
         0xFFFF_FFFF
     );
 }

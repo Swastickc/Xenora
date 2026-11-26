@@ -17,10 +17,10 @@ for tool in "$clang" "$linker"; do
         *arm64*) ;;
         *) echo "Expected a native ARM64 tool: $tool" >&2; exit 1 ;;
     esac
-    case "$(lipo -archs "$tool")" in
-        *arm64*) ;;
-        *) echo "Expected a native ARM64 tool: $tool" >&2; exit 1 ;;
-    esac
+    if ! lipo "$tool" -verify_arch arm64; then
+        echo "Expected a native ARM64 tool: $tool" >&2
+        exit 1
+    fi
 done
 link() {
     case "${linker##*/}" in

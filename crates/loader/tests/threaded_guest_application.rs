@@ -149,6 +149,7 @@ fn run(
             Arc::clone(&state),
             budget,
             quantum,
+            |_| {},
         ),
         None => run_synthetic_startup(GUEST, layout, imports, budget),
     }

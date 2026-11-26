@@ -34,6 +34,17 @@ const KERNEL32: &str = "kernel32.dll";
 pub(crate) const EXCEPTION_RETURN: u64 = ENTRY_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
 const _: () = assert!(EXCEPTION_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
 
+/// Return address under the unhandled-exception filter the dispatcher calls
+/// at the end of a search. Reaching it hands the filter's result to
+/// [`filter_resume`].
+pub(crate) const FILTER_RETURN: u64 = SCOPE_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(FILTER_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
+
+/// `UnhandledExceptionFilter` results (`SetUnhandledExceptionFilter`).
+const FILTER_CONTINUE_EXECUTION: i32 = -1;
+const FILTER_CONTINUE_SEARCH: i32 = 0;
+const FILTER_EXECUTE_HANDLER: i32 = 1;
+
 const UNW_FLAG_EHANDLER: u8 = 0x1;
 const UNW_FLAG_UHANDLER: u8 = 0x2;
 const UNW_FLAG_CHAININFO: u8 = 0x4;
@@ -638,23 +649,19 @@ pub(crate) struct Dispatch {
     /// Guest address of the CONTEXT, DISPATCHER_CONTEXT and EXCEPTION_RECORD.
     scratch: u64,
     frames: u32,
-    /// The CPU fault this search started from. A search that no frame
-    /// accepts ends the guest with it, at the faulting instruction.
-    fault: Option<ExitReason>,
     /// The search started from an instruction-fetch fault, whose address can
     /// be outside every image: that first frame is unwound as a leaf.
     fetch_fault: bool,
     /// The next frame may be outside every image (see `fetch_fault`).
     leaf: bool,
+    /// The search is waiting for the unhandled-exception filter.
+    filter: bool,
+    /// The search started from `RaiseException`, not from a CPU fault.
+    raised: bool,
 }
 
 impl Dispatch {
-    fn search(
-        origin: CpuState,
-        scratch: u64,
-        fault: Option<ExitReason>,
-        fetch_fault: bool,
-    ) -> Self {
+    fn search(origin: CpuState, scratch: u64, fetch_fault: bool) -> Self {
         Self {
             unwind: None,
             next: origin.clone(),
@@ -662,9 +669,10 @@ impl Dispatch {
             establisher: 0,
             scratch,
             frames: 0,
-            fault,
             fetch_fault,
             leaf: fetch_fault,
+            filter: false,
+            raised: false,
         }
     }
 }
@@ -694,12 +702,15 @@ fn scratch_below(rsp: u64, memory: &GuestMemory) -> Result<u64, ExitReason> {
 }
 
 /// Whether `rip` is where a guest stack ends: the return address of the
-/// entry point, of a thread's start routine, or of a guest callback a host
-/// service made. No guest frame lies beyond it to search.
+/// entry point, of a thread's start routine, of a TLS callback, or of a
+/// guest callback a host service made. No guest frame lies beyond it.
 fn end_of_stack(rip: u64) -> bool {
     matches!(
         rip,
-        0 | ENTRY_RETURN | CALLBACK_RETURN | crate::services::threads::THREAD_RETURN
+        0 | ENTRY_RETURN
+            | CALLBACK_RETURN
+            | crate::services::threads::THREAD_RETURN
+            | crate::tls::TLS_CALLBACK_RETURN
     )
 }
 
@@ -712,8 +723,8 @@ fn walk(
     let teb = cpu.gs_base;
     loop {
         let frame = dispatch.next.clone();
-        if frame.rip == EXCEPTION_RETURN {
-            // An outer dispatch's handler frame: the stack continues at the
+        if frame.rip == EXCEPTION_RETURN || frame.rip == FILTER_RETURN {
+            // An outer dispatch's handler or unhandled-exception filter frame: the stack continues at the
             // code that called that dispatch.
             let outer = memory
                 .exception_frames
@@ -737,16 +748,7 @@ fn walk(
             if dispatch.unwind.is_some() {
                 return Err(ExitReason::InvalidUnwind);
             }
-            let code = memory
-                .read_u32(dispatch.scratch + RECORD_AT)
-                .map_err(fault)?;
-            if let Some(reason) = dispatch.fault {
-                // The guest stops at the faulting instruction, not inside
-                // the dispatcher or a handler.
-                *cpu = dispatch.origin;
-                return Err(reason);
-            }
-            return Err(ExitReason::UnhandledException(code));
+            return unhandled(dispatch, cpu, memory);
         }
         dispatch.frames += 1;
         if dispatch.frames > MAX_FRAMES {
@@ -894,13 +896,138 @@ fn install(
     Ok(())
 }
 
+/// A search reached the end of the stack with no frame accepting the
+/// exception. Call the unhandled-exception filter, once per exception, or
+/// take the default action.
+///
+/// `SetUnhandledExceptionFilter` documents that the filter takes an
+/// `EXCEPTION_POINTERS` and runs on the thread that raised the exception, and
+/// what each of its three results means. The filter is not called again for
+/// an exception raised while a filter of the same thread runs: that one gets
+/// the default action at once (a Xenora policy; the pages read are silent).
+fn unhandled(
+    mut dispatch: Dispatch,
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+) -> Result<(), ExitReason> {
+    let filter = memory.unhandled_filter;
+    let teb = cpu.gs_base;
+    let filtering = memory
+        .exception_frames
+        .iter()
+        .any(|(&(t, _), pending)| t == teb && pending.filter);
+    if filter == 0 || dispatch.filter || filtering {
+        return default_action(&dispatch, cpu, memory);
+    }
+    // EXCEPTION_POINTERS { ExceptionRecord, ContextRecord }, in the
+    // DISPATCHER_CONTEXT slot, which no handler is using now.
+    let s = dispatch.scratch;
+    let pointers = s + DISPATCHER_AT;
+    memory.write_u64(pointers, s + RECORD_AT).map_err(fault)?;
+    memory
+        .write_u64(pointers + 8, s + EXCEPTION_CONTEXT_AT)
+        .map_err(fault)?;
+    let call = s - 40;
+    memory.write_u64(call, FILTER_RETURN).map_err(fault)?;
+    memory.fetch_instruction_byte(filter).map_err(fault)?;
+    let key = (teb, call + 8);
+    if memory.exception_frames.contains_key(&key) {
+        return Err(ExitReason::InvalidUnwind);
+    }
+    dispatch.filter = true;
+    memory.exception_frames.insert(key, dispatch);
+    cpu.set(Register::Rcx, pointers);
+    cpu.set(Register::Rsp, call);
+    cpu.rip = filter;
+    Ok(())
+}
+
+/// Xenora's default action for an exception that nothing handled, a policy:
+/// the guest process ends with the exception code as its exit status.
+/// `RaiseException` names `ExitProcess` as the default action for most
+/// exceptions but the pages read give no exit status. The guest's registers
+/// are those of the raise or fault, so a fault's RIP is the faulting
+/// instruction. The services' recorded exit status is not set: the
+/// dispatcher has no access to them, only the guest's exit reason carries it.
+fn default_action(
+    dispatch: &Dispatch,
+    cpu: &mut CpuState,
+    memory: &GuestMemory,
+) -> Result<(), ExitReason> {
+    let code = memory
+        .read_u32(dispatch.scratch + RECORD_AT)
+        .map_err(fault)?;
+    let mut stop = dispatch.origin.clone();
+    if dispatch.raised {
+        // As at the call into RaiseException: RSP on its return address, so
+        // the nonvolatile registers are those the caller had.
+        stop.set(Register::Rsp, stop.get(Register::Rsp) - 8);
+    }
+    *cpu = stop;
+    Err(ExitReason::ProcessExit(code))
+}
+
+/// The unhandled-exception filter returned to [`FILTER_RETURN`] with its
+/// result in EAX.
+pub(crate) fn filter_resume(
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+) -> Result<(), ExitReason> {
+    let key = (cpu.gs_base, cpu.get(Register::Rsp));
+    let dispatch = match memory.exception_frames.get(&key) {
+        Some(pending) if pending.filter => memory
+            .exception_frames
+            .remove(&key)
+            .expect("the pending filter"),
+        _ => return Err(ExitReason::InvalidUnwind),
+    };
+    match cpu.get(Register::Rax) as u32 as i32 {
+        // "Continue execution from the point of the exception", with the
+        // filter's changes to the exception information.
+        FILTER_CONTINUE_EXECUTION => continue_execution(dispatch, cpu, memory),
+        // Continue-search goes on to the default handling, and execute-handler
+        // "usually results in process termination": both end here in the
+        // default action.
+        FILTER_CONTINUE_SEARCH | FILTER_EXECUTE_HANDLER => default_action(&dispatch, cpu, memory),
+        _ => Err(ExitReason::InvalidUnwind),
+    }
+}
+
+/// Continue with the exception context the handler or filter was given,
+/// including any change it made: after a raise this returns from the raise,
+/// and after a fault it runs the faulting instruction again unless the
+/// handler moved RIP. A noncontinuable exception is refused.
+fn continue_execution(
+    dispatch: Dispatch,
+    cpu: &mut CpuState,
+    memory: &GuestMemory,
+) -> Result<(), ExitReason> {
+    let flags = memory
+        .read_u32(dispatch.scratch + RECORD_AT + 4)
+        .map_err(fault)?;
+    if flags & EXCEPTION_NONCONTINUABLE != 0 {
+        return Err(ExitReason::InvalidUnwind);
+    }
+    let mut resumed = dispatch.origin;
+    load_registers(
+        memory,
+        dispatch.scratch + EXCEPTION_CONTEXT_AT,
+        &mut resumed,
+    )?;
+    *cpu = resumed;
+    Ok(())
+}
+
 /// A language handler returned to [`EXCEPTION_RETURN`] with its disposition in EAX.
 pub(crate) fn resume(cpu: &mut CpuState, memory: &mut GuestMemory) -> Result<(), ExitReason> {
     let key = (cpu.gs_base, cpu.get(Register::Rsp));
-    let dispatch = memory
-        .exception_frames
-        .remove(&key)
-        .ok_or(ExitReason::InvalidUnwind)?;
+    let dispatch = match memory.exception_frames.get(&key) {
+        Some(pending) if !pending.filter => memory
+            .exception_frames
+            .remove(&key)
+            .expect("the pending dispatch"),
+        _ => return Err(ExitReason::InvalidUnwind),
+    };
     let disposition = cpu.get(Register::Rax) as u32;
     match (dispatch.unwind, disposition) {
         (Some(target), DISPOSITION_CONTINUE_SEARCH) => {
@@ -913,26 +1040,10 @@ pub(crate) fn resume(cpu: &mut CpuState, memory: &mut GuestMemory) -> Result<(),
             walk(dispatch, cpu, memory)
         }
         (None, DISPOSITION_CONTINUE_SEARCH) => walk(dispatch, cpu, memory),
-        (None, DISPOSITION_CONTINUE_EXECUTION) => {
-            let flags = memory
-                .read_u32(dispatch.scratch + RECORD_AT + 4)
-                .map_err(fault)?;
-            if flags & EXCEPTION_NONCONTINUABLE != 0 {
-                return Err(ExitReason::InvalidUnwind);
-            }
-            // Continue with the context the handler was given, including any
-            // change it made: after a raise this returns from the raise, and
-            // after a fault it runs the faulting instruction again unless the
-            // handler moved RIP.
-            let mut resumed = dispatch.origin;
-            load_registers(
-                memory,
-                dispatch.scratch + EXCEPTION_CONTEXT_AT,
-                &mut resumed,
-            )?;
-            *cpu = resumed;
-            Ok(())
-        }
+        (None, DISPOSITION_CONTINUE_EXECUTION) => continue_execution(dispatch, cpu, memory),
+        // ExceptionNestedException, ExceptionCollidedUnwind and any other
+        // value: the public pages read do not describe how a dispatcher
+        // handles the first two, so they are refused rather than guessed.
         _ => Err(ExitReason::InvalidUnwind),
     }
 }
@@ -970,7 +1081,9 @@ fn raise_exception(
             .map_err(fault)?;
     }
     write_context(memory, scratch + EXCEPTION_CONTEXT_AT, &origin)?;
-    walk(Dispatch::search(origin, scratch, None, false), cpu, memory)
+    let mut dispatch = Dispatch::search(origin, scratch, false);
+    dispatch.raised = true;
+    walk(dispatch, cpu, memory)
 }
 
 /// `RtlUnwindEx(target_frame, target_ip, record, return_value, context, history)`.
@@ -980,7 +1093,10 @@ fn unwind_ex(
     memory: &mut GuestMemory,
 ) -> Result<(), ExitReason> {
     if args.rcx == 0 {
-        // An exit unwind, which has no target frame, is not modelled.
+        // An exit unwind, which has no target frame. `RtlUnwindEx` says only
+        // that a NULL target frame performs one and that the target IP is
+        // then ignored; where it stops and what follows are not documented,
+        // so it is refused rather than guessed.
         return Err(ExitReason::InvalidUnwind);
     }
     let (origin, scratch) = caller(cpu, memory)?;
@@ -1016,7 +1132,7 @@ fn unwind(
     }
     let dispatch = Dispatch {
         unwind: Some(target),
-        ..Dispatch::search(origin, scratch, None, false)
+        ..Dispatch::search(origin, scratch, false)
     };
     walk(dispatch, cpu, memory)
 }

@@ -17,6 +17,12 @@ pub const MAX_TLS_CALLBACKS: usize = 64;
 /// Bytes below the stack top that a callback is entered with: the return
 /// address and the 32-byte home space the Win64 convention gives every callee.
 const CALLBACK_FRAME: u64 = 40;
+/// Return address under a TLS callback. It is on the reserved sentinel page,
+/// so the import dispatcher sees it before any fetch: a callback's return is
+/// a host event, never a guest fault for the exception dispatcher to raise.
+pub(crate) const TLS_CALLBACK_RETURN: u64 =
+    crate::exceptions::FILTER_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(TLS_CALLBACK_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
 
 /// Errors arising during TLS setup or callback invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -451,8 +457,8 @@ pub fn execute_tls_callbacks(
         // Stack pointer aligned with 32-byte shadow space + return address
         let rsp = stack_top - CALLBACK_FRAME;
         cpu.set(Register::Rsp, rsp);
-        // Write synthetic magic return address (0xFFFF_FFFF_FFFF_0000) into [RSP]
-        let magic_ret = 0xFFFF_FFFF_FFFF_0000u64;
+        // The callback returns to the TLS sentinel.
+        let magic_ret = TLS_CALLBACK_RETURN;
         memory.write_u64(rsp, magic_ret)?;
 
         // Set Win64 arguments:
@@ -463,7 +469,8 @@ pub fn execute_tls_callbacks(
         // R8 = 0
         cpu.set(Register::R8, 0);
 
-        // RET lands at the sentinel, which has no guest code mapped.
+        // RET lands at the sentinel; the dispatcher stops there, or, with no
+        // import registry, its fetch faults with RIP left on it.
         let mut steps = 0;
         while cpu.rip != magic_ret {
             let res = dbt.run(cpu, memory, 100);
@@ -766,7 +773,7 @@ mod tests {
 
     const CODE: u64 = 0x40_0000;
     const STACK_TOP: u64 = 0x80_0000;
-    const SENTINEL: u64 = 0xFFFF_FFFF_FFFF_0000;
+    const SENTINEL: u64 = super::TLS_CALLBACK_RETURN;
 
     /// Code at `CODE`, a 4 KiB stack below `STACK_TOP` and a fresh translator.
     fn guest(code: &[u8]) -> (CpuState, GuestMemory, DbtEngine) {

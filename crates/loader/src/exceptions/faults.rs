@@ -89,8 +89,9 @@ fn is_ud2(rip: u64, memory: &GuestMemory) -> bool {
 /// Turn a fault a guest instruction raised at `cpu.rip` into an exception
 /// and start the search for a handler. `fetch` says the fault happened while
 /// fetching or decoding the instruction. `Ok` means the guest continues in a
-/// handler; `Err` holds the reason the guest stops, which is `reason` itself
-/// when the policy keeps the fault a stop or no frame accepts it.
+/// handler; `Err` holds the reason the guest stops: `reason` itself when the
+/// policy keeps the fault a stop, or the default action's `ProcessExit` with
+/// the exception code when no frame or filter handles it.
 pub(crate) fn dispatch_fault(
     reason: ExitReason,
     fetch: bool,
@@ -122,11 +123,7 @@ pub(crate) fn dispatch_fault(
     }
     let origin = cpu.clone();
     write_context(memory, scratch + EXCEPTION_CONTEXT_AT, &origin)?;
-    walk(
-        Dispatch::search(origin, scratch, Some(reason), fetch),
-        cpu,
-        memory,
-    )
+    walk(Dispatch::search(origin, scratch, fetch), cpu, memory)
 }
 
 #[cfg(test)]

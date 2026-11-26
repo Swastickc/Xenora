@@ -219,14 +219,17 @@ impl DbtEngine {
                 Err(reason) => {
                     // A fetch or decode fault of a guest instruction may be
                     // caught by the guest's own exception handlers.
-                    if crate::exceptions::dispatch_fault(reason, true, cpu, memory).is_ok() {
-                        instructions_count += 1;
-                        continue;
-                    }
+                    let exit = match crate::exceptions::dispatch_fault(reason, true, cpu, memory) {
+                        Ok(()) => {
+                            instructions_count += 1;
+                            continue;
+                        }
+                        Err(stop) => stop,
+                    };
                     return ExecutionResult {
                         instructions_executed: instructions_count,
                         final_state: cpu.clone(),
-                        exit_reason: reason,
+                        exit_reason: exit,
                     };
                 }
             };

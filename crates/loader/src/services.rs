@@ -2981,10 +2981,12 @@ pub(crate) mod handlers {
         context: &mut ServiceContext<'_>,
         filter: u64,
     ) -> Outcome<u64> {
-        Ok(context
-            .state
-            .crt_startup()
-            .set_unhandled_exception_filter(filter))
+        // Kept with the guest memory, where the exception dispatcher that
+        // calls it at the end of an unhandled search can reach it.
+        Ok(std::mem::replace(
+            &mut context.memory.unhandled_filter,
+            filter,
+        ))
     }
 
     // The Universal C runtime services that a C++ guest's runtime imports.

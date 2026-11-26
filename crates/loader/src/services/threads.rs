@@ -52,8 +52,12 @@ const TEB_STACK_BASE: u64 = 0x08;
 const TEB_STACK_LIMIT: u64 = 0x10;
 const TEB_SELF: u64 = 0x30;
 
-/// Return address of a thread's start routine. Nothing is mapped there.
-pub(crate) const THREAD_RETURN: u64 = 0xFFFF_FFFF_FFFE_0000;
+/// Return address of a thread's start routine. It is on the reserved
+/// sentinel page, so the import dispatcher stops there before any fetch: a
+/// start routine's return is a host event, never a guest fault.
+pub(crate) const THREAD_RETURN: u64 =
+    crate::tls::TLS_CALLBACK_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(THREAD_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
 
 /// Tail-call the actual ExitThread service with the worker's original return
 /// slot and home area. The worker can use FLS without importing ExitThread.

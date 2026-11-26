@@ -283,7 +283,9 @@ UNSUPPORTED_COMBOS = {
 # which SOP2 groups under src_vcc and src_special).
 # VOP3 rules also name source classes and encoding fields they refuse.
 VOP3_COMBOS = {"src_sgpr", "src_inline", "src_literal", "modifiers", "src2"}
-ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi"} | VOP3_COMBOS
+# src_nan: a NaN value in a float source, whose result depends on MODE.IEEE
+# and MODE.DX10_CLAMP (guide 3.5); the translator does not model it.
+ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi", "src_nan"} | VOP3_COMBOS
 VOP3_VGPR2_UNSUPPORTED = {
     "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
     "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
@@ -352,7 +354,7 @@ OPERAND_RULES = {
         },
         "unsupported": {
             "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
-            "src_float_inline", "src_special",
+            "src_float_inline", "src_special", "src_nan",
         },
         "kind": "vector_unary",
     },

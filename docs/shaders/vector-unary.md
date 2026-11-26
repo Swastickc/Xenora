@@ -63,17 +63,20 @@ ways, and Xenora does not model MODE writes:
   flushing (modes 0 and 2) it would give -0, which is outside the contract.
   Results are integers or signed zeros, so output flushing changes nothing.
 - NaN inputs. The pseudocode has no NaN case, and MODE.IEEE and
-  MODE.DX10_CLAMP change NaN results. The CPU interpreters refuse every quiet
-  or signalling NaN input. The Metal kernel passes a NaN's bits through
-  unchanged, but that result is not verified.
+  MODE.DX10_CLAMP change NaN results. NaN inputs are an unsupported operand
+  variant (`src_nan`). The CPU interpreters refuse every quiet or signalling
+  NaN input. The Metal kernel passes a NaN's bits through unchanged, so a
+  signalling NaN (for example `0x7f800001`) stays signalling, where hardware
+  with MODE.IEEE = 1 presumably quiets it. That result is not verified.
 
-The pseudocode is read in exact arithmetic: `floor(S0 + 0.5)` does not round
-`S0 + 0.5` first, which matches the "round-to-nearest-even" description. It
-gives +0 for a negative input of magnitude at most 0.5, where
-round-to-nearest-even keeps the sign. The interpreters refuse those inputs
-(including -0 and the negative subnormals) for `v_rndne_f32`, and the Metal
-result for them (a signed zero) is not verified. The interpreters can only
-refuse lane data at run time, so the translator still accepts these programs.
+The guide describes `v_rndne_f32` as "Round-to-nearest-even semantics", and
+Xenora implements that description as IEEE 754 roundTiesToEven. Its pseudocode,
+`floor(S0 + 0.5)` corrected for even ties, agrees when read in exact
+arithmetic except for the sign of a zero result: for a negative input of
+magnitude at most 0.5 (including -0 and the negative subnormals) it would give
++0, while round-to-nearest-even gives -0. Xenora returns -0. The interpreters
+can only refuse NaN lane data at run time, so the translator still accepts
+those programs.
 
 The MSL computes every result from the register bits with unsigned integer
 operations: no Metal float operation runs, so fast math, subnormal flushing
@@ -87,12 +90,12 @@ The [guide-derived oracle](../../tests/validation/tests/vop1_float_rounding.rs)
 has a hand-written table of 43 inputs (signed zeros, infinities, quiet and
 signalling NaNs, the smallest and largest subnormals, values one unit in the
 last place around 0.5, 1, 2.5 and 2^23, halfway values) and a transcription of
-the pseudocode checked against it. Its 148 accepted cases pass on both CPU
+the pseudocode checked against it. Its 152 accepted cases pass on both CPU
 interpreters and, through the translator, on native Metal (Apple M4, macOS
-27.2.1, API and shader validation on: 148 cases in 65 programs). Both
-interpreters refuse the 604 rejected encodings at the instruction and the 42
-refused-input programs at the ALU word, and the compiler refuses the 604
-encodings at the same offset. The
+27.2.1, API and shader validation on: 152 cases in 65 programs). Both
+interpreters refuse the 604 rejected encodings at the instruction and the 32
+NaN-input programs at the ALU word (CPU only; these are not read back on
+Metal), and the compiler refuses the 604 encodings at the same offset. The
 [LLVM-assembled fixture](../../fixtures/rdna2/vector-round.s) exercises all
 four forms, a partial EXEC and a literal source, and the LLVM three-way check
 covers each form with every accepted source class. Independent acceptance is

@@ -15,7 +15,7 @@ import Metal
 import SwiftUI
 
 /// What one run of the worker produced.
-struct ProgramRunResult: Equatable {
+struct ProgramRunResult: Equatable, Sendable {
     /// The worker's exit status: the program's own, 124 for the wall
     /// deadline, 125 for any other failure of the runner or the guest, 2 for
     /// a refused command line. `nil` if the worker could not be started or
@@ -170,15 +170,26 @@ struct ProgramArgument: Identifiable {
     var value = ""
 }
 
-/// The latest run of a chosen executable. Only the latest request publishes.
+/// Owns one worker slot and publishes results for the current selection.
 @MainActor
 final class ProgramRunModel: ObservableObject {
+    typealias Worker = @Sendable (URL, Bool, [String]) async -> ProgramRunResult
+
     static let shared = ProgramRunModel()
-    @Published var running = false
-    @Published var result: ProgramRunResult?
-    @Published var fileName: String?
+    @Published private(set) var running = false
+    @Published private(set) var result: ProgramRunResult?
+    @Published private(set) var fileName: String?
     @Published var arguments: [ProgramArgument] = []
+    private let worker: Worker
     private var latestRequest: UInt64 = 0
+
+    init(worker: @escaping Worker = { url, trace, arguments in
+        await Task.detached {
+            ProgramRunner.run(url, trace: trace, programArguments: arguments)
+        }.value
+    }) {
+        self.worker = worker
+    }
 
     var workerArguments: [String] { arguments.map(\.value) }
 
@@ -195,27 +206,27 @@ final class ProgramRunModel: ObservableObject {
         return index < arguments.count ? arguments[index].id : arguments.last?.id
     }
 
-    func run(_ url: URL, trace: Bool) {
+    @discardableResult
+    func run(_ url: URL, trace: Bool) -> Task<Void, Never>? {
+        guard !running else { return nil }
         latestRequest &+= 1
         let request = latestRequest
         fileName = url.lastPathComponent
         result = nil
         running = true
         let arguments = workerArguments
-        Task {
-            let outcome = await Task.detached {
-                ProgramRunner.run(url, trace: trace, programArguments: arguments)
-            }.value
-            guard request == latestRequest else { return }
-            result = outcome
+        return Task {
+            let outcome = await worker(url, trace, arguments)
+            if request == latestRequest {
+                result = outcome
+            }
             running = false
         }
     }
 
-    /// A different file was chosen: its run starts empty.
+    /// Clear the old selection's output while its worker finishes.
     func clear() {
         latestRequest &+= 1
-        running = false
         result = nil
         fileName = nil
     }
@@ -281,10 +292,15 @@ struct ProgramRunView: View {
     @ObservedObject var hud: HudSettings
     @FocusState private var argumentFocus: ArgumentFocus?
 
+    private var runButtonTitle: String {
+        guard model.running else { return "Run" }
+        return model.fileName == nil ? "Finishing previous run…" : "Running…"
+    }
+
     var body: some View {
         Section("Run executable (experimental)") {
             argumentEditor
-            Button(model.running ? "Running…" : "Run") {
+            Button(runButtonTitle) {
                 if let url { model.run(url, trace: hud.enabled) }
             }
             .disabled(url == nil || model.running)

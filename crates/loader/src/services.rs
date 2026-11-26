@@ -1558,6 +1558,15 @@ pub(crate) mod handlers {
 
     /// `_mkdir` and `_rmdir` are drive operations the descriptor layer is no
     /// part of: the narrow path resolves as every drive path does.
+    pub fn _pipe(context: &mut ServiceContext<'_>, fds: u64, size: u32, mode: i32) -> Outcome<i32> {
+        let _ = (size, mode);
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            streams.pipe_create(context.memory, fds)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _mkdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
         let bytes =
             crt_streams::c_string(context.memory, name, 260).map_err(ExitReason::MemoryFault)?;

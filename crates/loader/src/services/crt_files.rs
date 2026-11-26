@@ -155,6 +155,18 @@ enum Descriptor {
     /// `_dup` or `_dup2` made it: the state is another descriptor's, as the
     /// CRT shares the file position across the duplication.
     Alias(u32),
+    /// The read end of an anonymous pipe, by the pipe's identifier.
+    PipeRead(u32),
+    /// The write end of one.
+    PipeWrite(u32),
+}
+
+/// An anonymous pipe's shared state: the bytes written and not yet read,
+/// and whether each end is still open. The end of the pipe is only end of
+/// file once the write end has closed.
+pub(super) struct PipeState {
+    buffer: std::collections::VecDeque<u8>,
+    write_open: bool,
 }
 
 #[derive(Default)]
@@ -165,6 +177,9 @@ pub(super) struct FileStreams {
     temporary_counter: u32,
     /// Open file descriptors by their number, from 3.
     descriptors: BTreeMap<u32, Descriptor>,
+    /// Anonymous pipes `_pipe` creates, by identifier.
+    pipes: BTreeMap<u32, PipeState>,
+    pipe_counter: u32,
 }
 
 impl FileStreams {
@@ -572,7 +587,7 @@ impl FileStreams {
                 Some(Descriptor::Owned(stream)) => Ok(stream),
                 _ => Err(EBADF),
             },
-            Descriptor::Alias(_) => Err(EBADF),
+            _ => Err(EBADF),
         }
     }
 
@@ -585,7 +600,7 @@ impl FileStreams {
         let stream = match self.descriptors.get(&fd).ok_or(EBADF)? {
             Descriptor::Shared(file) => self.open.get(file).ok_or(EBADF)?,
             Descriptor::Owned(stream) => stream,
-            Descriptor::Alias(_) => return Err(EBADF),
+            _ => return Err(EBADF),
         };
         let _ = stream;
         Ok(drive
@@ -617,6 +632,74 @@ impl FileStreams {
         self.open.insert(file, stream);
         self.descriptors.insert(fd, Descriptor::Shared(file));
         Ok(file)
+    }
+
+    /// The pipe identifier and whether it is the write end, for a descriptor
+    /// of one — so the service layer routes the operation before the stream
+    /// paths, which pipes are no part of.
+    pub(super) fn pipe_end(&self, fd: u32) -> Result<Option<(u32, bool)>, u32> {
+        let fd = self.descriptor_terminal(fd)?;
+        Ok(match self.descriptors.get(&fd) {
+            Some(Descriptor::PipeRead(id)) => Some((*id, false)),
+            Some(Descriptor::PipeWrite(id)) => Some((*id, true)),
+            _ => None,
+        })
+    }
+
+    /// `_pipe`: the read end and the write end, sharing the one queue as
+    /// the CRT's anonymous pipe shares it. The size and mode arguments do
+    /// not act: the queue grows as the writes ask.
+    pub(super) fn pipe_create(&mut self) -> Result<(u32, u32), u32> {
+        let mut room = 0;
+        for fd in 3..MAX_DESCRIPTORS {
+            if !self.descriptors.contains_key(&fd) {
+                room += 1;
+                if room == 2 {
+                    break;
+                }
+            }
+        }
+        if room < 2 {
+            return Err(EMFILE);
+        }
+        self.pipe_counter += 1;
+        let id = self.pipe_counter;
+        self.pipes.insert(
+            id,
+            PipeState {
+                buffer: std::collections::VecDeque::new(),
+                write_open: true,
+            },
+        );
+        let read = self.insert_descriptor(Descriptor::PipeRead(id))?;
+        let write = self.insert_descriptor(Descriptor::PipeWrite(id))?;
+        Ok((read, write))
+    }
+
+    /// Read end bytes: what the queue holds, up to the limit. The empty
+    /// queue is end of file once the write end closed, and `Ok(None)` while
+    /// it has not — a read there would block, which the hosted runtime does
+    /// not model.
+    pub(super) fn pipe_read(&mut self, id: u32, limit: usize) -> Result<Option<Vec<u8>>, u32> {
+        let pipe = self.pipes.get_mut(&id).ok_or(EBADF)?;
+        let mut bytes = Vec::new();
+        while bytes.len() < limit {
+            let Some(byte) = pipe.buffer.pop_front() else {
+                break;
+            };
+            bytes.push(byte);
+        }
+        if bytes.is_empty() && pipe.write_open {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Write end bytes: the whole write lands in the queue.
+    pub(super) fn pipe_write(&mut self, id: u32, bytes: &[u8]) -> Result<usize, u32> {
+        let pipe = self.pipes.get_mut(&id).ok_or(EBADF)?;
+        pipe.buffer.extend(bytes.iter().copied());
+        Ok(bytes.len())
     }
 
     /// `_dup`: the lowest free descriptor sharing the file position, as the
@@ -931,6 +1014,31 @@ impl FileStreams {
                 true
             }
             Some(Descriptor::Alias(_)) => true,
+            Some(Descriptor::PipeRead(id)) => {
+                // The pipe itself goes once nothing references it: no other
+                // descriptor of it, and the write end closed.
+                if !self
+                    .descriptors
+                    .values()
+                    .any(|entry| matches!(entry, Descriptor::PipeWrite(other) | Descriptor::PipeRead(other) if *other == id))
+                {
+                    self.pipes.remove(&id);
+                }
+                true
+            }
+            Some(Descriptor::PipeWrite(id)) => {
+                if let Some(pipe) = self.pipes.get_mut(&id) {
+                    pipe.write_open = false;
+                }
+                if !self
+                    .descriptors
+                    .values()
+                    .any(|entry| matches!(entry, Descriptor::PipeWrite(other) | Descriptor::PipeRead(other) if *other == id))
+                {
+                    self.pipes.remove(&id);
+                }
+                true
+            }
             Some(Descriptor::Shared(file)) => {
                 self.open.remove(&file);
                 memory.release_heap_allocation(PROCESS_HEAP, file);

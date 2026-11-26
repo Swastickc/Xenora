@@ -886,13 +886,29 @@ impl StandardStreams {
         let bytes = match fd {
             0 => self.input.take((count as usize).min(1 << 20)),
             1 | 2 => return Ok(Err(Failed(-1, EBADF))),
-            _ => match self
-                .opened
-                .descriptor_read(drive, fd as u32, count as usize)
-            {
-                Ok(bytes) => bytes,
-                Err(errno) => return Ok(Err(Failed(-1, errno))),
-            },
+            _ => {
+                match self.opened.pipe_end(fd as u32) {
+                    Ok(Some((id, false))) => {
+                        // A pipe read that would block stops the guest: the
+                        // hosted runtime answers what is there or end of
+                        // file, honestly, rather than blocking forever.
+                        match self.opened.pipe_read(id, count as usize) {
+                            Ok(Some(bytes)) => bytes,
+                            Ok(None) => return Err(RUNTIME_LIMIT),
+                            Err(errno) => return Ok(Err(Failed(-1, errno))),
+                        }
+                    }
+                    Ok(Some((_, true))) => return Ok(Err(Failed(-1, EBADF))),
+                    Ok(None) => match self
+                        .opened
+                        .descriptor_read(drive, fd as u32, count as usize)
+                    {
+                        Ok(bytes) => bytes,
+                        Err(errno) => return Ok(Err(Failed(-1, errno))),
+                    },
+                    Err(errno) => return Ok(Err(Failed(-1, errno))),
+                }
+            }
         };
         memory.write_bytes(buffer, &bytes).map_err(fault)?;
         Ok(Ok(bytes.len() as i32))
@@ -921,8 +937,16 @@ impl StandardStreams {
             0 => Err(EBADF),
             1 => self.write(drive, Stream::Output, &bytes)?,
             2 => self.write(drive, Stream::Error, &bytes)?,
-            _ => match self.opened.descriptor_write(drive, fd as u32, &bytes) {
-                Ok(()) => Ok(()),
+            _ => match self.opened.pipe_end(fd as u32) {
+                Ok(Some((id, true))) => match self.opened.pipe_write(id, &bytes) {
+                    Ok(_) => Ok(()),
+                    Err(errno) => Err(errno),
+                },
+                Ok(Some((_, false))) => Err(EBADF),
+                Ok(None) => match self.opened.descriptor_write(drive, fd as u32, &bytes) {
+                    Ok(()) => Ok(()),
+                    Err(errno) => Err(errno),
+                },
                 Err(errno) => Err(errno),
             },
         };
@@ -1059,6 +1083,23 @@ impl StandardStreams {
         stat[24..32].copy_from_slice(&length.to_le_bytes());
         memory.write_bytes(buffer, &stat).map_err(fault)?;
         Ok(Ok(0))
+    }
+
+    /// `_pipe` answers the two descriptors through the caller's array.
+    pub(super) fn pipe_create(&mut self, memory: &mut GuestMemory, fds: u64) -> Outcome<i32> {
+        if fds == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.opened.pipe_create() {
+            Ok((read, write)) => {
+                memory
+                    .write_u32(fds, read)
+                    .and_then(|()| memory.write_u32(fds + 4, write))
+                    .map_err(fault)?;
+                Ok(Ok(0))
+            }
+            Err(errno) => Ok(Err(Failed(-1, errno))),
+        }
     }
 
     /// `_fdopen`: the descriptor becomes the stream's, and the mode string

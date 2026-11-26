@@ -6753,3 +6753,39 @@ fn legacy_directories_are_made_and_removed() {
     // once the file is gone.
     assert_eq!(guest.call("remove", &[buf]) & 0xFFFF_FFFF, MINUS_ONE);
 }
+
+#[test]
+fn legacy_pipes_carry_bytes_between_ends() {
+    let mut guest = Guest::new();
+    let buf = guest.call("malloc", &[64]);
+    // `_pipe` answers two descriptors sharing one queue: what the write end
+    // takes the read end gives back, in order.
+    assert_eq!(guest.call("_pipe", &[buf, 4096, 0]) & 0xFFFF_FFFF, 0);
+    let read = guest.memory.read_u32(buf).unwrap() as u64;
+    let write = guest.memory.read_u32(buf + 4).unwrap() as u64;
+    assert!(
+        (3..0x8000).contains(&read) && read + 1 == write,
+        "{read:x} {write:x}"
+    );
+    guest.memory.write_bytes(buf + 16, b"pipe").unwrap();
+    assert_eq!(guest.call("_write", &[write, buf + 16, 4]) & 0xFFFF_FFFF, 4);
+    assert_eq!(guest.call("_read", &[read, buf + 32, 4]) & 0xFFFF_FFFF, 4);
+    let mut bytes = [0u8; 4];
+    guest.memory.read_bytes(buf + 32, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"pipe");
+    // The directions do not cross: the write end does not read, the read
+    // end does not write.
+    assert_eq!(
+        guest.call("_read", &[write, buf + 32, 1]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    assert_eq!(
+        guest.call("_write", &[read, buf + 16, 1]) & 0xFFFF_FFFF,
+        MINUS_ONE
+    );
+    // Once the write end closes and the queue empties, the read end answers
+    // end of file: zero bytes.
+    assert_eq!(guest.call("_close", &[write]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[read, buf + 32, 4]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[read]) & 0xFFFF_FFFF, 0);
+}

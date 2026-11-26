@@ -562,6 +562,15 @@ service ucrtbase.dll _rmdir(name: ptr) -> i32
     fails -1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories
     ref direct.h _rmdir
     test legacy_directories_are_made_and_removed
+service ucrtbase.dll _pipe(fds: ptr, size: u32, mode: i32) -> i32
+    handler _pipe
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails a read of an empty pipe whose write end is open stops the guest — blocking is not modelled; the size and mode arguments do not act
+    ref io.h _pipe
+    test legacy_pipes_carry_bytes_between_ends
+
 
 
 

@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 224] = [
+pub static SERVICES: [ServiceMetadata; 225] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -690,6 +690,17 @@ pub static SERVICES: [ServiceMetadata; 224] = [
         failure: "-1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories",
         reference: "direct.h _rmdir",
         tests: &["legacy_directories_are_made_and_removed"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "_pipe",
+        parameters: &[Parameter { name: "fds", kind: "ptr" }, Parameter { name: "size", kind: "u32" }, Parameter { name: "mode", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll", "msvcrt.dll"],
+        failure: "a read of an empty pipe whose write end is open stops the guest — blocking is not modelled; the size and mode arguments do not act",
+        reference: "io.h _pipe",
+        tests: &["legacy_pipes_carry_bytes_between_ends"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -3028,6 +3039,16 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.u64(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::_rmdir(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "_pipe", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u32(1)?;
+        let a2 = call.i32(2)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::_pipe(&mut context, a0, a1, a2)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

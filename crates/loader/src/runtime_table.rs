@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 229] = [
+pub static SERVICES: [ServiceMetadata; 230] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -162,6 +162,17 @@ pub static SERVICES: [ServiceMetadata; 229] = [
         failure: "-1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled",
         reference: "corecrt_stdio_config.h __stdio_common_vfprintf; Microsoft Learn, vfprintf and format specification syntax",
         tests: &["formatted_output_reaches_the_captured_standard_streams"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "__stdio_common_vsscanf",
+        parameters: &[Parameter { name: "options", kind: "u64" }, Parameter { name: "buffer", kind: "ptr" }, Parameter { name: "count", kind: "u64" }, Parameter { name: "format", kind: "ptr" }, Parameter { name: "locale", kind: "ptr" }, Parameter { name: "arguments", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Partial,
+        aliases: &["api-ms-win-crt-stdio-l1-1-0.dll"],
+        failure: "EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale",
+        reference: "corecrt_stdio_config.h __stdio_common_vsscanf; Microsoft Learn, scanf and the scanf type-field characters",
+        tests: &["legacy_sscanf_follows_the_reference_vectors"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -2647,6 +2658,19 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a4 = call.u64(4)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: i32 = handlers::vfprintf(&mut context, a0, a1, a2, a3, a4)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "__stdio_common_vsscanf", ServiceStatus::Partial, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let a1 = call.u64(1)?;
+        let a2 = call.u64(2)?;
+        let a3 = call.u64(3)?;
+        let a4 = call.u64(4)?;
+        let a5 = call.u64(5)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::vsscanf(&mut context, a0, a1, a2, a3, a4, a5)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

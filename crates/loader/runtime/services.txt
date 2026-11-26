@@ -139,6 +139,17 @@ service ucrtbase.dll __stdio_common_vfprintf(options: u64, stream: ptr, format: 
 
 # The buffer forms of printf (#466). The standard and legacy rules are from
 # Microsoft's snprintf and _snprintf pages; the secure ones from sprintf_s.
+# The formatted input of the scan family (#605). The floating conversions
+# stop the guest rather than misread; everything else the narrow family
+# documents is implemented.
+service ucrtbase.dll __stdio_common_vsscanf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vsscanf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale
+    ref corecrt_stdio_config.h __stdio_common_vsscanf; Microsoft Learn, scanf and the scanf type-field characters
+    test legacy_sscanf_follows_the_reference_vectors
+
 service ucrtbase.dll __stdio_common_vsprintf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
     handler vsprintf
     status partial

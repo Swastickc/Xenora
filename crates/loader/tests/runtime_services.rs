@@ -4344,8 +4344,9 @@ const LEGACY_DATA_SYMBOLS: [&str; 7] = [
 /// Legacy-linked binaries import these services from `msvcrt.dll`, where the
 /// compatibility mapping resolves them to the same handlers as the modern
 /// runtime.
-const LEGACY_FUNCTION_SYMBOLS: [&str; 20] = [
+const LEGACY_FUNCTION_SYMBOLS: [&str; 21] = [
     "__iob_func",
+    "sscanf",
     "fprintf",
     "vfprintf",
     "strlen",
@@ -6948,4 +6949,136 @@ fn wcscpy_copies_and_wcsnicmp_compares_case_insensitively() {
         guest.call("_wcsnicmp", &[SCRATCH + 0x20, SCRATCH + 0x20, 1]),
         0
     );
+}
+
+#[test]
+fn legacy_sscanf_follows_the_reference_vectors() {
+    let mut guest = Guest::new();
+    let work = guest.call("malloc", &[0x400]);
+    assert_ne!(work, 0);
+    // input at work, format at work+0x100, outputs at work+0x200 onward.
+    let scan = |guest: &mut Guest, input: &[u8], format: &[u8], slots: &[u64]| -> u64 {
+        guest.memory.write_bytes(work, input).unwrap();
+        guest.memory.write_u8(work + input.len() as u64, 0).unwrap();
+        guest.memory.write_bytes(work + 0x100, format).unwrap();
+        guest
+            .memory
+            .write_u8(work + 0x100 + format.len() as u64, 0)
+            .unwrap();
+        let mut args = vec![work, work + 0x100];
+        args.extend_from_slice(slots);
+        guest.call("sscanf", &args)
+    };
+    let int_at = |guest: &Guest, offset: u64| guest.memory.read_u32(work + 0x200 + offset).unwrap();
+    // v1: "42 rest" %d -> r=1 d=42. The reference vectors come from the same
+    // program compiled for the host, run on this machine.
+    assert_eq!(scan(&mut guest, b"42 rest", b"%d", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 42);
+    // v2: leading whitespace and a negative sign.
+    assert_eq!(scan(&mut guest, b"   -17 x", b"%d", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), (-17i32) as u32);
+    // v3: %i reads 0x1F as hexadecimal.
+    assert_eq!(scan(&mut guest, b"0x1F end", b"%i", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 31);
+    // v4: %i reads 010 as octal.
+    assert_eq!(scan(&mut guest, b"010 zz", b"%i", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 8);
+    // v5: %x reads ff.
+    assert_eq!(scan(&mut guest, b"ff gg", b"%x", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 255);
+    // v7/v8: %s stops at whitespace and honors the width.
+    assert_eq!(
+        scan(&mut guest, b"abc", "%s".as_bytes(), &[work + 0x200]),
+        1
+    );
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), b'a');
+    assert_eq!(guest.memory.read_u8(work + 0x203).unwrap(), 0);
+    assert_eq!(scan(&mut guest, b"ab cd", b"%3s", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x202).unwrap(), 0);
+    // v9/v10: whitespace in the format skips it; %c without it does not.
+    assert_eq!(scan(&mut guest, b"  q", b" %c", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), b'q');
+    assert_eq!(scan(&mut guest, b"  q", b"%c", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), 32);
+    // v11: a literal comma must match.
+    assert_eq!(
+        scan(
+            &mut guest,
+            b"12,34",
+            b"%d,%d",
+            &[work + 0x200, work + 0x204]
+        ),
+        2
+    );
+    assert_eq!(int_at(&guest, 0), 12);
+    assert_eq!(int_at(&guest, 4), 34);
+    // v12: suppression consumes but does not assign.
+    assert_eq!(scan(&mut guest, b"12 99", b"%d %*d", &[work + 0x200]), 1);
+    assert_eq!(int_at(&guest, 0), 12);
+    // v13/v14: a mismatch answers 0; empty input answers EOF.
+    assert_eq!(scan(&mut guest, b"x", b"%d", &[work + 0x200]), 0);
+    assert_eq!(
+        scan(&mut guest, b"", b"%d", &[work + 0x200]),
+        u64::from(u32::MAX)
+    );
+    // v18/v19: scansets collect members and non-members.
+    assert_eq!(scan(&mut guest, b"abcXYZ", b"%[abc]", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x203).unwrap(), 0);
+    assert_eq!(scan(&mut guest, b"xyzabc", b"%[^abc]", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), b'x');
+    assert_eq!(guest.memory.read_u8(work + 0x203).unwrap(), 0);
+    // v20: %n writes the consumed count and is not itself counted.
+    assert_eq!(
+        scan(
+            &mut guest,
+            b"123abc",
+            b"%d%n",
+            &[work + 0x200, work + 0x204]
+        ),
+        1
+    );
+    assert_eq!(int_at(&guest, 0), 123);
+    assert_eq!(int_at(&guest, 4), 3);
+    // v21: %lld reads past 32 bits.
+    assert_eq!(scan(&mut guest, b"4294967296", b"%lld", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u64(work + 0x200).unwrap(), 4294967296);
+    // v22: %hd writes a short.
+    assert_eq!(scan(&mut guest, b"327", b"%hd", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u16(work + 0x200).unwrap(), 327);
+    // v27: %hhu writes a byte.
+    assert_eq!(scan(&mut guest, b"200", b"%hhu", &[work + 0x200]), 1);
+    assert_eq!(guest.memory.read_u8(work + 0x200).unwrap(), 200);
+}
+
+#[test]
+fn vsscanf_scans_through_the_va_list() {
+    let mut guest = Guest::new();
+    let work = guest.call("malloc", &[0x200]);
+    assert_ne!(work, 0);
+    // input at work, format at work+0x40, output cell at work+0x60, the
+    // va_list slots at work+0x100.
+    guest.memory.write_bytes(work, b"42 rest\0").unwrap();
+    guest.memory.write_bytes(work + 0x40, b"%d\0").unwrap();
+    guest.memory.write_u64(work + 0x100, work + 0x60).unwrap();
+    // __stdio_common_vsscanf(options, buffer, count, format, locale,
+    // arguments) — the count of the string form is -1, and the locale and
+    // the argument pointer ride the stack above the shadow space.
+    for options in [0u64, 0x02, 0x04, 0x07] {
+        guest.memory.write_u64(work + 0x60, 0).unwrap();
+        guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+        guest
+            .memory
+            .write_u64(STACK_TOP + 40, work + 0x100)
+            .unwrap();
+        let (cpu, exit) = guest.run(
+            "__stdio_common_vsscanf",
+            &[options, work, u64::MAX, work + 0x40],
+        );
+        assert_eq!(
+            (cpu.get(Register::Rax) as u32 as i32, exit),
+            (1, ExitReason::Halt),
+            "options {options:#x}"
+        );
+        assert_eq!(guest.memory.read_u32(work + 0x60).unwrap(), 42);
+    }
 }

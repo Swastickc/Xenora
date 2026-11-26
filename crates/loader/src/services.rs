@@ -20,6 +20,7 @@ mod crt_files;
 mod crt_format;
 mod crt_legacy;
 mod crt_math;
+mod crt_scan;
 mod crt_startup;
 mod crt_streams;
 mod crt_wformat;
@@ -1174,6 +1175,26 @@ pub(crate) mod handlers {
     // and `vfprintf_s`.
 
     #[allow(clippy::too_many_arguments)]
+    pub fn vsscanf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        buffer: u64,
+        count: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        crt_scan::vsscanf(
+            context.memory,
+            options,
+            buffer,
+            count,
+            format,
+            locale,
+            arguments,
+        )
+    }
+
     pub fn vsprintf(
         context: &mut ServiceContext<'_>,
         options: u64,

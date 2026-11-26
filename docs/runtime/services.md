@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 229 |
-| Generated adapters | 229 |
-| Unique handler implementations | 219 |
+| Services with a declared ABI | 230 |
+| Generated adapters | 230 |
+| Unique handler implementations | 220 |
 | Implemented | 79 |
-| Partial | 148 |
+| Partial | 149 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 229 |
-| API-set aliases (not services) | 270 |
+| Conformance-tested through guest dispatch | 230 |
+| API-set aliases (not services) | 271 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -32,6 +32,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!GetSystemTimeAsFileTime` | `(time: out<8>) -> void` | implemented | guest fault on an invalid pointer |
 | `ucrtbase.dll!__acrt_iob_func` | `(index: u32) -> ptr` | partial | stops the guest for an index above 2 or when the streams cannot be allocated |
 | `ucrtbase.dll!__stdio_common_vfprintf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled |
+| `ucrtbase.dll!__stdio_common_vsscanf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale |
 | `ucrtbase.dll!__stdio_common_vsprintf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null format or a null buffer with a nonzero count, or an invalid format; -1 without errno for a legacy truncation; stops the guest when both behaviour bits are set or for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vswprintf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null format or an invalid one; stops the guest for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vsprintf_s` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null buffer, a zero count, a null or invalid format, or ERANGE when the text does not fit, and the buffer becomes empty; the invalid parameter handler is not modelled, so execution always continues |

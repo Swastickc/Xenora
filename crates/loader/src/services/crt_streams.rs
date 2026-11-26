@@ -21,6 +21,7 @@
 
 use super::crt_files::{self, EACCES, EBADF, EEXIST, EINVAL, ENOENT, ERANGE, FileStreams};
 use super::crt_format::{self, Floats, FormatError, Source};
+use super::crt_scan;
 use super::files::DriveEntry;
 use super::{ObjectState, ServicesState};
 use crate::cpu::ExitReason;
@@ -2123,5 +2124,39 @@ pub(super) fn register_legacy(registry: &mut ImportRegistry, state: &Arc<Service
             streams.write_formatted(&mut drive, args.rcx, &text)
         };
         printf_answer(memory, cpu.gs_base, outcome)
+    });
+
+    // `sscanf` scans the string its first argument names through the
+    // variadic pointers the calling convention passes after the format.
+    registry.register(MSVCRT, "sscanf", |args, _, memory| {
+        if args.rcx == 0 || args.rdx == 0 {
+            return Ok(u64::from(u32::MAX));
+        }
+        let input = crt_scan::scan_input_string(memory, args.rcx)?;
+        let format = crt_scan::scan_input_string(memory, args.rdx)?;
+        // The scan writes through the same memory the variadic reader
+        // reads, so the slots are read first — as many as the format
+        // consumes, no more.
+        let needed = crt_scan::count_assignments(&format);
+        let mut slots = Vec::with_capacity(needed);
+        {
+            let mut source = VariadicArguments {
+                args,
+                memory,
+                next: 2,
+            };
+            for _ in 0..needed {
+                slots.push(source.argument().map_err(fault)?);
+            }
+        }
+        let mut next_slot = slots.iter();
+        let scan = crt_scan::scan(memory, input, &format, || {
+            Ok(*next_slot.next().unwrap_or(&0))
+        });
+        match scan {
+            Ok(count) => Ok(count as u32 as u64),
+            Err(crt_scan::ScanError::Unsupported) => Err(RUNTIME_LIMIT),
+            Err(crt_scan::ScanError::Memory(error)) => Err(fault(error)),
+        }
     });
 }

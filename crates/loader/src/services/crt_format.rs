@@ -9,11 +9,23 @@
 //! Supported: the flags `-`, `+`, space, `#` and `0`; a width and a precision
 //! given as digits or as `*`; the size prefixes `hh`, `h`, `l`, `ll`, `j`,
 //! `z`, `t`, `I`, `I32` and `I64`; and the types `d`, `i`, `u`, `o`, `x`, `X`,
-//! `c`, `s`, `p` and `%%`.
+//! `c`, `s`, `p`, `%%`, and the floating-point types `f`, `F`, `e`, `E`, `g`,
+//! `G`, `a` and `A`.
+//!
+//! A floating-point argument is a `double`, with or without `l` or `L`: the
+//! page gives both prefixes as `long double`, which in Visual C++ "has the
+//! same internal representation as double". The value is printed from its
+//! exact binary digits, rounded correctly with ties to the even digit, as
+//! Microsoft's `printf` page describes since Windows 10 version 2004. That
+//! page also says the rounding follows the mode `fesetround` sets; here it is
+//! always to nearest. The decimal point is always `.`: no locale is modelled.
+//! The caller's option bits choose two things, see [`Floats`]: a program that
+//! asks for the rounding of older Windows gets no floating point at all,
+//! because that rounding is not modelled.
 //!
 //! Refused as invalid, as Windows does by default: `%n`, and a character that
 //! has no meaning as a type. Refused as not modelled, so that nothing is
-//! printed wrongly: the floating-point types, and wide characters and strings.
+//! printed wrongly: wide characters and strings.
 //!
 //! Where the documentation leaves a choice, the choice made here is marked
 //! "Xenora's choice" at the code that makes it.
@@ -37,6 +49,19 @@ pub(super) enum FormatError {
     Fault(MemoryError),
 }
 
+/// What the caller's option bits say about floating point
+/// (`_CRT_INTERNAL_PRINTF_*` in corecrt_stdio_config.h).
+#[derive(Clone, Copy)]
+pub(super) struct Floats {
+    /// `LEGACY_THREE_DIGIT_EXPONENTS`: the `e` style has at least three
+    /// exponent digits, as before Visual Studio 2015, not two.
+    pub(super) three_digit_exponents: bool,
+    /// `STANDARD_ROUNDING`: ties go to the even digit. Without it the
+    /// Universal CRT rounds as older versions of Windows did. That is not
+    /// modelled, so a floating-point conversion is then refused.
+    pub(super) standard_rounding: bool,
+}
+
 /// Where the arguments and strings of one call come from.
 pub(super) trait Source {
     /// The next 8-byte argument slot.
@@ -47,7 +72,7 @@ pub(super) trait Source {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Size {
+pub(super) enum Size {
     None,
     Char,
     Short,
@@ -65,19 +90,19 @@ enum Size {
 }
 
 #[derive(Default)]
-struct Flags {
-    left: bool,
-    plus: bool,
-    space: bool,
-    alternate: bool,
-    zero: bool,
+pub(super) struct Flags {
+    pub(super) left: bool,
+    pub(super) plus: bool,
+    pub(super) space: bool,
+    pub(super) alternate: bool,
+    pub(super) zero: bool,
 }
 
-struct Spec {
-    flags: Flags,
-    width: usize,
-    precision: Option<usize>,
-    size: Size,
+pub(super) struct Spec {
+    pub(super) flags: Flags,
+    pub(super) width: usize,
+    pub(super) precision: Option<usize>,
+    pub(super) size: Size,
 }
 
 struct Parser<'a> {
@@ -156,11 +181,11 @@ impl Parser<'_> {
 }
 
 /// An `int` argument is the low half of its slot.
-fn int(slot: u64) -> i32 {
+pub(super) fn int(slot: u64) -> i32 {
     slot as u32 as i32
 }
 
-fn bounded(value: usize) -> Result<usize, FormatError> {
+pub(super) fn bounded(value: usize) -> Result<usize, FormatError> {
     if value > MAX_OUTPUT {
         Err(FormatError::TooLong)
     } else {
@@ -170,7 +195,7 @@ fn bounded(value: usize) -> Result<usize, FormatError> {
 
 /// Pad `body` to the field width. `zeros` puts the padding after the first
 /// `lead` bytes (a sign or prefix) as zeros instead of before them as blanks.
-fn pad(out: &mut Vec<u8>, spec: &Spec, lead: usize, body: &[u8], zeros: bool) {
+pub(super) fn pad(out: &mut Vec<u8>, spec: &Spec, lead: usize, body: &[u8], zeros: bool) {
     let fill = spec.width.saturating_sub(body.len());
     if spec.flags.left {
         out.extend_from_slice(body);
@@ -203,7 +228,12 @@ fn digits(mut value: u64, base: u64, upper: bool) -> Vec<u8> {
     reversed
 }
 
-fn integer(out: &mut Vec<u8>, spec: &Spec, kind: u8, slot: u64) -> Result<(), FormatError> {
+pub(super) fn integer(
+    out: &mut Vec<u8>,
+    spec: &Spec,
+    kind: u8,
+    slot: u64,
+) -> Result<(), FormatError> {
     let signed = matches!(kind, b'd' | b'i');
     // Without a size prefix an integer argument is a 32-bit int, and so is a
     // long. `hh` and `h` arguments arrive as an int and are converted back.
@@ -277,10 +307,216 @@ fn integer(out: &mut Vec<u8>, spec: &Spec, kind: u8, slot: u64) -> Result<(), Fo
     Ok(())
 }
 
+/// The exponent part of the `e` and `a` styles: the letter, a sign, and at
+/// least `least` digits.
+fn exponent(letter: u8, value: i32, least: usize) -> Vec<u8> {
+    let sign = if value < 0 { '-' } else { '+' };
+    format!(
+        "{}{sign}{:0least$}",
+        char::from(letter),
+        value.unsigned_abs()
+    )
+    .into_bytes()
+}
+
+/// `magnitude` in the `e` style with `precision` digits after the point: the
+/// digits, and the decimal exponent as a number.
+fn scientific(magnitude: f64, precision: usize) -> (Vec<u8>, i32) {
+    let text = format!("{magnitude:.precision$e}");
+    let (digits, power) = text.split_once('e').expect("an exponent");
+    (
+        digits.as_bytes().to_vec(),
+        power.parse().expect("a decimal exponent"),
+    )
+}
+
+/// A point with nothing after it is written only for `#`.
+fn point(digits: &mut Vec<u8>, alternate: bool) {
+    if alternate && !digits.contains(&b'.') {
+        digits.push(b'.');
+    }
+}
+
+/// `%g` removes trailing zeros after the point, and the point with them.
+fn trim(digits: &mut Vec<u8>) {
+    if digits.contains(&b'.') {
+        while digits.last() == Some(&b'0') {
+            digits.pop();
+        }
+        if digits.last() == Some(&b'.') {
+            digits.pop();
+        }
+    }
+}
+
+/// The `a` style: the value's own binary digits, four to a hexadecimal one.
+fn hexadecimal(magnitude: f64, precision: Option<usize>, alternate: bool, upper: bool) -> Vec<u8> {
+    const FRACTION_BITS: u32 = 52;
+    let bits = magnitude.to_bits();
+    let field = (bits >> FRACTION_BITS) & 0x7FF;
+    let fraction = bits & ((1 << FRACTION_BITS) - 1);
+    // A normal number is 1.f times a power of two. Zero is 0.0 times 2^0.
+    // Xenora's choice: a subnormal number is written 0.f times 2^-1022, its
+    // own form; the page does not say.
+    let (lead, power) = match (field, fraction) {
+        (0, 0) => (0, 0),
+        (0, _) => (0, -1022),
+        _ => (1, field as i32 - 1023),
+    };
+    // Thirteen hexadecimal digits hold the whole fraction, and the page gives
+    // 13 as the default precision.
+    let precision = precision.unwrap_or(13);
+    let mut whole = (lead << FRACTION_BITS) | fraction;
+    let kept = precision.min(13);
+    let dropped = 4 * (13 - kept) as u32;
+    if dropped > 0 {
+        let half = 1u64 << (dropped - 1);
+        let rest = whole & ((1 << dropped) - 1);
+        whole >>= dropped;
+        // Ties go to the even digit.
+        if rest > half || (rest == half && whole & 1 == 1) {
+            whole += 1;
+        }
+    }
+    let mut text = format!("0x{:x}", whole >> (4 * kept));
+    if precision > 0 || alternate {
+        text.push('.');
+    }
+    if kept > 0 {
+        text += &format!("{:0kept$x}", whole & ((1u64 << (4 * kept)) - 1));
+    }
+    let mut text = text.into_bytes();
+    text.resize(text.len() + (precision - kept), b'0');
+    text.extend(exponent(b'p', power, 1));
+    if upper {
+        text.make_ascii_uppercase();
+    }
+    text
+}
+
+/// One of `f`, `e`, `g` and `a` or its capital, for the `double` in `slot`.
+pub(super) fn float(
+    out: &mut Vec<u8>,
+    spec: &Spec,
+    kind: u8,
+    slot: u64,
+    floats: Floats,
+) -> Result<(), FormatError> {
+    if !floats.standard_rounding {
+        return Err(FormatError::Unsupported);
+    }
+    let exponent_digits = if floats.three_digit_exponents { 3 } else { 2 };
+    match spec.size {
+        // `l` and `L` name a long double, which is a double here: the slot is
+        // read as one, as the Universal CRT does. A program whose compiler
+        // has a wider long double prints the wrong number on Windows too.
+        Size::None | Size::Long | Size::LongDouble => {}
+        _ => return Err(FormatError::Invalid),
+    }
+    let value = f64::from_bits(slot);
+    let upper = kind.is_ascii_uppercase();
+    let style = kind.to_ascii_lowercase();
+    let alternate = spec.flags.alternate;
+    let magnitude = value.abs();
+
+    let mut body = Vec::new();
+    // The blank is ignored when both it and + appear. A negative zero and a
+    // negative NaN have their sign.
+    if value.is_sign_negative() {
+        body.push(b'-');
+    } else if spec.flags.plus {
+        body.push(b'+');
+    } else if spec.flags.space {
+        body.push(b' ');
+    }
+    let lead = body.len();
+
+    if !value.is_finite() {
+        // The format specification page: `inf`; `nan` for a quiet NaN,
+        // `nan(snan)` for a signalling one and `nan(ind)` for the indefinite
+        // NaN, which is the negative quiet NaN with no payload. Capitals for
+        // the capital types. The precision does not apply.
+        const QUIET: u64 = 1 << 51;
+        let text: &[u8] = if value.is_infinite() {
+            b"inf"
+        } else if slot == 0xFFF8_0000_0000_0000 {
+            b"nan(ind)"
+        } else if slot & QUIET == 0 {
+            b"nan(snan)"
+        } else {
+            b"nan"
+        };
+        body.extend_from_slice(text);
+        if upper {
+            body.make_ascii_uppercase();
+        }
+        bounded(body.len().max(spec.width))?;
+        // The page, as ISO C: 0 does not pad an infinity or a NaN with zeros.
+        pad(out, spec, lead, &body, false);
+        return Ok(());
+    }
+
+    let mut digits = match style {
+        b'f' => {
+            let precision = spec.precision.unwrap_or(6);
+            let mut digits = format!("{magnitude:.precision$}").into_bytes();
+            point(&mut digits, alternate);
+            digits
+        }
+        b'e' => {
+            let (mut digits, power) = scientific(magnitude, spec.precision.unwrap_or(6));
+            point(&mut digits, alternate);
+            digits.extend(exponent(b'e', power, exponent_digits));
+            digits
+        }
+        b'g' => {
+            // ISO C: with P the precision (6 by default, 1 for 0) and X the
+            // exponent the e style would have, the f style with P - 1 - X
+            // digits if P > X >= -4, otherwise the e style with P - 1; then
+            // trailing zeros are removed unless # is given.
+            let significant = match spec.precision {
+                None => 6,
+                Some(0) => 1,
+                Some(precision) => precision,
+            };
+            let (mut digits, power) = scientific(magnitude, significant - 1);
+            let fixed =
+                usize::try_from(i64::from(power) + 4).is_ok_and(|above| above < significant + 4);
+            if fixed {
+                let precision = (significant as i64 - 1 - i64::from(power)) as usize;
+                digits = format!("{magnitude:.precision$}").into_bytes();
+            }
+            point(&mut digits, alternate);
+            if !alternate {
+                trim(&mut digits);
+            }
+            if !fixed {
+                digits.extend(exponent(b'e', power, exponent_digits));
+            }
+            digits
+        }
+        _ => hexadecimal(magnitude, spec.precision, alternate, false),
+    };
+    if upper {
+        digits.make_ascii_uppercase();
+    }
+    // Zeros from the 0 flag follow the sign and, in the a style, the 0x: the
+    // page has them "after the 0x or 0X prefix".
+    let lead = lead + if style == b'a' { 2 } else { 0 };
+    body.append(&mut digits);
+    bounded(body.len().max(spec.width))?;
+    pad(out, spec, lead, &body, spec.flags.zero);
+    Ok(())
+}
+
 /// Format `format` with the arguments and strings `source` supplies. Returns
 /// the bytes to write; their number is the function result of the `printf`
 /// family.
-pub(super) fn format(format: &[u8], source: &mut dyn Source) -> Result<Vec<u8>, FormatError> {
+pub(super) fn format(
+    format: &[u8],
+    source: &mut dyn Source,
+    floats: Floats,
+) -> Result<Vec<u8>, FormatError> {
     let mut out = Vec::new();
     let mut parser = Parser { format, at: 0 };
     while let Some(byte) = parser.peek() {
@@ -383,11 +619,13 @@ pub(super) fn format(format: &[u8], source: &mut dyn Source) -> Result<Vec<u8>, 
                 let text = format!("{slot:016X}");
                 pad(&mut out, &spec, 0, text.as_bytes(), false);
             }
-            // Wide characters and strings, floating point and the counted
-            // string structures are valid and not modelled.
-            b'C' | b'S' | b'Z' | b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
-                return Err(FormatError::Unsupported);
+            b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
+                let slot = source.argument().map_err(FormatError::Fault)?;
+                float(&mut out, &spec, kind, slot, floats)?;
             }
+            // Wide characters and strings and the counted string structures
+            // are valid and not modelled.
+            b'C' | b'S' | b'Z' => return Err(FormatError::Unsupported),
             // %n is disabled by default, and any other character has no
             // meaning as a type.
             _ => return Err(FormatError::Invalid),
@@ -399,8 +637,14 @@ pub(super) fn format(format: &[u8], source: &mut dyn Source) -> Result<Vec<u8>, 
 
 #[cfg(test)]
 mod tests {
-    use super::{FormatError, MAX_OUTPUT, Source, format};
+    use super::{Floats, FormatError, MAX_OUTPUT, Source, format};
     use crate::memory::MemoryError;
+
+    /// What mingw-w64 asks for: two exponent digits and standard rounding.
+    const STANDARD: Floats = Floats {
+        three_digit_exponents: false,
+        standard_rounding: true,
+    };
 
     /// A string argument is the address `STRINGS + 0x100 * index`.
     const STRINGS: u64 = 0x1000_0000;
@@ -437,7 +681,7 @@ mod tests {
                 .collect(),
             next: 0,
         };
-        let bytes = format(text.as_bytes(), &mut call)?;
+        let bytes = format(text.as_bytes(), &mut call, STANDARD)?;
         assert_eq!(call.next, slots.len(), "{text}: arguments consumed");
         Ok(String::from_utf8(bytes).unwrap())
     }
@@ -468,7 +712,8 @@ mod tests {
             for argument in arguments.split(',').filter(|text| !text.is_empty()) {
                 let (kind, value) = argument.split_once(':').unwrap();
                 match kind {
-                    "i" => slots.push(u64::from_str_radix(value, 16).unwrap()),
+                    // An integer slot, or the bits of a double.
+                    "i" | "f" => slots.push(u64::from_str_radix(value, 16).unwrap()),
                     "s" => {
                         slots.push(STRINGS + 0x100 * strings.len() as u64);
                         strings.push(unhex(value));
@@ -483,7 +728,7 @@ mod tests {
                 next: 0,
             };
             let shown = String::from_utf8_lossy(&template).into_owned();
-            let got = format(&template, &mut call)
+            let got = format(&template, &mut call, STANDARD)
                 .unwrap_or_else(|error| panic!("{shown} {arguments}: {error:?}"));
             assert_eq!(
                 String::from_utf8_lossy(&got),
@@ -493,7 +738,7 @@ mod tests {
             assert_eq!(call.next, call.slots.len(), "{shown}: arguments consumed");
             cases += 1;
         }
-        assert!(cases > 2000, "{cases} cases");
+        assert!(cases > 4500, "{cases} cases");
     }
 
     /// Rules the host C library does not share or that the reference leaves
@@ -618,7 +863,7 @@ mod tests {
                 next: 0,
             };
             assert_eq!(
-                format(text.as_bytes(), &mut call),
+                format(text.as_bytes(), &mut call, STANDARD),
                 Err(FormatError::Invalid),
                 "{text:?}"
             );
@@ -632,19 +877,186 @@ mod tests {
         }
     }
 
+    /// The bits of a double, as its argument slot.
+    fn double(value: f64) -> u64 {
+        value.to_bits()
+    }
+
+    /// Floating-point rules the host C library does not share, each from the
+    /// format specification page or from the value's own binary digits.
+    #[test]
+    fn floating_point_rules_the_host_does_not_share() {
+        // Infinity and the three kinds of NaN, in small and capital letters.
+        // The indefinite NaN is the negative quiet NaN with no payload.
+        let quiet = 0x7FF8_0000_0000_0000;
+        let indefinite = 0xFFF8_0000_0000_0000;
+        let signalling = 0x7FF0_0000_0000_0001;
+        for kind in ["f", "e", "g", "a"] {
+            let capital = kind.to_uppercase();
+            for (slot, small) in [
+                (double(f64::INFINITY), "inf"),
+                (double(f64::NEG_INFINITY), "-inf"),
+                (quiet, "nan"),
+                (quiet | 5, "nan"),
+                // Negative and quiet, but with a payload: not the indefinite.
+                (quiet | 1 << 63 | 5, "-nan"),
+                (indefinite, "-nan(ind)"),
+                (signalling, "nan(snan)"),
+                (signalling | 1 << 63, "-nan(snan)"),
+            ] {
+                assert_eq!(ok(&format!("%{kind}"), &[slot], &[]), small, "{kind}");
+                assert_eq!(
+                    ok(&format!("%{capital}"), &[slot], &[]),
+                    small.to_uppercase(),
+                    "{capital}"
+                );
+                // The precision does not apply, and a sign is asked for as
+                // for a number.
+                assert_eq!(ok(&format!("%.2{kind}"), &[slot], &[]), small);
+            }
+        }
+        assert_eq!(
+            ok("%+f|% f", &[double(f64::INFINITY), quiet], &[]),
+            "+inf| nan"
+        );
+        // ISO C: the 0 flag pads an infinity or a NaN with blanks.
+        assert_eq!(ok("[%08f]", &[double(f64::INFINITY)], &[]), "[     inf]");
+        assert_eq!(ok("[%-8E]", &[indefinite], &[]), "[-NAN(IND)]");
+        assert_eq!(ok("[%-12E]", &[indefinite], &[]), "[-NAN(IND)   ]");
+
+        // %a without a precision has thirteen digits after the point.
+        assert_eq!(ok("%a", &[double(1.0)], &[]), "0x1.0000000000000p+0");
+        assert_eq!(ok("%A", &[double(-1.5)], &[]), "-0X1.8000000000000P+0");
+        assert_eq!(ok("%a", &[double(0.0)], &[]), "0x0.0000000000000p+0");
+        // 0.1 is 0x1.999999999999a times 2^-4.
+        assert_eq!(ok("%a", &[double(0.1)], &[]), "0x1.999999999999ap-4");
+        assert_eq!(ok("%a", &[double(1024.0)], &[]), "0x1.0000000000000p+10");
+        assert_eq!(
+            ok("%a", &[double(f64::MAX)], &[]),
+            "0x1.fffffffffffffp+1023"
+        );
+        // Xenora's choice for a subnormal number: its own form, 0.f times
+        // 2^-1022. The smallest is one unit in the last of 13 digits.
+        assert_eq!(
+            ok("%a", &[double(f64::from_bits(1))], &[]),
+            "0x0.0000000000001p-1022"
+        );
+
+        // A shorter precision rounds the binary value, ties to the even
+        // digit. Each value is written here by its bits: 1.f in hexadecimal.
+        let bits = |fraction: u64| 0x3FF0_0000_0000_0000 | fraction;
+        for (fraction, text, expected) in [
+            // 1.8 is half way between 1 and 2: to the even 2.
+            (0x8_0000_0000_0000, "%.0a", "0x2p+0"),
+            // 1.4 is below half way, 1.c above.
+            (0x4_0000_0000_0000, "%.0a", "0x1p+0"),
+            (0xC_0000_0000_0000, "%.0a", "0x2p+0"),
+            // 1.08 is half way between 1.0 and 1.1: to the even 1.0; 1.18 is
+            // half way between 1.1 and 1.2: to the even 1.2.
+            (0x0_8000_0000_0000, "%.1a", "0x1.0p+0"),
+            (0x1_8000_0000_0000, "%.1a", "0x1.2p+0"),
+            // One unit past half way rounds up, however far down it is.
+            (0x0_8000_0000_0001, "%.1a", "0x1.1p+0"),
+            (0x1_7FFF_FFFF_FFFF, "%.1a", "0x1.1p+0"),
+            // A carry runs through the digits into the leading one.
+            (0xF_FFFF_FFFF_FFFF, "%.3a", "0x2.000p+0"),
+            (0xF_FFFF_FFFF_FFFF, "%.12a", "0x2.000000000000p+0"),
+            (0xB_FF2E_E48E_0530, "%.7a", "0x1.bff2ee5p+0"),
+            (0x8_0000_0000_0000, "%#.0a", "0x2.p+0"),
+            (0x8_0000_0000_0000, "%.2A", "0X1.80P+0"),
+        ] {
+            assert_eq!(ok(text, &[bits(fraction)], &[]), expected, "{fraction:x}");
+        }
+        // The 0 flag's zeros follow the sign and the 0x.
+        assert_eq!(ok("[%+012.1a]", &[double(1.0)], &[]), "[+0x0001.0p+0]");
+
+        // A double is one 8-byte slot. l and L both name a long double,
+        // which is a double.
+        assert_eq!(
+            ok(
+                "%f %lf %Lf %d",
+                &[double(0.5), double(0.25), double(0.125), 7],
+                &[]
+            ),
+            "0.500000 0.250000 0.125000 7"
+        );
+        for kind in ["e", "E", "f", "F", "g", "G", "a", "A"] {
+            for value in [0.0, 1.0, -2.5, 1e100, f64::INFINITY] {
+                let plain = ok(&format!("%12.3{kind}"), &[double(value)], &[]);
+                assert_eq!(ok(&format!("%12.3L{kind}"), &[double(value)], &[]), plain);
+                assert_eq!(ok(&format!("%12.3l{kind}"), &[double(value)], &[]), plain);
+            }
+        }
+        // The page's own examples of the tie rule: 1.5 and 2.5 both print 2.
+        assert_eq!(
+            ok(
+                "%1.0f %1.0f %.1f",
+                &[double(1.5), double(2.5), double(2.35)],
+                &[]
+            ),
+            "2 2 2.4"
+        );
+    }
+
+    /// The two option bits that concern floating point.
+    #[test]
+    fn the_callers_options_choose_exponent_digits_and_rounding() {
+        let with = |text: &str, slots: &[u64], floats: Floats| {
+            let mut call = Call {
+                slots: slots.to_vec(),
+                strings: Vec::new(),
+                next: 0,
+            };
+            format(text.as_bytes(), &mut call, floats)
+                .map(|bytes| String::from_utf8(bytes).unwrap())
+        };
+        let three = Floats {
+            three_digit_exponents: true,
+            standard_rounding: true,
+        };
+        // At least three exponent digits in the e style, and in the g style
+        // when it takes that form. The a style is not an e style, and the f
+        // style has no exponent.
+        for (text, value, two_digits, three_digits) in [
+            ("%e", 1.0, "1.000000e+00", "1.000000e+000"),
+            ("%.2E", -12345.0, "-1.23E+04", "-1.23E+004"),
+            ("%e", 1e100, "1.000000e+100", "1.000000e+100"),
+            ("%g", 1e-5, "1e-05", "1e-005"),
+            ("%G", 1e20, "1E+20", "1E+020"),
+            ("%g", 100.0, "100", "100"),
+            ("%.1a", 1.0, "0x1.0p+0", "0x1.0p+0"),
+            ("%.1f", 2.5, "2.5", "2.5"),
+        ] {
+            assert_eq!(with(text, &[double(value)], STANDARD).unwrap(), two_digits);
+            assert_eq!(with(text, &[double(value)], three).unwrap(), three_digits);
+        }
+        // Without the standard rounding bit no floating-point conversion is
+        // printed, whatever its value; everything else still is.
+        let legacy = Floats {
+            three_digit_exponents: false,
+            standard_rounding: false,
+        };
+        for kind in ["e", "E", "f", "F", "g", "G", "a", "A"] {
+            for value in [0.0, 2.5, f64::INFINITY] {
+                assert_eq!(
+                    with(&format!("%{kind}"), &[double(value)], legacy),
+                    Err(FormatError::Unsupported),
+                    "{kind}"
+                );
+            }
+        }
+        assert_eq!(with("%d|%x", &[7, 255], legacy), Ok("7|ff".to_owned()));
+    }
+
     #[test]
     fn valid_conversions_that_are_not_modelled_are_refused() {
+        // An integer size on a floating-point type has no meaning.
         for kind in ["e", "E", "f", "F", "g", "G", "a", "A"] {
-            for prefix in ["", ".3", "l", "L", "10.2", "#"] {
+            for prefix in ["h", "hh", "ll", "j", "z", "t", "I64", "I32", "w"] {
                 let text = format!("%{prefix}{kind}");
-                let mut call = Call {
-                    slots: vec![0x3FF0_0000_0000_0000],
-                    strings: Vec::new(),
-                    next: 0,
-                };
                 assert_eq!(
-                    format(text.as_bytes(), &mut call),
-                    Err(FormatError::Unsupported),
+                    run(&text, &[0x3FF0_0000_0000_0000], &[]),
+                    Err(FormatError::Invalid),
                     "{text}"
                 );
             }
@@ -657,7 +1069,7 @@ mod tests {
                 next: 0,
             };
             assert_eq!(
-                format(text.as_bytes(), &mut call),
+                format(text.as_bytes(), &mut call, STANDARD),
                 Err(FormatError::Unsupported),
                 "{text}"
             );
@@ -665,7 +1077,7 @@ mod tests {
         // Nothing is produced before a later refusal either: the caller gets
         // an error, not a prefix.
         assert_eq!(
-            run("ok %d then %f", &[1, 2], &[]),
+            run("ok %d then %f and %ls", &[1, 2, 3], &[]),
             Err(FormatError::Unsupported)
         );
     }
@@ -734,7 +1146,7 @@ mod tests {
             next: 0,
         };
         assert_eq!(
-            format(b"%s", &mut call),
+            format(b"%s", &mut call, STANDARD),
             Err(FormatError::Fault(MemoryError::UnmappedAddress(
                 STRINGS + 0x900
             )))

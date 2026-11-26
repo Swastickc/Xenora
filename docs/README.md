@@ -23,8 +23,11 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 
 - [Instruction coverage](shaders/instruction-coverage.md) — Desktop gfx1030 instruction forms, operand limits, and CPU and GPU results.
 - [Semantic coverage](shaders/semantic-coverage.md) — Generated per-family counts of identified, declared, decoded, lowered and verified gfx1030 forms.
+- [gfx1030 semantic campaign](coordination/rdna2-campaign.md) — P0 family backlog, ownership, and verification checkpoints.
 - [SOP2 scalar ALU](shaders/scalar-alu.md) — Supported scalar add, subtract and bitwise forms, their SCC rules and sources.
 - [Semantic registry](shaders/semantic-registry.md) — How to add an instruction form: registry fields, validation, generation and the independence rule.
+- [Scalar buffer loads](shaders/scalar-memory.md) — SMEM loads, their bounds and wait rules, and where a loaded SGPR may be used.
+- [Run-time uniform branches](shaders/runtime-branches.md) — `s_cbranch_scc0` on a loaded value, if/else regions and their limits.
 - [VOP1 vector unary and swap](shaders/vector-unary.md) — Wave32 integer bit operations, register exchange, and operand limits.
 - [VOP2 select and carry](shaders/vector-vcc.md) — Wave32 lane selection, carry and borrow through the vector condition code.
 - [VOPC integer compares](shaders/vector-compare.md) — Wave32 compare forms, the VCC/EXEC contract, runtime `s_cbranch_vccz` and the Metal mapping.
@@ -49,6 +52,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Test inventory comparison](testing/test-inventory.md) — Detect missing or newly ignored Cargo tests across commits.
 - [Persistent resource and translated rendering acceptance](testing/x9-acceptance.md) — Pinned upstream tests, native ARM64 results and unsupported cases.
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
+- [Structured startup reports](testing/startup-reports.md) — Interpret the CLI worker’s live startup stages and termination details.
 - [Gate A: a compiled C program](testing/gate-a.md) — The two milestones, what the A1 and A2 tests check and what they do not show.
 - [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
 
@@ -57,6 +61,8 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Public sources](research/sources.md), [RDNA 2 notes](research/rdna2.md), and [Xbox GPU evidence](research/xbox-gpu.md) — Specifications, evidence scope, and unknown console behavior.
 - [Shader inputs](research/shader-containers.md) and [risk register](risk-register.md) — Input provenance and unresolved engineering risks.
 - [Texture format inventory](research/texture-formats.md) — Formats and layouts by stage (decode, layout, native upload, sampling, guest), their public specifications, unknowns and ranked follow-ups.
+- [Xbox Series X|S executable startup](research/xbox-launch.md) — Experimental manifest preflight, PE32+ startup audit, and console research blockers.
+- [Exception and unwind requirements](research/exception-handling.md) — The Windows x64 exception and unwind ABI mapped to missing guest runtime pieces, measured probe results, unknowns, a fixture plan and ranked follow-ups.
 - [Synthetic integration and upstream evidence](research/synthetic-integration.md) — Audited source snapshots and remaining commercial startup prerequisites.
 
 ## Security, licensing, and contributions

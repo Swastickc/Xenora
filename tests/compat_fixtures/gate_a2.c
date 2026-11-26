@@ -21,6 +21,11 @@
  *   GATE_BREAK  expects a wrong total, so check 22 fails
  *   GATE_EXIT   calls exit(42) half way, without returning from main
  *   GATE_ABORT  calls abort() half way
+ *
+ * One more variant is not a control of the gate. `xenora run` uses it to test
+ * its wall deadline (issue #448):
+ *   GATE_SPIN   prints its arguments, counts to the first one and ends;
+ *               with 0 it never ends
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +78,18 @@ int main(int argc, char **argv) {
     /* Arguments: a program name, a seed and a label. */
     printf("gate a2: %d arguments\n", argc);
     for (int i = 0; i < argc; i++) printf("  argv[%d] = \"%s\"\n", i, argv[i]);
+#ifdef GATE_SPIN
+    /* Count to the first argument, then end. With 0 the count is never
+       reached, and the program runs until something outside stops it. */
+    unsigned long long limit = argc > 1 ? strtoull(argv[1], NULL, 10) : 0;
+    fprintf(stderr, "gate a2: counting to %llu\n", limit);
+    volatile unsigned long long turns = 0;
+    do {
+        turns = turns + 1;
+    } while (turns != limit);
+    printf("gate a2: %llu turns\n", turns);
+    return 0;
+#endif
     CHECK(11, argc == 3);
     CHECK(12, argv[argc] == NULL);
     char *end = NULL;

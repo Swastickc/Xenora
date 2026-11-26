@@ -18,7 +18,12 @@ result undefined; `crt_format.rs` tests these by hand from Microsoft's page:
   - `%p`, and a null pointer for `%s`
   - `#` with `d`, `i`, `u`, `c` or `s`, `0` with `c` or `s`, and a precision
     with `c`, which ISO C leaves undefined
-  - floating point, wide characters and `%n`, which the engine refuses
+  - wide characters and `%n`, which the engine refuses
+  - for floating point: infinities and NaNs (Windows writes them differently),
+    `%a` with fewer than 13 digits (Windows uses 13 where the host uses as
+    few as it can, and the host does not round the dropped digits correctly:
+    it looks at two of them), `%a` of a subnormal number (the host normalizes
+    it), and `L`
 
 Each line of vectors.txt is three tab-separated fields:
 
@@ -26,7 +31,8 @@ Each line of vectors.txt is three tab-separated fields:
   arguments comma-separated, in order; `i:<16 hex digits>` is an 8-byte
             argument slot as the Win64 calling convention passes it (for an
             int the upper half is junk that must be ignored); `s:<hex>` is a
-            string argument's bytes
+            string argument's bytes; `f:<16 hex digits>` is the slot of a
+            `double`, its IEEE 754 bits
   output    what snprintf wrote, in hexadecimal
 
 Standard library only (Python 3.9+). Needs `clang` on PATH.
@@ -164,6 +170,67 @@ def spec(random, kinds):
     return text + kind, arguments
 
 
+FLOATS = [0.0, -0.0, 1.0, -1.0, 0.5, 1.5, 2.5, 3.5, 0.125, 0.375, 0.1, 0.2, 0.3, 123.456, -123.456,
+          1e-5, 1e-4, 9.9995e-5, 0.00012345, 9.9995, 9.99995, 99999.95, 999999.5, 1e5, 1e6, 1e7,
+          123456789.0, 1e15, 1e16, 1e17, 1e21, 1e22, 1e100, 1e-100, 0.1 + 0.2, 1 / 3, 2 / 3,
+          2.0**-1074, 2.0**-1022, 2.2250738585072014e-308, 1.7976931348623157e308, 4.35, 8.345,
+          0.05, 0.15, 0.25, 0.35, 0.45, 1e23, 5e-324, 2.5e-5, 7.0, 10.0, 100.0, 1000.0, 0.999999,
+          0.9999995, 99.5, 999.5, 0.0001, 0.00001]
+
+
+def float_bits(random):
+    """The bits of a finite double: a chosen value or a random one."""
+    import struct
+    kind = random.below(4)
+    if kind < 2:
+        number = random.pick(FLOATS)
+        if kind == 1:
+            number = -number
+        return struct.unpack("<Q", struct.pack("<d", number))[0]
+    while True:
+        bits = random.next()
+        if kind == 3:
+            # Keep the exponent near 1 so that the f style stays short.
+            bits = (bits & ~(0x7FF << 52)) | ((1023 - 40 + random.below(80)) << 52)
+        if (bits >> 52) & 0x7FF != 0x7FF:
+            return bits
+
+
+def float_spec(random):
+    """One floating-point specification: (text, [(C argument, slot text)])."""
+    kind = random.pick("fFeEgGaA")
+    arguments = []
+    flags = "".join(flag for flag in "-+ #0" if random.below(3) == 0)
+    if flags and random.below(2):
+        flags = flags[::-1]
+    text = "%" + flags
+    choice = random.below(6)
+    if choice in (1, 2):
+        text += str(random.pick([1, 2, 3, 5, 8, 12, 20, 33]))
+    elif choice == 3:
+        text += "*"
+        arguments.append(int_argument(random, random.pick([0, 1, 4, 9, 17, -1, -6, -15])))
+    bits = float_bits(random)
+    if kind in "aA":
+        # The host is a reference only where nothing is rounded and off the
+        # subnormal numbers.
+        text += "." + str(random.pick([13, 14, 20, 25]))
+        if (bits >> 52) & 0x7FF == 0 and bits & ((1 << 52) - 1):
+            bits |= 1 << 62
+    else:
+        choice = random.below(7)
+        if choice == 1:
+            text += "."
+        elif choice in (2, 3):
+            text += "." + str(random.pick([0, 1, 2, 4, 7, 11, 17, 25]))
+        elif choice == 4:
+            text += ".*"
+            arguments.append(int_argument(random, random.pick([0, 1, 3, 6, 14, -1, -5])))
+    text += random.pick(["", "", "l"])
+    arguments.append((f"d(0x{bits:016x}ULL)", f"f:{bits:016x}"))
+    return text + kind, arguments
+
+
 def cases():
     random = Random(0x9E3779B97F4A7C15)
     out = []
@@ -182,13 +249,26 @@ def cases():
             text += piece + random.pick(literals)
             arguments += more
         out.append((text.encode(), arguments))
+    # Floating point has its own generator, after the others, so that adding
+    # it left every earlier case as it was.
+    random = Random(0xD1B54A32D192ED03)
+    for index in range(2400):
+        count = 1 if index < 2000 else 1 + random.below(3)
+        text, arguments = random.pick(literals), []
+        for _ in range(count):
+            piece, more = float_spec(random) if index < 2000 or random.below(2) else spec(
+                random, "diuoxXcs")
+            text += piece + random.pick(literals)
+            arguments += more
+        out.append((text.encode(), arguments))
     return out
 
 
 def reference(all_cases):
     lines = ["#include <stdio.h>", "#include <stdint.h>", "#include <stddef.h>",
-             "#include <sys/types.h>",
+             "#include <string.h>", "#include <sys/types.h>",
              "static char b[8192];",
+             "static double d(uint64_t bits) { double v; memcpy(&v, &bits, 8); return v; }",
              "static void emit(int n) {",
              "    if (n < 0 || n >= (int)sizeof b) { puts(\"!\"); return; }",
              "    for (int i = 0; i < n; i++) printf(\"%02x\", (unsigned char)b[i]);",

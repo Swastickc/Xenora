@@ -133,6 +133,13 @@ pub type ServiceHandler = Box<
     dyn Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason> + Send + Sync,
 >;
 
+/// Provider of the guest address of a data import's variable cell. The CRT
+/// variables live behind the same state the modern accessors use, so the
+/// provider allocates or finds the cell through it; the address is stable
+/// once handed out, and the cell's content can still change as the CRT
+/// startup runs.
+pub type DataProvider = Box<dyn Fn(&mut GuestMemory) -> Result<u64, MemoryError> + Send + Sync>;
+
 /// Scope of a registered handler's implementation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServiceStatus {
@@ -195,7 +202,7 @@ fn trampoline_address(index: usize) -> u64 {
     IMPORT_TRAMPOLINE_BASE_VA + index as u64 * IMPORT_TRAMPOLINE_STRIDE
 }
 
-const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
+pub(crate) const CALLBACK_RETURN: u64 = IMPORT_TRAMPOLINE_BASE_VA - IMPORT_TRAMPOLINE_STRIDE;
 /// Return address placed under a process entry point. Reaching it ends the
 /// process with EAX as its exit status.
 pub const ENTRY_RETURN: u64 = CALLBACK_RETURN - IMPORT_TRAMPOLINE_STRIDE;
@@ -288,6 +295,12 @@ pub struct ImportRegistry {
     handlers: Vec<ServiceDescriptor>,
     callback_dispatchers: HashMap<usize, CallbackDispatch>,
     callback_tasks: HashMap<usize, TaskStart>,
+    /// Services that set the whole CPU state themselves, such as exception
+    /// dispatch entering a guest handler or installing an unwind target.
+    context_services: std::collections::HashSet<usize>,
+    /// Services that are data objects, not functions: binding writes the
+    /// variable cell's address into the IAT slot instead of a trampoline.
+    data_providers: HashMap<usize, DataProvider>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
 }
@@ -306,6 +319,8 @@ impl ImportRegistry {
             handlers: Vec::new(),
             callback_dispatchers: HashMap::new(),
             callback_tasks: HashMap::new(),
+            context_services: Default::default(),
+            data_providers: HashMap::new(),
             trampoline_to_service: HashMap::new(),
             dynamic_trampolines: DynamicTrampolines::default(),
         }
@@ -330,6 +345,22 @@ impl ImportRegistry {
 
     pub(crate) fn service_index(&self, module: &str, symbol: &str) -> Option<usize> {
         self.index(module, &ImportName::Name(symbol.to_owned()))
+    }
+
+    /// Named aliases that `module` holds for services of other modules.
+    pub(crate) fn aliased_exports(
+        &self,
+        module: &str,
+    ) -> impl Iterator<Item = (&ImportName, usize)> {
+        self.services
+            .iter()
+            .filter_map(move |((key, name), &index)| {
+                let descriptor = &self.handlers[index];
+                (key == module
+                    && descriptor.module != *key
+                    && descriptor.status != ServiceStatus::Stub)
+                    .then_some((name, index))
+            })
     }
 
     pub(crate) fn canonical_exports(
@@ -538,6 +569,28 @@ impl ImportRegistry {
         }
     }
 
+    /// Register a data import: a symbol the exporting module documents as a
+    /// variable, not a function. The IAT slot of a bound image then holds the
+    /// variable cell's guest address, as it does on Windows. The registered
+    /// handler exists only so inspection and reports resolve the symbol like
+    /// any other; nothing ever calls it, because the slot is not a trampoline,
+    /// and it stops the guest as a runtime-limit fault if somehow reached.
+    pub(crate) fn register_data(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        provider: impl Fn(&mut GuestMemory) -> Result<u64, MemoryError> + Send + Sync + 'static,
+    ) {
+        self.register_with_status(module, symbol, status, |_, _, _| {
+            Err(ExitReason::IllegalInstruction(0xff))
+        });
+        let index = self
+            .service_index(module, symbol)
+            .expect("registered data service");
+        self.data_providers.insert(index, Box::new(provider));
+    }
+
     /// Bind the PE's Import Address Table (IAT) in guest memory to synthetic trampoline VAs.
     pub fn bind_imports(
         &mut self,
@@ -572,6 +625,11 @@ impl ImportRegistry {
             slots.push((address, index));
         }
         for &(address, index) in &slots {
+            if let Some(provider) = self.data_providers.get(&index) {
+                let cell = provider(memory)?;
+                memory.write_u64_bypass(address, cell)?;
+                continue;
+            }
             let trampoline = IMPORT_TRAMPOLINE_BASE_VA + (index as u64) * IMPORT_TRAMPOLINE_STRIDE;
             memory.write_u64_bypass(address, trampoline)?;
             self.trampoline_to_service.insert(trampoline, index);
@@ -619,6 +677,24 @@ impl ImportRegistry {
         self.callback_tasks.insert(index, Box::new(start));
     }
 
+    /// Register a service that leaves the CPU in the state it chooses: the
+    /// dispatcher neither returns to the caller nor checks preserved registers.
+    pub(crate) fn register_context_service(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        handler: fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<(), ExitReason>,
+    ) {
+        self.register_with_status(module, symbol, status, move |args, cpu, memory| {
+            handler(args, cpu, memory).map(|()| 0)
+        });
+        let index = self
+            .service_index(module, symbol)
+            .expect("registered context service");
+        self.context_services.insert(index);
+    }
+
     /// Enter a guest callback from the task frame whose return slot is `slot`.
     fn enter_task_callback(
         cpu: &mut CpuState,
@@ -656,6 +732,8 @@ impl ImportRegistry {
     pub fn is_service_trampoline(&self, rip: u64) -> bool {
         rip == CALLBACK_RETURN
             || rip == ENTRY_RETURN
+            || rip == crate::exceptions::EXCEPTION_RETURN
+            || rip == crate::exceptions::SCOPE_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -682,6 +760,12 @@ impl ImportRegistry {
             return Err((self.handlers[index].handler)(&args, cpu, memory)
                 .err()
                 .unwrap_or(exit));
+        }
+        if rip == crate::exceptions::EXCEPTION_RETURN {
+            return crate::exceptions::resume(cpu, memory);
+        }
+        if rip == crate::exceptions::SCOPE_RETURN {
+            return crate::exceptions::scope_resume(cpu, memory);
         }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));
@@ -711,7 +795,7 @@ impl ImportRegistry {
                     cpu.set(Register::Rax, value);
                     cpu.set(Register::Rsp, frame.after);
                     cpu.rip = frame.resume;
-                    Ok(())
+                    self.end_call()
                 }
             };
         }
@@ -732,6 +816,9 @@ impl ImportRegistry {
             .ok_or(ExitReason::MemoryFault(MemoryError::Overflow))?;
 
         let args = Win64Args::new(cpu);
+        if self.context_services.contains(&service_idx) {
+            return (descriptor.handler)(&args, cpu, memory).map(|_| ());
+        }
         let preserved = Nonvolatile::of(cpu);
         if let Some(start) = self.callback_tasks.get(&service_idx) {
             let slot = after
@@ -745,6 +832,7 @@ impl ImportRegistry {
                     cpu.set(Register::Rax, value);
                     cpu.set(Register::Rsp, after);
                     cpu.rip = ret_addr;
+                    return self.end_call();
                 }
                 CallbackStart::Call { task, entry, args } => {
                     let mut preserved = preserved;
@@ -803,6 +891,11 @@ impl ImportRegistry {
         cpu.set(Register::Rax, value);
         cpu.set(Register::Rsp, after);
         cpu.rip = ret_addr;
+        self.end_call()
+    }
+
+    /// Stop a guest thread whose completed call asked the scheduler for a turn.
+    fn end_call(&self) -> Result<(), ExitReason> {
         if self.hooks.as_ref().is_some_and(|h| h.switch_requested()) {
             return Err(ExitReason::GuestYield);
         }

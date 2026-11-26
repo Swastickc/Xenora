@@ -8,11 +8,13 @@
 pub mod arm64;
 pub mod cpu;
 pub mod dbt;
+pub(crate) mod exceptions;
 pub mod graphics;
 pub mod import_table;
 pub mod imports;
 pub mod jit;
 pub mod memory;
+pub mod output_path;
 pub mod pe;
 pub mod probe;
 pub mod reloc;
@@ -26,10 +28,12 @@ pub mod startup;
 pub mod tasks;
 pub mod tls;
 pub mod triage;
+pub mod x86_avx;
 pub mod x86_decode;
 pub mod x86_exec;
 pub mod x86_float;
 pub mod x86_simd;
+pub mod x86_strings;
 #[rustfmt::skip]
 pub mod x86_table;
 

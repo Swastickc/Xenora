@@ -217,6 +217,12 @@ impl DbtEngine {
             let block_fn_ptr = match block {
                 Ok(ptr) => ptr,
                 Err(reason) => {
+                    // A fetch or decode fault of a guest instruction may be
+                    // caught by the guest's own exception handlers.
+                    if crate::exceptions::dispatch_fault(reason, true, cpu, memory).is_ok() {
+                        instructions_count += 1;
+                        continue;
+                    }
                     return ExecutionResult {
                         instructions_executed: instructions_count,
                         final_state: cpu.clone(),
@@ -246,6 +252,12 @@ impl DbtEngine {
             self.metrics.interpreter_fallbacks += ctx.helper_instructions as usize;
 
             if let Some(exit) = ctx.exit_reason {
+                // A guest instruction's fault may be caught by the guest's
+                // own exception handlers; RIP is at that instruction.
+                let exit = match crate::exceptions::dispatch_fault(exit, false, cpu, memory) {
+                    Ok(()) => continue,
+                    Err(stop) => stop,
+                };
                 return ExecutionResult {
                     instructions_executed: instructions_count,
                     final_state: cpu.clone(),
@@ -409,6 +421,10 @@ const AF: u32 = FLAGS_OFFSET + std::mem::offset_of!(RFlags, af) as u32;
 const ALL_FLAGS: u8 = 0x3F;
 
 const NEON_EOR: u32 = 0x6e20_1c00; // EOR Vd.16B, Vn.16B, Vm.16B
+const NEON_BSL: u32 = 0x6e60_1c00; // BSL Vd.16B, Vn.16B, Vm.16B
+// SXTL and UXTL of the low lanes; the lane width in bits goes at bit 16.
+const NEON_SXTL: u32 = 0x0f00_a400;
+const NEON_UXTL: u32 = 0x2f00_a400;
 
 fn xmm_offset(index: u8) -> u32 {
     std::mem::offset_of!(CpuState, xmm) as u32 + u32::from(index) * 16
@@ -428,6 +444,12 @@ pub fn is_translatable(insn: &Insn) -> bool {
 /// calls the shared semantics and is counted in
 /// [`DbtMetrics::interpreter_fallbacks`].
 pub fn is_native(insn: &Insn) -> bool {
+    // Locked read-modify-writes stay on the shared semantics, the one place
+    // atomicity has to be provided once guest threads run concurrently.
+    // So do VEX-encoded forms, whose operation may be one that is lowered.
+    if insn.lock || insn.vex.is_some() {
+        return false;
+    }
     let wide = matches!(insn.size, 4 | 8);
     // The bit scans work on any register or memory source, and the bit test
     // needs the index in a register.
@@ -464,14 +486,20 @@ pub fn is_native(insn: &Insn) -> bool {
         | Op::Movdqa
         | Op::Movdqu
         | Op::Movntdq
+        | Op::Movntdqa
         | Op::Movntps
+        | Op::Pblendvb
+        | Op::Blendvps
+        | Op::Blendvpd
         | Op::Movd
         | Op::Movq
         | Op::Movss
         | Op::Movsd
         | Op::Movlps
         | Op::Movhps => true,
-        op if insn.encoding == Encoding::XmmRm => neon_operation(op).is_some(),
+        op if insn.encoding == Encoding::XmmRm => {
+            neon_operation(op).is_some() || neon_widening(op).is_some()
+        }
         Op::Psllw
         | Op::Pslld
         | Op::Psllq
@@ -522,6 +550,17 @@ fn neon_operation(op: Op) -> Option<(u32, bool)> {
         Op::Pavgb => (0x6e20_1400, false), // urhadd.16b
         Op::Pavgw => (0x6e60_1400, false), // urhadd.8h
         Op::Pmullw => (0x4e60_9c00, false), // mul.8h
+        Op::Pminsb => (0x4e20_6c00, false), // smin.16b
+        Op::Pminsd => (0x4ea0_6c00, false), // smin.4s
+        Op::Pminuw => (0x6e60_6c00, false), // umin.8h
+        Op::Pminud => (0x6ea0_6c00, false), // umin.4s
+        Op::Pmaxsb => (0x4e20_6400, false), // smax.16b
+        Op::Pmaxsd => (0x4ea0_6400, false), // smax.4s
+        Op::Pmaxuw => (0x6e60_6400, false), // umax.8h
+        Op::Pmaxud => (0x6ea0_6400, false), // umax.4s
+        Op::Pmulld => (0x4ea0_9c00, false), // mul.4s
+        Op::Pcmpeqq => (0x6ee0_8c00, false), // cmeq.2d
+        Op::Pcmpgtq => (0x4ee0_3400, false), // cmgt.2d
         Op::Punpcklbw => (0x4e00_3800, false), // zip1.16b
         Op::Punpcklwd => (0x4e40_3800, false), // zip1.8h
         Op::Punpckldq => (0x4e80_3800, false), // zip1.4s
@@ -530,6 +569,26 @@ fn neon_operation(op: Op) -> Option<(u32, bool)> {
         Op::Punpckhwd => (0x4e40_7800, false), // zip2.8h
         Op::Punpckhdq => (0x4e80_7800, false), // zip2.4s
         Op::Punpckhqdq => (0x4ec0_7800, false), // zip2.2d
+        _ => return None,
+    })
+}
+
+/// Whether a PMOVSX or PMOVZX extends the sign, and the lane widths to pass
+/// through, each doubling by one SXTL or UXTL.
+fn neon_widening(op: Op) -> Option<(bool, &'static [u32])> {
+    Some(match op {
+        Op::Pmovsxbw => (true, &[8]),
+        Op::Pmovsxbd => (true, &[8, 16]),
+        Op::Pmovsxbq => (true, &[8, 16, 32]),
+        Op::Pmovsxwd => (true, &[16]),
+        Op::Pmovsxwq => (true, &[16, 32]),
+        Op::Pmovsxdq => (true, &[32]),
+        Op::Pmovzxbw => (false, &[8]),
+        Op::Pmovzxbd => (false, &[8, 16]),
+        Op::Pmovzxbq => (false, &[8, 16, 32]),
+        Op::Pmovzxwd => (false, &[16]),
+        Op::Pmovzxwq => (false, &[16, 32]),
+        Op::Pmovzxdq => (false, &[32]),
         _ => return None,
     })
 }
@@ -948,6 +1007,7 @@ impl Emitter<'_> {
                 | Op::Movups
                 | Op::Movdqa
                 | Op::Movdqu
+                | Op::Movntdqa
                 | Op::Movq
                 | Op::Movss
                 | Op::Movsd
@@ -955,6 +1015,32 @@ impl Emitter<'_> {
                 | Op::Movhps,
                 _,
             ) => self.vector_load(insn, completed),
+            (Op::Pblendvb | Op::Blendvps | Op::Blendvpd, _) => {
+                let lane = match insn.op {
+                    Op::Pblendvb => 8,
+                    Op::Blendvps => 32,
+                    _ => 64,
+                };
+                self.load_vector_source(insn, completed);
+                let asm = &mut *self.asm;
+                asm.ldr_q_uoff(0, X19, xmm_offset(reg));
+                asm.ldr_q_uoff(2, X19, xmm_offset(0));
+                // The sign of each lane of XMM0 selects the source.
+                asm.sshr_vector(2, 2, lane, lane - 1);
+                asm.neon3(NEON_BSL, 2, 1, 0);
+                asm.str_q_uoff(2, X19, xmm_offset(reg));
+            }
+            (op, _) if neon_widening(op).is_some() => {
+                let Some((signed, steps)) = neon_widening(op) else {
+                    return;
+                };
+                self.load_vector_source(insn, completed);
+                let extend = if signed { NEON_SXTL } else { NEON_UXTL };
+                for lane in steps {
+                    self.asm.neon3(extend | lane << 16, 1, 1, 0);
+                }
+                self.asm.str_q_uoff(1, X19, xmm_offset(reg));
+            }
             (op, Encoding::RmImmXmm) => {
                 let Some(RmOperand::Reg(target)) = insn.rm else {
                     return;
@@ -985,17 +1071,7 @@ impl Emitter<'_> {
                 let Some((base, swapped)) = neon_operation(op) else {
                     return;
                 };
-                match insn.rm {
-                    Some(RmOperand::Mem(operand)) => {
-                        self.load_wide(insn, &operand, completed);
-                        self.asm.fmov_d_from_x(1, X0);
-                        self.asm.ins_d1_from_x(1, X1);
-                    }
-                    Some(RmOperand::Reg(source)) => {
-                        self.asm.ldr_q_uoff(1, X19, xmm_offset(source.index));
-                    }
-                    None => return,
-                }
+                self.load_vector_source(insn, completed);
                 let asm = &mut *self.asm;
                 asm.ldr_q_uoff(0, X19, xmm_offset(reg));
                 if swapped {
@@ -1005,6 +1081,25 @@ impl Emitter<'_> {
                 }
                 asm.str_q_uoff(0, X19, xmm_offset(reg));
             }
+        }
+    }
+
+    /// The XMM or memory source in V1, with zeros above a narrow memory operand.
+    fn load_vector_source(&mut self, insn: &Insn, completed: usize) {
+        match insn.rm {
+            Some(RmOperand::Mem(operand)) if insn.rm_size == 16 => {
+                self.load_wide(insn, &operand, completed);
+                self.asm.fmov_d_from_x(1, X0);
+                self.asm.ins_d1_from_x(1, X1);
+            }
+            Some(RmOperand::Mem(_)) => {
+                self.load_rm(X9, insn, completed);
+                self.asm.fmov_d_from_x(1, X9);
+            }
+            Some(RmOperand::Reg(source)) => {
+                self.asm.ldr_q_uoff(1, X19, xmm_offset(source.index));
+            }
+            None => {}
         }
     }
 

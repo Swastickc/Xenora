@@ -85,3 +85,6 @@ done
 build gate-a2-break O1 GATE_BREAK
 build gate-a2-exit O1 GATE_EXIT
 build gate-a2-abort O1 GATE_ABORT
+# Not a control of the gate: a program that runs for as long as it is told,
+# or for ever, for the limits of `xenora run`.
+build gate-a2-spin O1 GATE_SPIN

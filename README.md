@@ -15,6 +15,60 @@ Xenora is still experimental. Verified work is restricted to independently autho
 
 ---
 
+## Run the native app
+
+Use an Apple Silicon Mac running macOS 14 or later. Install a native ARM64
+Rust toolchain at version 1.100 or later and select Xcode or its Command Line
+Tools with a macOS SDK and Swift 6 or later. The developer tools themselves
+may require a newer macOS version. The app build uses the checked-in
+synthetic fixtures. AMDGPU LLVM tools such as `llvm-mc`, `llvm-objcopy` and
+`llvm-objdump` are optional here and used when regenerating or checking
+fixture binaries.
+
+```sh
+git clone https://github.com/ranveersoni98/Xenora.git
+cd Xenora
+scripts/build-app.sh --check
+scripts/build-app.sh
+open build/Xenora.app
+```
+
+In the **Guest display** section, click **Run trusted fixture**. The app
+runs an original program supplied with Xenora and shows its 4×3 Metal
+frame. A build checks the app and bundled worker without rendering. To
+check the synthetic pixels on the GPU from a terminal, run:
+
+```sh
+build/Xenora.app/Contents/MacOS/Xenora --smoke-frame
+```
+
+Closing the app and running `scripts/build-app.sh` again rebuilds the same
+bundle. Commercial Xbox game execution is unsupported.
+
+## Run a persistent synthetic application
+
+`xenora-session` loads the bundled original PE once. The ARM64 runtime
+keeps guest memory, graphics objects, and the application's file and event
+handles live as it accepts each direction. The guest submits and reads back
+each frame, appends to one journal in the synthetic filesystem, then checks
+the journal and releases its resources before exit.
+
+```sh
+cargo run --locked -p xenora --bin xenora-session -- left right left
+cargo run --locked -p xenora --bin xenora-session -- --frame-dir frames right left
+```
+
+Metal is the default. `--backend reference` selects the software renderer for
+comparison. The command prints one record per validated frame, including
+RGBA bytes and the backend, followed by the guest exit status and journal.
+`--frame-dir` creates a new directory of PPM frames after a successful session.
+Each run accepts up to 32 directions and uses one instruction budget across
+the application. `--steps` changes that budget, and the supervising process
+stops a worker that exceeds the 15-second wall deadline.
+
+The command supports the embedded synthetic application. External PE
+admission and a macOS interface for this session are future work.
+
 ## What works today?
 
 Xenora has progressed from executing individual x86-64 instructions to running original PE32+ guest programs that interact with translated GPU workloads on Apple Silicon.
@@ -44,8 +98,8 @@ The latest verified milestones include **translated gfx1030 vertex and pixel sha
 | X17 — System services | Implement a tested subset of Xbox-compatible runtime APIs, memory services, filesystem access and application lifecycle | Implemented subset |
 | X18 — Graphics API translation | Translate supported graphics commands, resource descriptors, command queues, barriers and fences into Metal operations. A guest-callable command path with devices, queues, allocators, command lists, resources, draws and framebuffer readback is implemented; barriers, fences and Xbox-specific commands are not | Implemented subset |
 | X19 — Advanced GPU features | Indirect rendering, asynchronous compute, additional texture formats and ray-tracing compatibility research | Planned |
-| X20 — Integrated guest runtime | Connect CPU recompilation, executable loading, system services and graphics translation into one persistent runtime. One guest run now drives CPU execution, system services and graphics into a checked framebuffer, but no persistent runtime and no production CLI or app path exists yet | Implemented subset |
-| X21 — Application compatibility | Execute increasingly complex independently authored applications through the complete guest CPU and GPU pipeline | Planned |
+| X20 — Integrated guest runtime | [`xenora-session`](#run-a-persistent-synthetic-application) keeps one PE, CPU recompiler, system-service state and graphics context live across multiple host requests | Implemented subset |
+| X21 — Application compatibility | An original synthetic application drives repeatable rendering, file and event services, and ordered resource cleanup through the native CPU and GPU pipeline | Implemented subset |
 | X22 — First application boot | Establish a reproducible startup and error-reporting path for supported game-like applications | Planned |
 | X23 — Initial game compatibility | Investigate startup and execution of legally supported game software, identifying missing runtime and graphics behavior | Long-term goal |
 | X24 — Gameplay and performance | Expand rendering correctness, input, audio, memory management, shader caching and execution performance | Long-term goal |
@@ -369,6 +423,6 @@ Xenora is licensed under the [GNU General Public License v3 or later](LICENSE).
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party attribution and [docs/legal.md](docs/legal.md) for the project's research and legal boundaries.
 
-Xenora is an independent open-source project and is not affiliated with Microsoft, Xbox, Rockstar Games or Apple.
+Xenora is an independent open-source project and is not affiliated with Microsoft, Xbox or Apple.
 
 ---

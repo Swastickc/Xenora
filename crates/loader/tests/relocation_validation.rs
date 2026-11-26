@@ -11,6 +11,11 @@ use xenora_loader::{GuestMemory, ParsedPe, RelocationError, apply_relocations};
 
 const PREFERRED: u64 = 0x1_4000_0000;
 const RELOC_FILE: usize = 0x400;
+const COFF_CHARACTERISTICS: usize = 0x44 + 18;
+const RELOCS_STRIPPED: u16 = 1;
+const OPTIONAL_HEADER: usize = 0x44 + 20;
+const RELOC_DIRECTORY_RVA: usize = OPTIONAL_HEADER + 152;
+const RELOC_SECTION: usize = OPTIONAL_HEADER + 240 + 40;
 
 /// .text at RVA 0x1000 (file 0x200) holding two pointers, .reloc at RVA 0x2000 (file 0x400).
 /// `NumberOfRvaAndSizes` and the relocation table bytes are parameters.
@@ -79,7 +84,7 @@ fn load(bytes: &[u8], base: u64) -> (ParsedPe, GuestMemory) {
         memory
             .map_region_with_data(
                 base + u64::from(s.virtual_address),
-                0x200,
+                raw.len(),
                 s.permissions,
                 raw,
             )
@@ -151,6 +156,71 @@ fn preferred_base_leaves_targets_unchanged() {
         memory.read_u64_bypass(PREFERRED + 0x1010).unwrap(),
         PREFERRED + 0x1100
     );
+}
+
+#[test]
+fn fixed_image_at_its_preferred_base_needs_no_relocations() {
+    let mut bytes = build(16, &[], 0);
+    bytes[COFF_CHARACTERISTICS..COFF_CHARACTERISTICS + 2]
+        .copy_from_slice(&RELOCS_STRIPPED.to_le_bytes());
+    let (result, memory) = relocate(&bytes, PREFERRED);
+    let report = result.expect("load at preferred base");
+    assert_eq!(report.delta, 0);
+    assert_eq!(report.applied_dir64, 0);
+    assert_eq!(
+        memory.read_u64_bypass(PREFERRED + 0x1010).unwrap(),
+        PREFERRED + 0x1100
+    );
+}
+
+#[test]
+fn fixed_image_rejects_a_different_base_before_writing_targets() {
+    // A relocation directory cannot override the fixed-base flag.
+    for table in [Vec::new(), standard_table()] {
+        let mut bytes = build(16, &table, table.len() as u32);
+        bytes[COFF_CHARACTERISTICS..COFF_CHARACTERISTICS + 2]
+            .copy_from_slice(&RELOCS_STRIPPED.to_le_bytes());
+        for base in [PREFERRED + 0x10_000, PREFERRED - 0x10_000] {
+            let (result, memory) = relocate(&bytes, base);
+            assert_eq!(
+                result.unwrap_err(),
+                RelocationError::FixedImageBase {
+                    preferred_base: PREFERRED,
+                    loaded_base: base,
+                }
+            );
+            assert_eq!(
+                memory.read_u64_bypass(base + 0x1010).unwrap(),
+                PREFERRED + 0x1100
+            );
+            assert_eq!(
+                memory.read_u64_bypass(base + 0x1018).unwrap(),
+                PREFERRED + 0x2000
+            );
+        }
+    }
+}
+
+#[test]
+fn delay_import_fixture_rebases_all_three_initial_iat_pointers() {
+    let bytes = include_bytes!("../../../fixtures/pe/delay-imports.exe");
+    let base = PREFERRED + 0x80_000;
+    let (result, memory) = relocate(bytes, base);
+    let report = result.expect("rebase delay-import fixture");
+    assert_eq!(report.delta, 0x80_000);
+    assert_eq!(report.applied_dir64, 3);
+    assert_eq!(report.skipped_absolute, 1);
+    assert_eq!(report.total_entries, 4);
+    for (slot_rva, stub_rva) in [(0x3000, 0x1010), (0x3008, 0x1018), (0x3020, 0x1020)] {
+        assert_eq!(
+            memory.read_u64_bypass(base + slot_rva).unwrap(),
+            base + stub_rva,
+            "delay IAT slot RVA {slot_rva:#x}"
+        );
+    }
+    for terminator_rva in [0x3010, 0x3028] {
+        assert_eq!(memory.read_u64_bypass(base + terminator_rva).unwrap(), 0);
+    }
 }
 
 #[test]
@@ -235,6 +305,112 @@ fn directory_past_end_of_file_is_rejected() {
             size: 0x300
         }
     );
+}
+
+#[test]
+fn directory_entering_unbacked_virtual_space_is_rejected_before_fixups() {
+    const DIRECTORY_RVA: u32 = 0x21f4;
+    let mut table = block(0x1000, &[0xA010, 0x0000]);
+    table.extend(block(0x1000, &[0xA018, 0x0000]));
+    let size = table.len() as u32;
+    let base = PREFERRED + 0x1000;
+
+    for virtual_size in [0x200u32, 0x1000] {
+        let mut bytes = build(16, &[], size);
+        bytes[RELOC_DIRECTORY_RVA..RELOC_DIRECTORY_RVA + 4]
+            .copy_from_slice(&DIRECTORY_RVA.to_le_bytes());
+        bytes[RELOC_SECTION + 8..RELOC_SECTION + 12].copy_from_slice(&virtual_size.to_le_bytes());
+        // The first block fits. The next block's bytes exist physically, but
+        // its RVA lies in a gap (0x200) or the zero-filled tail (0x1000).
+        bytes[0x5f4..].copy_from_slice(&table[..12]);
+        bytes.extend_from_slice(&table[12..]);
+
+        let (result, memory) = relocate(&bytes, base);
+        assert_eq!(
+            result.unwrap_err(),
+            RelocationError::DirectoryOutOfBounds {
+                rva: DIRECTORY_RVA,
+                size,
+            },
+            "virtual size {virtual_size:#x}"
+        );
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1010).unwrap(),
+            PREFERRED + 0x1100
+        );
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1018).unwrap(),
+            PREFERRED + 0x2000
+        );
+    }
+}
+
+#[test]
+fn split_block_uses_each_sections_raw_offset() {
+    const CONTINUATION_RVA: u32 = 0x3000;
+    const CONTINUATION_FILE: usize = 0x1800;
+    let table = block(0x1000, &[0xA010, 0x0000, 0xA018, 0x0000]);
+    let mut bytes = build(16, &[], table.len() as u32);
+    bytes.resize(CONTINUATION_FILE + 0x200, 0);
+    bytes[0x46..0x48].copy_from_slice(&3u16.to_le_bytes());
+    bytes[OPTIONAL_HEADER + 56..OPTIONAL_HEADER + 60].copy_from_slice(&0x4000u32.to_le_bytes());
+    bytes[RELOC_SECTION + 16..RELOC_SECTION + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+
+    let continuation = RELOC_SECTION + 40;
+    bytes[continuation..continuation + 6].copy_from_slice(b".cont\0");
+    for (offset, value) in [
+        (8, 0x200u32),
+        (12, CONTINUATION_RVA),
+        (16, 0x200),
+        (20, CONTINUATION_FILE as u32),
+        (36, 0x4200_0040),
+    ] {
+        bytes[continuation + offset..continuation + offset + 4]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+
+    // Split either the header or the entries across two virtual sections
+    // whose bytes are separated by a gap in the file.
+    for split_at in [4usize, 12] {
+        let mut bytes = bytes.clone();
+        let rva = CONTINUATION_RVA - split_at as u32;
+        bytes[RELOC_DIRECTORY_RVA..RELOC_DIRECTORY_RVA + 4].copy_from_slice(&rva.to_le_bytes());
+        let (prefix, suffix) = table.split_at(split_at);
+        let section_end = RELOC_FILE + 0x1000;
+        bytes[section_end - prefix.len()..section_end].copy_from_slice(prefix);
+        let next_block_offset = CONTINUATION_FILE + suffix.len();
+        bytes[CONTINUATION_FILE..next_block_offset].copy_from_slice(suffix);
+
+        let base = PREFERRED + 0x1000;
+        let (result, memory) = relocate(&bytes, base);
+        let report = result.expect("relocate split directory");
+        assert_eq!(report.total_entries, 4);
+        assert_eq!(report.applied_dir64, 2);
+        assert_eq!(report.skipped_absolute, 2);
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1010).unwrap(),
+            base + 0x1100
+        );
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1018).unwrap(),
+            base + 0x2000
+        );
+
+        // Include the next, empty block header. The earlier fixups stay applied.
+        bytes[RELOC_DIRECTORY_RVA + 4..RELOC_DIRECTORY_RVA + 8]
+            .copy_from_slice(&(table.len() as u32 + 8).to_le_bytes());
+        let (result, memory) = relocate(&bytes, base);
+        assert_eq!(
+            result.unwrap_err(),
+            RelocationError::MalformedBlockHeader {
+                offset: next_block_offset,
+            }
+        );
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1018).unwrap(),
+            base + 0x2000
+        );
+    }
 }
 
 #[test]

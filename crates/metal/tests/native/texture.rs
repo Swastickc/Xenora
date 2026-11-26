@@ -294,3 +294,231 @@ fn staged_upload_rejects_bad_input_before_touching_the_gpu() {
     let refused = texture.upload_mip(&mips[0]).unwrap_err();
     assert!(refused.to_string().contains("Private-storage"), "{refused}");
 }
+
+#[test]
+fn selected_staged_mips_coalesce_and_preserve_their_neighbours() {
+    let gpu = context();
+    let desc = Rgba8TextureDesc::new(37, 19, 6).unwrap();
+    let initial = padded_levels(desc, 0);
+    let base = mip_views(&initial, 0);
+    // Independently specified dimensions for a non-adjacent set ending in 1×1.
+    let storage: Vec<_> = [(5, 1, 1), (1, 18, 9), (3, 4, 2)]
+        .into_iter()
+        .map(|(level, w, h)| (level, w, h, padded_pattern(level + 7, w, h, 12)))
+        .collect();
+    let updates: Vec<_> = storage
+        .iter()
+        .map(|(level, w, h, bytes)| Rgba8MipLevel {
+            level: *level,
+            width: *w,
+            height: *h,
+            row_pitch: *w * 4 + 12,
+            bytes,
+        })
+        .collect();
+    let whole_budget = StagingBudget::new(4096).unwrap();
+    for (budget, submissions, peak) in [(684, 1, 684), (76, 10, 72)] {
+        let (mut texture, _) =
+            MetalRgba8Texture::upload_staged(gpu.device(), gpu.queue(), desc, &base, whole_budget)
+                .unwrap();
+        let identity = std::ptr::from_ref(texture.raw());
+        let report = texture
+            .update_staged(gpu.queue(), &updates, StagingBudget::new(budget).unwrap())
+            .unwrap();
+        assert_eq!(std::ptr::from_ref(texture.raw()), identity);
+        assert_eq!(
+            (
+                report.submissions,
+                report.peak_staging_bytes,
+                report.bytes_copied
+            ),
+            (submissions, peak, 684)
+        );
+        for (level, (w, h)) in [(37, 19), (18, 9), (9, 4), (4, 2), (2, 1), (1, 1)]
+            .into_iter()
+            .enumerate()
+        {
+            let level = level as u32;
+            let pattern = if [1, 3, 5].contains(&level) {
+                level + 7
+            } else {
+                level
+            };
+            assert_eq!(
+                texture.read_back(gpu.device(), gpu.queue(), level).unwrap(),
+                tight_pattern(pattern, w, h),
+                "budget {budget}, level {level}"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_selected_batch_leaves_all_mips_intact() {
+    let gpu = context();
+    let desc = Rgba8TextureDesc::new(8, 4, 4).unwrap();
+    let initial = padded_levels(desc, 0);
+    let base = mip_views(&initial, 0);
+    let budget = StagingBudget::new(256).unwrap();
+    let (mut texture, _) =
+        MetalRgba8Texture::upload_staged(gpu.device(), gpu.queue(), desc, &base, budget).unwrap();
+    let a = [41; 32];
+    let b = [61; 8];
+    let valid = Rgba8MipLevel::new_packed(1, 4, 2, &a);
+    let second = Rgba8MipLevel::new_packed(2, 2, 1, &b);
+    for (other, operation) in [
+        (Rgba8MipLevel { level: 4, ..second }, "mip level bounds"),
+        (Rgba8MipLevel { width: 1, ..second }, "mip dimensions"),
+        (
+            Rgba8MipLevel {
+                row_pitch: 4,
+                ..second
+            },
+            "row pitch",
+        ),
+        (
+            Rgba8MipLevel {
+                bytes: &b[..7],
+                ..second
+            },
+            "mip buffer bounds",
+        ),
+        (valid, "staged upload"),
+    ] {
+        assert_eq!(
+            texture
+                .update_staged(gpu.queue(), &[valid, other], budget)
+                .unwrap_err()
+                .operation,
+            operation
+        );
+    }
+    assert_eq!(
+        texture
+            .update_staged(gpu.queue(), &[], budget)
+            .unwrap_err()
+            .operation,
+        "staged upload"
+    );
+    assert_eq!(
+        texture
+            .update_staged(gpu.queue(), &[valid], StagingBudget::new(12).unwrap())
+            .unwrap_err()
+            .operation,
+        "staging budget"
+    );
+    for (level, (w, h, _)) in initial.iter().enumerate() {
+        assert_eq!(
+            texture
+                .read_back(gpu.device(), gpu.queue(), level as u32)
+                .unwrap(),
+            tight_pattern(level as u32, *w, *h)
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual release-mode timing with Metal validation off"]
+fn benchmark_whole_and_coalesced_selected_mip_updates() {
+    use std::time::Instant;
+
+    const WARMUP: usize = 5;
+    const SAMPLES: usize = 31;
+    const SELECTED: [usize; 3] = [2, 4, 7];
+    const LABEL: [&str; 3] = ["whole", "separate", "coalesced"];
+    let gpu = context();
+    let desc = Rgba8TextureDesc::new(513, 257, 10).unwrap();
+    let pad = 16;
+    let initial = padded_levels(desc, pad);
+    let base = mip_views(&initial, pad);
+    let mut changed = initial.clone();
+    for index in SELECTED {
+        let (w, h, bytes) = &mut changed[index];
+        *bytes = padded_pattern(index as u32 + 7, *w, *h, pad);
+    }
+    let changed = mip_views(&changed, pad);
+    let budget = StagingBudget::new(64 * 1024).unwrap();
+    let mut textures: [MetalRgba8Texture; 3] = std::array::from_fn(|_| {
+        MetalRgba8Texture::upload_staged(gpu.device(), gpu.queue(), desc, &base, budget)
+            .unwrap()
+            .0
+    });
+    let mut timings = [const { Vec::new() }; 3];
+    let mut accounting = [(0, 0, 0); 3];
+    for sample in 0..WARMUP + SAMPLES {
+        let changed_pattern = sample % 2 == 0;
+        let all = if changed_pattern { &changed } else { &base };
+        let selected = SELECTED.map(|level| all[level]);
+        for series in 0..3 {
+            let mode = (sample + series) % 3;
+            let texture = &mut textures[mode];
+            let started = Instant::now();
+            let (submissions, peak, bytes) = if mode == 1 {
+                selected
+                    .iter()
+                    .fold((0, 0, 0), |(count, peak, copied), mip| {
+                        let report = texture
+                            .update_staged(gpu.queue(), std::slice::from_ref(mip), budget)
+                            .unwrap();
+                        (
+                            count + report.submissions,
+                            peak.max(report.peak_staging_bytes),
+                            copied + report.bytes_copied,
+                        )
+                    })
+            } else {
+                let inputs = if mode == 0 { all.as_slice() } else { &selected };
+                let report = texture.update_staged(gpu.queue(), inputs, budget).unwrap();
+                (
+                    report.submissions,
+                    report.peak_staging_bytes,
+                    report.bytes_copied,
+                )
+            };
+            let elapsed = started.elapsed();
+            if sample >= WARMUP {
+                timings[mode].push(elapsed);
+            }
+            if sample == 0 {
+                accounting[mode] = (submissions, peak, bytes);
+            }
+            assert_eq!(accounting[mode], (submissions, peak, bytes));
+            // Compare the entire final texture for each run, outside the timing.
+            for (level, (w, h, _)) in initial.iter().enumerate() {
+                let pattern = if changed_pattern && SELECTED.contains(&level) {
+                    level as u32 + 7
+                } else {
+                    level as u32
+                };
+                assert_eq!(
+                    texture
+                        .read_back(gpu.device(), gpu.queue(), level as u32)
+                        .unwrap(),
+                    tight_pattern(pattern, *w, *h),
+                    "mode {}, sample {sample}, level {level}",
+                    LABEL[mode]
+                );
+            }
+        }
+    }
+    assert_eq!(accounting[1].2, accounting[2].2);
+    assert!(accounting[0].2 > accounting[2].2);
+    assert!(accounting[1].0 > accounting[2].0);
+    println!(
+        "513×257 RGBA8, 10 mips, {} samples after {WARMUP} warmups, 65536-byte budget",
+        SAMPLES
+    );
+    for (mode, samples) in timings.iter_mut().enumerate() {
+        let (submissions, peak, bytes) = accounting[mode];
+        samples.sort_unstable();
+        let us = |i: usize| samples[i].as_secs_f64() * 1e6;
+        println!(
+            "{}: submissions={submissions} peak_staging_bytes={peak} copied_bytes={bytes} min_us={:.3} median_us={:.3} p90_us={:.3} max_us={:.3}",
+            LABEL[mode],
+            us(0),
+            us(SAMPLES / 2),
+            us((9 * SAMPLES).div_ceil(10) - 1),
+            us(SAMPLES - 1)
+        );
+    }
+}

@@ -7,6 +7,7 @@
 use crate::pe::{ParsedPe, PeError, PeSection};
 use std::fmt;
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 
 /// High-level diagnostic report from inspecting a PE32+ binary.
@@ -51,10 +52,72 @@ impl fmt::Display for TriageReport {
     }
 }
 
-/// Inspect a PE32+ binary file from disk in read-only mode.
-pub fn triage_file<P: AsRef<Path>>(path: P) -> Result<TriageReport, PeError> {
-    let bytes = fs::read(path).map_err(|_| PeError::TooSmall)?;
-    triage_bytes(&bytes)
+/// Why inspection of an executable file failed.
+#[derive(Debug)]
+pub enum TriageFileError {
+    /// The file could not be read.
+    Read(io::Error),
+    /// The bytes were read but could not be parsed as a PE32+ image.
+    Parse(PeError),
+}
+
+impl fmt::Display for TriageFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "could not read executable: {error}"),
+            Self::Parse(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for TriageFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Parse(error) => Some(error),
+        }
+    }
+}
+
+fn require_regular_file(metadata: fs::Metadata) -> io::Result<()> {
+    if metadata.is_file() {
+        Ok(())
+    } else if metadata.is_dir() {
+        Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "Is a directory",
+        ))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular file",
+        ))
+    }
+}
+
+fn read_executable(path: &Path) -> io::Result<Vec<u8>> {
+    // Follow symlinks, but avoid opening an input already known to be special.
+    require_regular_file(fs::metadata(path)?)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // A path may be replaced with a FIFO after the metadata check.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    require_regular_file(file.metadata()?)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Inspect a regular PE32+ binary file from disk in read-only mode.
+pub fn triage_file<P: AsRef<Path>>(path: P) -> Result<TriageReport, TriageFileError> {
+    let bytes = read_executable(path.as_ref()).map_err(TriageFileError::Read)?;
+    triage_bytes(&bytes).map_err(TriageFileError::Parse)
 }
 
 /// Inspect in-memory PE32+ bytes in read-only mode.

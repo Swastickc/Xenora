@@ -132,6 +132,8 @@ pub struct CpuState {
     /// Starts as FNINIT leaves it. The value an operating system gives a new
     /// thread is not modelled.
     pub x87: X87State,
+    /// Bits 255:128 of YMM0-YMM15. Legacy SSE instructions never change them.
+    pub ymm_high: [u128; 16],
 }
 
 impl CpuState {
@@ -148,6 +150,7 @@ impl CpuState {
             mxcsr: Mxcsr::default(),
             df: false,
             x87: X87State::INIT,
+            ymm_high: [0; 16],
         }
     }
 
@@ -212,12 +215,19 @@ pub enum ExitReason {
     /// The guest ended its own process with this exit status. Only the guest
     /// stops; the host keeps running.
     ProcessExit(u32),
-    /// A service has to wait; it had no effect and runs again later.
+    /// A service has to wait; the same call runs again later.
     GuestBlocked,
     /// A service completed and asked the scheduler for a turn.
     GuestYield,
     /// The running guest thread ended itself.
     GuestThreadExited,
+    /// A raised exception reached the end of the stack with no handler
+    /// accepting it. Holds the exception code.
+    UnhandledException(u32),
+    /// Exception dispatch or unwinding stopped: malformed or unknown unwind
+    /// data, an invalid handler disposition, a target frame that is not on
+    /// the stack, or a request the dispatcher does not model.
+    InvalidUnwind,
 }
 
 impl fmt::Display for ExitReason {
@@ -234,6 +244,8 @@ impl fmt::Display for ExitReason {
             Self::GeneralProtection => write!(f, "guest general-protection fault"),
             Self::SimdException => write!(f, "guest SIMD floating-point exception"),
             Self::ProcessExit(status) => write!(f, "guest process exited with status {status}"),
+            Self::UnhandledException(code) => write!(f, "unhandled guest exception 0x{code:08x}"),
+            Self::InvalidUnwind => write!(f, "guest exception dispatch or unwind failed"),
             Self::ServiceAbiViolation => {
                 write!(f, "host service changed a nonvolatile guest register")
             }

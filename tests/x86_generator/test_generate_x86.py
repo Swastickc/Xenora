@@ -1,6 +1,7 @@
 """Validation and freshness tests for crates/loader/generate_x86.py."""
 
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -65,7 +66,106 @@ class GenerateX86(unittest.TestCase):
         self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"'), "source size")
         self.rejects(self.form('op = "paddb"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "v"\nsrc = "x"'), "XMM size")
         self.rejects(self.form('op = "movq"\nmap = "0f"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "q"\nunaligned = true'), "alignment applies")
-        self.rejects(self.form('op = "nop"\nprefix = "66"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "map 0f")
+        self.rejects(self.form('op = "nop"\nprefix = "66"\nopcode = 0xD7\nenc = "none"\nsize = "n"'), "no opcode table for prefix '66' in map 1")
+
+    def test_three_byte_maps_need_a_prefix_with_a_table(self):
+        form = 'op = "pshufb"\nmap = "{}"\n{}opcode = 0xF0\nenc = "xmm_rm"\nsize = "x"\nsrc = "x"'
+        for opcode_map in ("0f38", "0f3a"):
+            for prefix in ("", 'prefix = "f3"\n', *(['prefix = "f2"\n'] if opcode_map == "0f3a" else [])):
+                self.rejects(self.form(form.format(opcode_map, prefix)), f"in map {opcode_map}")
+            generate_x86.load(self.form(form.format(opcode_map, 'prefix = "66"\n')))
+        generate_x86.load(self.form('op = "crc32"\nmap = "0f38"\nprefix = "f2"\nopcode = 0xF5\nenc = "reg_rm"\nsize = "v"'))
+        self.rejects(self.form(form.format("0f39", "")), "unknown map")
+        # A form lands in its own map's table and no other.
+        operations, forms = generate_x86.load(self.form(form.format("0f3a", 'prefix = "66"\n')))
+        index = next(i for i, f in enumerate(forms) if f["map"] == "0f3a" and f["opcode"] == 0xF0)
+        tables = generate_x86.generate(operations, forms).split("pub static ")
+        holding = [t.split(":")[0] for t in tables if f"Entry::Form({index})" in t]
+        self.assertEqual(holding, ["THREE_BYTE_3A_66"])
+
+    def test_a_lane_is_fixed_by_source_or_wide_by_size(self):
+        form = 'op = "pinsrb"\nmap = "0f3a"\nprefix = "66"\nopcode = 0xF0\nenc = "{}"\nimm = "ub"\n{}'
+        for encoding in ("xmm_gpr_imm", "gpr_xmm_imm"):
+            for shape in ('size = "x"', 'size = "x"\nsrc = "q"', 'size = "x"\nsrc = "x"', 'size = "y"\nsrc = "d"', 'size = "y"\nsrc = "b"',
+                          'size = "v"', 'size = "q"'):
+                self.rejects(self.form(form.format(encoding, shape)), "a lane is")
+            for shape in ('size = "x"\nsrc = "b"', 'size = "x"\nsrc = "w"', 'size = "x"\nsrc = "d"', 'size = "y"'):
+                generate_x86.load(self.form(form.format(encoding, shape)))
+
+    def test_only_ptest_and_the_string_compares_write_flags_in_the_three_byte_maps(self):
+        operations, forms = generate_x86.load(REGISTRY)
+        writers = {form["op"] for form in forms
+                   if form["map"] in ("0f38", "0f3a") and operations[form["op"]]["writes"]}
+        self.assertEqual(writers, {"ptest", "pcmpestri", "pcmpestrm", "pcmpistri", "pcmpistrm"})
+        for op in writers:
+            self.assertEqual(operations[op]["writes"], set(generate_x86.FLAGS))
+
+    def test_length_registers_set_the_operand_size_of_a_string_compare(self):
+        form = 'op = "pcmpestri"\nmap = "0f3a"\nprefix = "66"\nopcode = 0xF0\nenc = "xmm_rm_length"\nimm = "ub"\n{}'
+        generate_x86.load(self.form(form.format('size = "y"\nsrc = "x"')))
+        self.rejects(self.form(form.format('size = "x"\nsrc = "x"')), "XMM size")
+        self.rejects(self.form(form.format('size = "y"')), "source size")
+
+    def vex(self, **changes):
+        entry = {"op": '"vperm2f128"', "map": '"0f3a"', "prefix": '"66"', "opcode": "0xF0", "enc": '"xmm_rm_imm"',
+                 "length": '"256"', "w": '"0"', "src": '"v"', "nds": "true"} | changes
+        return REGISTRY + "\n[[vex]]\n" + "".join(f"{k} = {v}\n" for k, v in entry.items() if v is not None)
+
+    def test_vex_forms_are_validated(self):
+        operations, forms = generate_x86.load(self.vex())
+        self.assertEqual(forms[-1]["vex"], {"key": 3 << 10 | 1 << 8 | 0xF0, "digit": None, "length": True, "w": False,
+                                            "memory": 0, "nds": True})
+        rejected = [({"map": '"1"'}, "unknown map"), ({"prefix": '"67"'}, "unknown prefix"),
+                    ({"length": '"512"'}, "unknown length"), ({"length": None}, "unknown length"),
+                    ({"w": '"2"'}, "unknown w"), ({"op": '"nothing"'}, "unknown op"), ({"lock": "true"}, "unknown keys"),
+                    ({"opcode": "0x100"}, "out of range"), ({"enc": '"gpr_xmm"', "src": None}, "no register"),
+                    ({"src": None}, "source size"), ({"src": '"q"', "aligned": "true"}, "alignment"),
+                    ({"memory_only": "true", "register_only": "true"}, "contradict"),
+                    ({"enc": '"rm_xmm"'}, "a store takes no source"),
+                    ({"enc": '"none"', "src": None, "nds": None, "digit": "1"}, "without ModRM"),
+                    ({"digit": "8"}, "a digit is 0-7"),
+                    ({"enc": '"gpr_xmm_imm"', "src": '"b"'}, "no register"),
+                    ({"enc": '"reg_xmm_imm"'}, "no register"), ({"enc": '"xmm_rm_length"'}, "no register"),
+                    ({"enc": '"xmm_gpr_imm"'}, "a lane is"), ({"enc": '"xmm_gpr_imm"', "src": '"x"'}, "a lane is"),
+                    ({"enc": '"gpr_xmm_imm"', "src": '"q"', "nds": None}, "a lane is"),
+                    ({"enc": '"rm_imm_xmm"'}, "needs VEX.vvvv and a register"),
+                    ({"enc": '"rm_imm_xmm"', "register_only": "true", "nds": None}, "needs VEX.vvvv and a register")]
+        for changes, message in rejected:
+            self.rejects(self.vex(**changes), message)
+
+    def test_vex_immediates_follow_the_encoding(self):
+        for enc, changes in (("rm_imm_xmm", {"register_only": "true"}), ("xmm_rm_length", {"nds": None}),
+                             ("xmm_gpr_imm", {"src": '"w"'}), ("gpr_xmm_imm", {"src": None, "nds": None}),
+                             ("reg_xmm_imm", {"nds": None}), ("xmm_rm_imm", {})):
+            form = generate_x86.load(self.vex(enc=f'"{enc}"', **changes))[1][-1]
+            self.assertEqual(form["imm"], "ub", enc)
+        for enc, changes in (("xmm_rm", {}), ("xmm_gpr", {"src": None}), ("reg_xmm", {"nds": None})):
+            form = generate_x86.load(self.vex(enc=f'"{enc}"', **changes))[1][-1]
+            self.assertEqual(form["imm"], "", enc)
+
+    def test_vex_forms_overlap_only_if_every_field_does(self):
+        twice = lambda **second: self.vex() + self.vex(**second)[len(REGISTRY):]
+        self.rejects(twice(), "overlapping encoding")
+        self.rejects(twice(length='"any"'), "overlapping encoding")
+        self.rejects(twice(w='"any"'), "overlapping encoding")
+        self.rejects(twice(memory_only="true"), "overlapping encoding")
+        for apart in ({"length": '"128"'}, {"w": '"1"'}, {"opcode": "0xF1"}, {"prefix": None}, {"map": '"0f38"'}):
+            generate_x86.load(twice(**apart))
+        split = self.vex(memory_only="true") + self.vex(register_only="true")[len(REGISTRY):]
+        generate_x86.load(split)
+        digits = self.vex(digit="1") + self.vex(digit="2")[len(REGISTRY):]
+        generate_x86.load(digits)
+
+    def test_vex_forms_never_enter_the_legacy_tables(self):
+        operations, forms = generate_x86.load(REGISTRY)
+        rust = generate_x86.generate(operations, forms)
+        indices = {i for i, form in enumerate(forms) if "vex" in form}
+        tables = rust[rust.index("pub static ONE_BYTE"):]
+        for index in indices:
+            self.assertNotIn(f"Entry::Form({index})", tables)
+        keys = re.findall(r"VexForm \{ key: 0x([0-9a-f]+), form: (\d+)", rust)
+        self.assertEqual({int(form) for _, form in keys}, indices)
+        self.assertEqual([key for key, _ in keys], sorted(key for key, _ in keys))
 
     def test_lock_needs_a_memory_destination(self):
         # Not a form without ModRM, not one whose ModRM operand is the source,
@@ -98,9 +198,31 @@ class GenerateX86(unittest.TestCase):
         x87 = [f["op"] for f in forms if f["map"] == "1" and 0xD8 <= f["opcode"] <= 0xDF]
         self.assertEqual(x87, ["fninit"])
 
-    def test_only_xadd_and_cmpxchg_are_lockable(self):
+    def test_the_lockable_forms_are_ones_the_sdm_allows_to_lock(self):
+        # Intel SDM Vol. 2, LOCK: the prefix is allowed on these instructions,
+        # and only when the destination is memory. CMP is not among them.
+        sdm = {"add", "adc", "and", "btc", "btr", "bts", "cmpxchg", "cmpxchg8b", "cmpxchg16b",
+               "dec", "inc", "neg", "not", "or", "sbb", "sub", "xor", "xadd", "xchg"}
         _, forms = generate_x86.load(REGISTRY)
-        self.assertEqual({form["op"] for form in forms if form.get("lock")}, {"cmpxchg", "xadd"})
+        lockable = [form for form in forms if form.get("lock")]
+        operations = {form["op"] for form in lockable}
+        self.assertLessEqual(operations, sdm)
+        # The ones the registry marks today (#198, #447, #451): all but
+        # CMPXCHG8B and CMPXCHG16B.
+        self.assertEqual(operations, sdm - {"cmpxchg8b", "cmpxchg16b"})
+        # A form whose destination is a register, or the accumulator, cannot
+        # lock, and neither can a form that only takes a register.
+        self.assertEqual({form["enc"] for form in lockable}, {"rm_reg", "rm_imm", "rm"})
+        self.assertFalse(any(form.get("register_only") for form in lockable))
+        self.assertFalse(any(form.get("lock") for form in forms if form["op"] == "cmp"))
+        for operation in ("add", "or", "adc", "sbb", "and", "sub", "xor"):
+            encodings = {form["enc"]: bool(form.get("lock")) for form in forms if form["op"] == operation}
+            self.assertEqual(encodings, {"rm_reg": True, "rm_imm": True, "reg_rm": False, "acc_imm": False},
+                             operation)
+
+    def test_a_group_locks_only_its_own_operations(self):
+        self.rejects(REGISTRY.replace('lock = ["inc", "dec"]', 'lock = ["inc", "mul"]'), "not in the group")
+        self.rejects(REGISTRY.replace('lock = ["bts", "btr", "btc"]', 'lock = ["bts", "shl"]'), "not in the group")
 
     def test_string_forms_are_movs_and_stos_without_operands(self):
         _, forms = generate_x86.load(REGISTRY)

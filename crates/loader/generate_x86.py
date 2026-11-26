@@ -24,15 +24,22 @@ HERE = Path(__file__).resolve().parent
 REGISTRY = HERE / "x86/instructions.toml"
 RUST = HERE / "src/x86_table.rs"
 
-TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "group"}
+TOP_KEYS = {"schema", "architecture", "documents", "operation", "alu", "form", "group", "vex"}
 OPERATION_KEYS = {"reads", "writes", "undefined", "conditional", "terminator", "faults", "ref"}
 FORM_KEYS = {"op", "map", "prefix", "opcode", "count", "digit", "enc", "size", "imm", "src",
              "memory_only", "register_only", "rm", "no_rex_b", "unaligned", "lock"}
-GROUP_KEYS = {"map", "opcodes", "digits"}
+VEX_KEYS = {"op", "map", "prefix", "opcode", "digit", "enc", "length", "w", "src", "nds",
+            "memory_only", "register_only", "aligned"}
+GROUP_KEYS = {"map", "opcodes", "digits", "lock"}
 FLAGS = ["cf", "zf", "sf", "of", "pf", "af"]
-MAPS = {"1": "ONE_BYTE", "0f": "TWO_BYTE"}
-# Two-byte opcode table per mandatory prefix.
-PREFIXES = {"": "TWO_BYTE", "66": "TWO_BYTE_66", "f3": "TWO_BYTE_F3", "f2": "TWO_BYTE_F2"}
+PREFIXES = {"", "66", "f3", "f2"}
+# Opcode table per opcode map and mandatory prefix. No other combination has a
+# table, so a form cannot use it.
+TABLES = {("1", ""): "ONE_BYTE", ("0f", ""): "TWO_BYTE", ("0f", "66"): "TWO_BYTE_66",
+          ("0f", "f3"): "TWO_BYTE_F3", ("0f", "f2"): "TWO_BYTE_F2",
+          ("0f38", "66"): "THREE_BYTE_38_66", ("0f38", "f2"): "THREE_BYTE_38_F2",
+          ("0f3a", "66"): "THREE_BYTE_3A_66"}
+MAPS = {opcode_map for opcode_map, _ in TABLES}
 SIZES = {"b": "Byte", "v": "Variable", "q": "Quad", "y": "Wide", "n": "None", "x": "Xmm"}
 IMMS = {"": "None", "ib": "SignedByte", "iz": "SignedFull", "iv": "Full", "iw": "Word", "ub": "Byte",
         "rel8": "SignedByte", "rel32": "Signed32", "moffs": "Offset"}
@@ -63,17 +70,35 @@ ENCS = {
     "xmm_rm": ("XmmRm", True, {""}),
     "rm_xmm": ("RmXmm", True, {""}),
     "xmm_rm_imm": ("XmmRmImm", True, {"ub"}),
+    # The operand size is that of the length registers.
+    "xmm_rm_length": ("XmmRmLength", True, {"ub"}),
+    "rm_xmm_imm": ("RmXmmImm", True, {"ub"}),
     "rm_imm_xmm": ("RmImmXmm", True, {"ub"}),
     "xmm_gpr": ("XmmGpr", True, {""}),
     "gpr_xmm": ("GprXmm", True, {""}),
     "xmm_gpr_imm": ("XmmGprImm", True, {"ub"}),
+    "gpr_xmm_imm": ("GprXmmImm", True, {"ub"}),
     "reg_xmm": ("RegXmm", True, {""}),
     "reg_xmm_imm": ("RegXmmImm", True, {"ub"}),
 }
+# VEX encodings: the operand size, and whether VEX.vvvv may name a register.
+VEX_ENCS = {"none": ("n", False), "rm": ("n", False), "xmm_rm": ("x", True), "rm_xmm": ("x", True),
+            "xmm_rm_imm": ("x", True), "rm_xmm_imm": ("x", False), "xmm_gpr": ("y", True),
+            "gpr_xmm": ("y", False), "reg_xmm": ("y", False), "xmm_rm_length": ("y", False),
+            "rm_imm_xmm": ("x", True), "xmm_gpr_imm": ("y", True), "gpr_xmm_imm": ("y", False),
+            "reg_xmm_imm": ("y", False)}
+VEX_MAPS = {"0f": 1, "0f38": 2, "0f3a": 3}
+VEX_PREFIXES = {"": 0, "66": 1, "f3": 2, "f2": 3}
+VEX_LENGTHS = {"128": False, "256": True, "any": None}
+VEX_WIDTHS = {"0": False, "1": True, "any": None}
+# Memory width: the vector length, a number of bytes, or that of the general operand.
+VEX_SRCS = {"v": 0, "b": 1, "w": 2, "d": 4, "q": 8, "x": 16, "": 255}
 # Encodings whose ModRM operand is the destination, so LOCK can apply to it.
 RM_DESTINATIONS = {"rm_reg", "rm", "rm_imm", "rm_one", "rm_cl", "rm_reg_imm", "rm_reg_cl"}
 # Encodings whose ModRM operand is an XMM register or memory of the source width.
-XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
+XMM_RM = {"xmm_rm", "rm_xmm", "xmm_rm_imm", "rm_xmm_imm", "xmm_rm_length", "rm_imm_xmm", "reg_xmm", "reg_xmm_imm"}
+# Those whose operand size is that of a general register.
+GENERAL_SIZED = {"xmm_rm_length", "reg_xmm", "reg_xmm_imm"}
 # One-byte opcodes that are prefixes or the two-byte escape, never instructions.
 RESERVED = {0x0F, 0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3,
             *range(0x40, 0x50)}
@@ -101,6 +126,12 @@ def flag_set(where, text):
     if len(set(names)) != len(names):
         fail(f"{where}: repeated flag")
     return set(names)
+
+
+def check_lock(where, group, operations):
+    for op in group.get("lock", ()):
+        if op not in operations:
+            fail(f"{where}: lock names {op}, which is not in the group")
 
 
 def load(text):
@@ -136,16 +167,21 @@ def load(text):
         for offset, (enc, size, imm) in enumerate([
                 ("rm_reg", "b", ""), ("rm_reg", "v", ""), ("reg_rm", "b", ""),
                 ("reg_rm", "v", ""), ("acc_imm", "b", "ib"), ("acc_imm", "v", "iz")]):
-            forms.append({"op": op, "opcode": base + offset, "enc": enc, "size": size, "imm": imm})
+            # Intel SDM Vol. 2, LOCK: every ALU operation but CMP may lock a
+            # memory destination.
+            forms.append({"op": op, "opcode": base + offset, "enc": enc, "size": size, "imm": imm,
+                          "lock": op != "cmp" and enc == "rm_reg"})
         for opcode, size, imm in ((0x80, "b", "ib"), (0x81, "v", "iz"), (0x83, "v", "ib")):
             forms.append({"op": op, "opcode": opcode, "digit": index, "enc": "rm_imm",
-                          "size": size, "imm": imm})
+                          "size": size, "imm": imm, "lock": op != "cmp"})
     for group in data["group"]:
         check_keys("group", group, GROUP_KEYS)
+        check_lock("group", group, group["digits"].values())
         for opcode, size, imm, enc in group["opcodes"]:
             for digit, op in sorted(group["digits"].items()):
                 forms.append({"op": op, "map": group.get("map", "1"), "opcode": opcode,
-                              "digit": int(digit), "enc": enc, "size": size, "imm": imm})
+                              "digit": int(digit), "enc": enc, "size": size, "imm": imm,
+                              "lock": op in group.get("lock", ())})
 
     claimed = {}
     used = set()
@@ -179,20 +215,24 @@ def load(text):
                 fail(f"{where}: rm must be a ModRM r/m field value 0-7")
             if not form.get("register_only") or form["digit"] is None:
                 fail(f"{where}: a fixed r/m field needs register_only and a digit")
-        sourced = form["enc"] in XMM_RM or form["enc"] == "xmm_gpr_imm"
-        if sourced != bool(form["src"]) and form["enc"] not in ("reg_rm", "rm"):
+        # A general register or memory exchanged with a vector lane: fixed ones
+        # name their memory width, wide ones are 4 or 8 bytes by REX.W.
+        lane = form["enc"] in ("xmm_gpr_imm", "gpr_xmm_imm")
+        sourced = form["enc"] in XMM_RM
+        if sourced != bool(form["src"]) and form["enc"] not in ("reg_rm", "rm") and not lane:
             fail(f"{where}: source size does not match the encoding")
         if form["src"] and not sourced and form["enc"] == "rm" and form["size"] != "n":
             fail(f"{where}: source size does not match the encoding")
-        if (form["size"] == "x") != (form["enc"] in XMM_RM - {"reg_xmm", "reg_xmm_imm"}
-                                     or form["enc"] == "xmm_gpr_imm"):
+        if lane and (form["size"] not in ("x", "y") or (form["size"] == "x") != (form["src"] in ("b", "w", "d"))):
+            fail(f"{where}: a lane is a byte, word or doubleword by source, or wide by size")
+        if not lane and (form["size"] == "x") != (form["enc"] in XMM_RM - GENERAL_SIZED):
             fail(f"{where}: XMM size does not match the encoding")
         if form.get("lock") and (form["enc"] not in RM_DESTINATIONS or form.get("register_only")):
             fail(f"{where}: LOCK needs a memory destination")
         if form.get("unaligned") and form["src"] != "x":
             fail(f"{where}: alignment applies only to 16-byte operands")
-        if form["prefix"] and form["map"] != "0f":
-            fail(f"{where}: mandatory prefixes are only supported in map 0f")
+        if (form["map"], form["prefix"]) not in TABLES:
+            fail(f"{where}: no opcode table for prefix {form['prefix']!r} in map {form['map']}")
         if form["count"] not in (1, 8, 16) or form["opcode"] % form["count"]:
             fail(f"{where}: count must be 1, 8 or 16 and aligned")
         if form["count"] == 8 and form["enc"] not in ("op_reg", "op_reg_imm"):
@@ -220,10 +260,80 @@ def load(text):
                 first = next(iter(slots.values()))
                 if (first["size"] in "bn") != (form["size"] in "bn"):
                     fail(f"{where}: group mixes byte and wider operands")
+    for form in data.get("vex", ()):
+        forms.append(load_vex(form, operations))
+        used.add(form["op"])
+    overlapping = {}
+    for form in forms:
+        if "vex" not in form:
+            continue
+        vex, rivals = form["vex"], overlapping.setdefault(form["vex"]["key"], [])
+        for rival in rivals:
+            if all(a is None or b is None or a == b for a, b in (
+                    (vex["digit"], rival["vex"]["digit"]), (vex["length"], rival["vex"]["length"]),
+                    (vex["w"], rival["vex"]["w"]), (mode(form), mode(rival)))):
+                fail(f"vex {form['op']} {form['map']}:{form['opcode']:02x}: overlapping encoding")
+        rivals.append(form)
     unused = set(operations) - used
     if unused:
         fail(f"operations without forms: {sorted(unused)}")
     return operations, forms
+
+
+def mode(form):
+    """Whether a form takes only memory, only a register, or either (None)."""
+    return True if form["memory_only"] else False if form["register_only"] else None
+
+
+def load_vex(entry, operations):
+    """Validate a VEX entry, returning a form with its VEX rule."""
+    form = dict(entry)
+    where = f"vex {form.get('op')} {form.get('map')}:{form.get('opcode', 0):02x}"
+    check_keys(where, form, VEX_KEYS)
+    form.setdefault("prefix", "")
+    form.setdefault("src", "")
+    form.setdefault("w", "any")
+    form.setdefault("digit", None)
+    for key in ("nds", "memory_only", "register_only", "aligned"):
+        form[key] = bool(form.get(key))
+    for key, allowed in (("op", operations), ("map", VEX_MAPS), ("prefix", VEX_PREFIXES),
+                         ("enc", VEX_ENCS), ("length", VEX_LENGTHS), ("w", VEX_WIDTHS),
+                         ("src", VEX_SRCS)):
+        if form.get(key) not in allowed:
+            fail(f"{where}: unknown {key} {form.get(key)!r}")
+    if not 0 <= form["opcode"] <= 0xFF:
+        fail(f"{where}: opcode out of range")
+    size, sources = VEX_ENCS[form["enc"]]
+    if form["nds"] and not sources:
+        fail(f"{where}: {form['enc']} takes no register from VEX.vvvv")
+    if form["memory_only"] and form["register_only"]:
+        fail(f"{where}: memory_only and register_only contradict")
+    modrm = ENCS[form["enc"]][1]
+    if not modrm and (form["memory_only"] or form["register_only"] or form["digit"] is not None):
+        fail(f"{where}: operand restriction without ModRM")
+    if form["digit"] is not None and not 0 <= form["digit"] <= 7:
+        fail(f"{where}: a digit is 0-7")
+    # A lane exchanged with a general register or memory is a fixed width by
+    # source, or that of the general operand.
+    lane = form["enc"] in ("xmm_gpr_imm", "gpr_xmm_imm")
+    if lane and form["src"] not in ("b", "w", "d", ""):
+        fail(f"{where}: a lane is a byte, word, doubleword or the general operand")
+    if not lane and (form["src"] == "") != (form["enc"] in ("none", "xmm_gpr", "gpr_xmm")):
+        fail(f"{where}: source size does not match the encoding")
+    if form["aligned"] and form["src"] not in ("v", "x"):
+        fail(f"{where}: alignment applies only to whole vectors")
+    if form["enc"] == "rm_xmm" and form["nds"] and not form["register_only"]:
+        fail(f"{where}: a store takes no source from VEX.vvvv")
+    # A shift by an immediate writes VEX.vvvv and has its source in a register.
+    if form["enc"] == "rm_imm_xmm" and not (form["nds"] and form["register_only"]):
+        fail(f"{where}: {form['enc']} needs VEX.vvvv and a register operand")
+    form.update(size=size, imm="ub" if ENCS[form["enc"]][2] == {"ub"} else "", count=1, rm=None,
+                unaligned=not form["aligned"])
+    form["vex"] = {
+        "key": VEX_MAPS[form["map"]] << 10 | VEX_PREFIXES[form["prefix"]] << 8 | form["opcode"],
+        "digit": form["digit"], "length": VEX_LENGTHS[form["length"]], "w": VEX_WIDTHS[form["w"]],
+        "memory": VEX_SRCS[form["src"]], "nds": form["nds"]}
+    return form
 
 
 def camel(name):
@@ -240,7 +350,7 @@ def generate(operations, forms):
            "// Generated by crates/loader/generate_x86.py from crates/loader/x86/instructions.toml.",
            "// Do not edit.",
            "",
-           "use crate::x86_decode::{Encoding, Entry, Form, Immediate, OperandSize};",
+           "use crate::x86_decode::{Encoding, Entry, Form, Immediate, OperandSize, VexForm};",
            "",
            "/// Operations with decodable forms.",
            "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]",
@@ -280,7 +390,7 @@ def generate(operations, forms):
         out.append(
             f"    Form {{ op: Op::{camel(form['op'])}, encoding: Encoding::{ENCS[form['enc']][0]}, "
             f"size: OperandSize::{SIZES[form['size']]}, immediate: Immediate::{IMMS[form['imm']]}, "
-            f"source: {SRCS[form['src']]}, has_modrm: {str(ENCS[form['enc']][1]).lower()}, "
+            f"source: {0 if 'vex' in form else SRCS[form['src']]}, has_modrm: {str(ENCS[form['enc']][1]).lower()}, "
             f"memory_only: {str(bool(form.get('memory_only'))).lower()}, "
             f"register_only: {str(bool(form.get('register_only'))).lower()}, "
             f"fixed_rm: {'None' if form['rm'] is None else 'Some(%d)' % form['rm']}, "
@@ -290,10 +400,12 @@ def generate(operations, forms):
     out += ["];", ""]
 
     groups = []
-    tables = {name: ["Entry::Unsupported"] * 256 for name in ("ONE_BYTE", *PREFIXES.values())}
+    tables = {name: ["Entry::Unsupported"] * 256 for name in TABLES.values()}
     slots = {}
     for index, form in enumerate(forms):
-        table = MAPS[form["map"]] if form["map"] == "1" else PREFIXES[form["prefix"]]
+        if "vex" in form:
+            continue
+        table = TABLES[form["map"], form["prefix"]]
         for opcode in range(form["opcode"], form["opcode"] + form["count"]):
             slots.setdefault((table, opcode), {})[form["digit"]] = index
     for (table, opcode), digits in sorted(slots.items()):
@@ -306,6 +418,16 @@ def generate(operations, forms):
     out.append("/// Form per ModRM digit; 65535 marks an unsupported digit.")
     out.append(f"pub static GROUPS: [[u16; 8]; {len(groups)}] = [")
     out += [f"    {row}," for row in groups]
+    out += ["];", ""]
+    ordered = sorted((form["vex"]["key"], index) for index, form in enumerate(forms) if "vex" in form)
+    optional = lambda value: "None" if value is None else f"Some({str(value).lower()})"
+    out.append("/// VEX-encoded forms by opcode map, mandatory prefix and opcode.")
+    out.append(f"pub static VEX_FORMS: [VexForm; {len(ordered)}] = [")
+    for key, index in ordered:
+        vex = forms[index]["vex"]
+        out.append(f"    VexForm {{ key: 0x{key:03x}, form: {index}, digit: {optional(vex['digit'])}, "
+                   f"length: {optional(vex['length'])}, wide: {optional(vex['w'])}, "
+                   f"memory: {vex['memory']}, nds: {str(vex['nds']).lower()} }},")
     out += ["];", ""]
     for name, entries in tables.items():
         out.append(f"pub static {name}: [Entry; 256] = [")

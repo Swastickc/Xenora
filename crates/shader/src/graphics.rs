@@ -282,10 +282,18 @@ fn lift(
                         "sampling outside synthetic resource binding ABI s[0:7] and s[8:11]",
                     ));
                 }
+                let coord_end = coord
+                    .checked_add(1)
+                    .ok_or_else(|| error("image sample coordinate pair exceeds v255"))?;
+                let dst_end = dst
+                    .checked_add(3)
+                    .ok_or_else(|| error("image sample result quartet exceeds v255"))?;
                 let u = read(coord)?;
-                let v = read(coord + 1)?;
-                for component in 0..4 {
-                    let val = ir.push(
+                let v = read(coord_end)?;
+                for (component, register) in
+                    (0..4).zip(&mut registers[usize::from(dst)..=usize::from(dst_end)])
+                {
+                    *register = Some(ir.push(
                         Some(offset),
                         Op::SampleLodZero {
                             u,
@@ -294,8 +302,7 @@ fn lift(
                             texture_index: 0,
                             sampler_index: 0,
                         },
-                    );
-                    registers[usize::from(dst + component)] = Some(val);
+                    ));
                 }
             }
             Instruction::Export {
@@ -410,4 +417,89 @@ fn emit_export(export: &Export, target: &str, field: &str, ir: &mut String, msl:
         "{offset:04x}: export.f32x4 {target}, {a}, {b}, {c}, {d}"
     );
     let _ = writeln!(msl, "    {field} = float4({a}, {b}, {c}, {d});");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_OFFSET: usize = 8;
+
+    fn pixel_sample(dst: u8, coord: u8, resource: u8) -> Result<StageIr, CompileError> {
+        let init = |offset, dst, value: f32| DecodedInstruction {
+            offset,
+            byte_len: 4,
+            instruction: Instruction::MoveB32 {
+                dst,
+                src: VectorSource::Immediate(value.to_bits()),
+            },
+        };
+        let instructions = [
+            init(0, 254, 0.25),
+            init(4, 255, 0.75),
+            DecodedInstruction {
+                offset: SAMPLE_OFFSET,
+                byte_len: 8,
+                instruction: Instruction::ImageSampleLz {
+                    dst,
+                    coord,
+                    resource,
+                    sampler: 8,
+                },
+            },
+            DecodedInstruction {
+                offset: 16,
+                byte_len: 8,
+                instruction: Instruction::Export {
+                    target: ExportTarget::RenderTarget0,
+                    sources: [252, 253, 254, 255],
+                },
+            },
+            DecodedInstruction {
+                offset: 24,
+                byte_len: 4,
+                instruction: Instruction::EndProgram,
+            },
+        ];
+        lift(Stage::Pixel, &instructions, 28)
+    }
+
+    #[test]
+    fn samples_with_upper_register_spans() {
+        let ir = pixel_sample(252, 254, 0).unwrap();
+        assert_eq!(ir.color.unwrap().values.map(|value| value.0), [2, 3, 4, 5]);
+        for (component, (offset, op)) in (0..4).zip(&ir.values[2..]) {
+            assert_eq!(*offset, Some(SAMPLE_OFFSET));
+            assert!(matches!(
+                op,
+                Op::SampleLodZero { u: Value(0), v: Value(1), component: actual, .. }
+                    if *actual == component
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_sample_spans_before_reading_operands() {
+        for (dst, coord, resource, expected) in [
+            (252, 255, 0, "image sample coordinate pair exceeds v255"),
+            (253, 254, 0, "image sample result quartet exceeds v255"),
+            (255, 2, 0, "image sample result quartet exceeds v255"),
+            (252, 2, 0, "source VGPR is uninitialized or reserved"),
+            (
+                253,
+                255,
+                4,
+                "sampling outside synthetic resource binding ABI s[0:7] and s[8:11]",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    pixel_sample(dst, coord, resource),
+                    Err(CompileError::Verify { offset: SAMPLE_OFFSET, reason })
+                        if reason == expected
+                ),
+                "expected a failure at the sample instruction for v{dst}, v{coord}, s{resource}"
+            );
+        }
+    }
 }

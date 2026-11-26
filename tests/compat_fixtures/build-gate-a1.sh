@@ -164,3 +164,9 @@ done
 build gate-a1-break O1 GATE_BREAK
 build gate-a1-return O1 GATE_RETURN
 build gate-a1-missing O1 GATE_MISSING
+
+# The CLI checks that a TLS exit is reported before any entry event.
+"$clang" --target=x86_64-pc-windows-msvc -c \
+    "$root/tests/compat_fixtures/gate_a1_tls_exit.s" -o gate-a1-tls-exit.obj
+link /entry:gate_entry /subsystem:console /nodefaultlib /timestamp:0 \
+    /base:0x150000000 /fixed /out:gate-a1-tls-exit.exe gate-a1-tls-exit.obj kernel32.lib

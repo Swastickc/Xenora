@@ -15,7 +15,7 @@ use xenora_isa::{
 
 use xenora_isa::meta::EncodingFamily;
 use xenora_isa::semantics::{FORM_IDS, OperandRule};
-pub use xenora_isa::semantics::{VectorBinary, VectorLowering, VectorUnary, VectorVcc};
+pub use xenora_isa::semantics::{Signedness, VectorBinary, VectorLowering, VectorUnary, VectorVcc};
 
 /// Metadata forms that [`decode`] turns into an [`Instruction`] for at least one
 /// operand combination: the hand-written forms below followed by every form of
@@ -40,11 +40,14 @@ const fn concat_forms<const N: usize>() -> [(&'static str, EncodingFamily); N] {
 }
 
 /// Decoded forms not yet described by the semantic registry.
-const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 10] = [
+const HANDWRITTEN_FORMS: [(&str, EncodingFamily); 13] = [
     ("BUFFER_LOAD_DWORD", EncodingFamily::Mubuf),
     ("BUFFER_STORE_DWORD", EncodingFamily::Mubuf),
     ("EXP", EncodingFamily::Exp),
     ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
+    ("S_BUFFER_LOAD_DWORD", EncodingFamily::Smem),
+    ("S_BUFFER_LOAD_DWORDX2", EncodingFamily::Smem),
+    ("S_BUFFER_LOAD_DWORDX4", EncodingFamily::Smem),
     ("S_WAITCNT_VSCNT", EncodingFamily::Sopk),
     ("V_ADD_F32", EncodingFamily::Vop2),
     ("V_INTERP_P1_F32", EncodingFamily::Vintrp),
@@ -410,6 +413,13 @@ fn decode_gfx1030(bytes: &[u8], offset: usize) -> Result<(Instruction, u8), Deco
         let simm16 = first as u16;
         return Ok((Instruction::ScalarImmediateCompare { op, src, simm16 }, 4));
     }
+    if first == S_WAITCNT_LGKMCNT_0 {
+        return Ok((Instruction::WaitScalarLoad, 4));
+    }
+    if let Some(dwords) = scalar_buffer_load_dwords(first) {
+        let second = word(bytes, 8)?;
+        return Ok((scalar_buffer_load(first, second, dwords)?, 8));
+    }
     if let Some(op) = SoppControlOp::from_word(first) {
         let immediate = first as u16;
         if op
@@ -623,6 +633,78 @@ fn image_sample_operands(
     }
 
     Ok((dst, coord, resource, sampler))
+}
+
+/// SOPP `s_waitcnt lgkmcnt(0)` alone: the other counters at their maximum.
+const S_WAITCNT_LGKMCNT_0: u32 = 0xbf8c_c07f;
+
+/// Words loaded by an SMEM `s_buffer_load_dword`, `_x2` or `_x4` (guide Tables
+/// 73 and 74: encoding in bits 26-31, opcode in bits 18-25).
+fn scalar_buffer_load_dwords(first: u32) -> Option<u8> {
+    match first >> 18 {
+        0x3d08 => Some(1),
+        0x3d09 => Some(2),
+        0x3d0a => Some(4),
+        _ => None,
+    }
+}
+
+/// Guide 7.1 and 7.5: SBASE names an SGPR pair and must be even, SDATA is
+/// aligned to the number of words, and the offset must be positive.
+fn scalar_buffer_load(first: u32, second: u32, dwords: u8) -> Result<Instruction, DecodeErrorKind> {
+    const NULL: u8 = 125;
+    let mnemonic = match dwords {
+        1 => "s_buffer_load_dword",
+        2 => "s_buffer_load_dwordx2",
+        _ => "s_buffer_load_dwordx4",
+    };
+    // Bits 13-17 hold DLC, GLC and reserved bits; 21-24 of the second word are
+    // reserved.
+    if first & 0x0003_e000 != 0 || second & 0x01e0_0000 != 0 {
+        return Err(unsupported(
+            mnemonic,
+            "expected cache policy and reserved bits to be zero",
+        ));
+    }
+    let base = (first & 0x3f) as u8;
+    let resource = base * 2;
+    if !base.is_multiple_of(2) || resource > 102 {
+        return Err(unsupported(
+            mnemonic,
+            "resource descriptor must be four aligned normal SGPRs",
+        ));
+    }
+    let dst = ((first >> 6) & 0x7f) as u8;
+    if !dst.is_multiple_of(dwords) || dst + dwords > 106 {
+        return Err(unsupported(
+            mnemonic,
+            "expected an aligned destination in normal SGPRs",
+        ));
+    }
+    let offset = second & 0x001f_ffff;
+    if offset >> 20 != 0 {
+        return Err(unsupported(
+            mnemonic,
+            "a buffer load needs a positive offset",
+        ));
+    }
+    let soffset = match (second >> 25) as u8 {
+        NULL => None,
+        register @ 0..=105 => Some(register),
+        _ => {
+            return Err(unsupported(
+                mnemonic,
+                "expected a normal SGPR offset or null",
+            ));
+        }
+    };
+    Ok(Instruction::ScalarBufferLoad {
+        dst,
+        resource,
+        offset,
+        soffset,
+        dwords,
+    })
 }
 
 fn buffer_operands(

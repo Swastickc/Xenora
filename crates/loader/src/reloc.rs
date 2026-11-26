@@ -6,7 +6,7 @@
 //! is loaded at a base address different from its preferred PE `image_base`.
 
 use crate::memory::{GuestMemory, MemoryError};
-use crate::pe::ParsedPe;
+use crate::pe::{ParsedPe, PeSection};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -14,14 +14,31 @@ use std::fmt;
 pub const IMAGE_REL_BASED_ABSOLUTE: u8 = 0;
 pub const IMAGE_REL_BASED_DIR64: u8 = 10;
 
+// COFF Characteristics flag for an image that must use its preferred base.
+const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;
+
 /// Errors that can occur during base relocation parsing or application.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RelocationError {
-    DirectoryOutOfBounds { rva: u32, size: u32 },
-    MalformedBlockHeader { offset: usize },
-    BlockSizeOutOfBounds { block_size: u32, max_size: usize },
+    FixedImageBase {
+        preferred_base: u64,
+        loaded_base: u64,
+    },
+    DirectoryOutOfBounds {
+        rva: u32,
+        size: u32,
+    },
+    MalformedBlockHeader {
+        offset: usize,
+    },
+    BlockSizeOutOfBounds {
+        block_size: u32,
+        max_size: usize,
+    },
     UnsupportedRelocationType(u8),
-    TargetOutOfBounds { target_va: u64 },
+    TargetOutOfBounds {
+        target_va: u64,
+    },
     Memory(MemoryError),
     ArithmeticOverflow,
 }
@@ -29,6 +46,13 @@ pub enum RelocationError {
 impl fmt::Display for RelocationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::FixedImageBase {
+                preferred_base,
+                loaded_base,
+            } => write!(
+                f,
+                "PE relocations are stripped: image requires base {preferred_base:#x}, requested {loaded_base:#x}"
+            ),
             Self::DirectoryOutOfBounds { rva, size } => {
                 write!(
                     f,
@@ -80,7 +104,119 @@ pub struct RelocationReport {
     pub delta: i64,
 }
 
-/// Applies PE base relocations to `GuestMemory` if the loaded image base differs from preferred.
+struct RelocationSpan<'a> {
+    rva: u32,
+    file_offset: usize,
+    bytes: &'a [u8],
+}
+
+impl<'a> RelocationSpan<'a> {
+    fn from_section(section: &PeSection, file: &'a [u8], rva: u32, end: u32) -> Option<Self> {
+        let section_offset = rva.checked_sub(section.virtual_address)?;
+        let available = section.raw_data_size.checked_sub(section_offset)?;
+        if available == 0 || section.raw_data_ptr == 0 {
+            return None;
+        }
+        let len = available.min(end - rva) as usize;
+        let file_offset = (section.raw_data_ptr as usize).checked_add(section_offset as usize)?;
+        Some(Self {
+            rva,
+            file_offset,
+            bytes: file.get(file_offset..file_offset.checked_add(len)?)?,
+        })
+    }
+
+    fn end_rva(&self) -> u32 {
+        self.rva + self.bytes.len() as u32
+    }
+}
+
+struct RelocationReader<'a> {
+    current: RelocationSpan<'a>,
+    following: std::vec::IntoIter<RelocationSpan<'a>>,
+}
+
+impl<'a> RelocationReader<'a> {
+    fn new(pe: &ParsedPe, file: &'a [u8], rva: u32, size: u32) -> Option<Self> {
+        let end = rva.checked_add(size)?;
+        if end > pe.size_of_image {
+            return None;
+        }
+        let current = pe
+            .sections
+            .iter()
+            .find_map(|section| RelocationSpan::from_section(section, file, rva, end))?;
+        let mut covered = current.end_rva();
+        let mut following = Vec::new();
+        if covered < end {
+            // Section headers can be out of RVA order. Verify every handoff
+            // before applying any fixups, and borrow the bytes from the file.
+            following.extend(pe.sections.iter().filter_map(|section| {
+                let start = section.virtual_address;
+                if start < covered || start >= end {
+                    return None;
+                }
+                RelocationSpan::from_section(section, file, start, end)
+            }));
+            following.sort_unstable_by_key(|span| span.rva);
+            for span in &following {
+                if span.rva != covered {
+                    return None;
+                }
+                covered = span.end_rva();
+            }
+            if covered != end {
+                return None;
+            }
+        }
+        Some(Self {
+            current,
+            following: following.into_iter(),
+        })
+    }
+
+    // The caller checks how many directory bytes remain before every read.
+    fn advance_if_empty(&mut self) {
+        if self.current.bytes.is_empty() {
+            self.current = self
+                .following
+                .next()
+                .expect("validated relocation directory has more bytes");
+        }
+    }
+
+    fn take_contiguous(&mut self, len: usize) -> Option<&'a [u8]> {
+        let (bytes, rest) = self.current.bytes.split_at_checked(len)?;
+        self.current.bytes = rest;
+        self.current.file_offset += len;
+        Some(bytes)
+    }
+
+    fn read<const N: usize>(&mut self) -> [u8; N] {
+        if let Some((value, rest)) = self.current.bytes.split_first_chunk::<N>() {
+            self.current.bytes = rest;
+            self.current.file_offset += N;
+            return *value;
+        }
+
+        let mut result = [0; N];
+        let mut output = result.as_mut_slice();
+        while !output.is_empty() {
+            self.advance_if_empty();
+            let len = output.len().min(self.current.bytes.len());
+            let (chunk, rest) = self.current.bytes.split_at(len);
+            output[..len].copy_from_slice(chunk);
+            output = &mut output[len..];
+            self.current.bytes = rest;
+            self.current.file_offset += len;
+        }
+        result
+    }
+}
+
+/// Applies PE base relocations when the image is loaded at a nonpreferred base.
+///
+/// An image with the COFF relocations-stripped flag can use only its preferred base.
 pub fn apply_relocations(
     pe: &ParsedPe,
     bytes: &[u8],
@@ -94,14 +230,13 @@ pub fn apply_relocations(
         // Zero delta: image is loaded at preferred base, no DIR64 fixup needed
         return Ok(report);
     }
+    let reloc_dir = find_reloc_directory(bytes, pe.image_base, loaded_base)?;
     if delta > (i64::MAX as i128) || delta < (i64::MIN as i128) {
         return Err(RelocationError::ArithmeticOverflow);
     }
     let delta_i64 = delta as i64;
     report.delta = delta_i64;
 
-    // Locate relocation directory RVA and size from Optional Header data directory #5
-    let reloc_dir = find_reloc_directory(bytes, pe)?;
     let Some((reloc_rva, reloc_size)) = reloc_dir else {
         return Ok(report);
     };
@@ -110,37 +245,27 @@ pub fn apply_relocations(
         return Ok(report);
     }
 
-    let reloc_file_offset =
-        pe.rva_to_file_offset(reloc_rva)
-            .ok_or(RelocationError::DirectoryOutOfBounds {
-                rva: reloc_rva,
-                size: reloc_size,
-            })?;
-
-    if reloc_file_offset
-        .checked_add(reloc_size as usize)
-        .is_none_or(|end| end > bytes.len())
-    {
-        return Err(RelocationError::DirectoryOutOfBounds {
+    let mut reader = RelocationReader::new(pe, bytes, reloc_rva, reloc_size).ok_or(
+        RelocationError::DirectoryOutOfBounds {
             rva: reloc_rva,
             size: reloc_size,
-        });
-    }
+        },
+    )?;
 
     let mut read_bytes = 0usize;
     let max_read = reloc_size as usize;
 
     while read_bytes < max_read {
+        reader.advance_if_empty();
+        let block_start = reader.current.file_offset;
         // A partial block header after the last block is malformed, not padding.
         if max_read - read_bytes < 8 {
             return Err(RelocationError::MalformedBlockHeader {
-                offset: reloc_file_offset + read_bytes,
+                offset: block_start,
             });
         }
-        let block_start = reloc_file_offset + read_bytes;
-        let page_rva = u32::from_le_bytes(bytes[block_start..block_start + 4].try_into().unwrap());
-        let block_size =
-            u32::from_le_bytes(bytes[block_start + 4..block_start + 8].try_into().unwrap());
+        let page_rva = u32::from_le_bytes(reader.read());
+        let block_size = u32::from_le_bytes(reader.read());
 
         // A block is an 8-byte header followed by whole 2-byte entries.
         if block_size < 8 || block_size % 2 != 0 {
@@ -148,73 +273,34 @@ pub fn apply_relocations(
                 offset: block_start,
             });
         }
-        if read_bytes + (block_size as usize) > max_read {
+        if (block_size as usize) > max_read - read_bytes {
             return Err(RelocationError::BlockSizeOutOfBounds {
                 block_size,
                 max_size: max_read - read_bytes,
             });
         }
 
-        let num_entries = (block_size as usize - 8) / 2;
-        for i in 0..num_entries {
-            let entry_offset = block_start + 8 + i * 2;
-            let entry_val =
-                u16::from_le_bytes(bytes[entry_offset..entry_offset + 2].try_into().unwrap());
-            let reloc_type = (entry_val >> 12) as u8;
-            let offset_in_page = (entry_val & 0x0FFF) as u32;
-
-            report.total_entries += 1;
-
-            match reloc_type {
-                IMAGE_REL_BASED_ABSOLUTE => {
-                    // Padding entry, ignore
-                    report.skipped_absolute += 1;
-                }
-                IMAGE_REL_BASED_DIR64 => {
-                    // Target VA = loaded_base + page_rva + offset_in_page
-                    let target_rva = page_rva
-                        .checked_add(offset_in_page)
-                        .ok_or(RelocationError::ArithmeticOverflow)?;
-                    // The 8-byte target must lie inside the image, not in other mapped memory.
-                    if target_rva
-                        .checked_add(8)
-                        .is_none_or(|end| end > pe.size_of_image)
-                    {
-                        return Err(RelocationError::TargetOutOfBounds {
-                            target_va: loaded_base.wrapping_add(u64::from(target_rva)),
-                        });
-                    }
-                    let target_va = loaded_base
-                        .checked_add(target_rva as u64)
-                        .ok_or(RelocationError::ArithmeticOverflow)?;
-
-                    // Read current 64-bit value at target_va
-                    // Use write_u64_bypass / read_u64_bypass if section is read-only
-                    let orig_val = memory.read_u64_bypass(target_va).map_err(|e| match e {
-                        MemoryError::UnmappedAddress(_) => {
-                            RelocationError::TargetOutOfBounds { target_va }
-                        }
-                        other => RelocationError::Memory(other),
-                    })?;
-
-                    // Rebase: new_val = orig_val + delta_i64
-                    let new_val = ((orig_val as i128) + (delta_i64 as i128)) as u64;
-
-                    memory
-                        .write_u64_bypass(target_va, new_val)
-                        .map_err(|e| match e {
-                            MemoryError::UnmappedAddress(_) => {
-                                RelocationError::TargetOutOfBounds { target_va }
-                            }
-                            other => RelocationError::Memory(other),
-                        })?;
-
-                    report.applied_dir64 += 1;
-                }
-                other => {
-                    return Err(RelocationError::UnsupportedRelocationType(other));
-                }
-            }
+        let entries_size = block_size as usize - 8;
+        if let Some(raw_entries) = reader.take_contiguous(entries_size) {
+            let entries = raw_entries.as_chunks::<2>().0.iter().copied();
+            apply_entries(
+                entries.map(u16::from_le_bytes),
+                page_rva,
+                pe.size_of_image,
+                loaded_base,
+                memory,
+                &mut report,
+            )?;
+        } else {
+            let entries = (0..entries_size / 2).map(|_| u16::from_le_bytes(reader.read()));
+            apply_entries(
+                entries,
+                page_rva,
+                pe.size_of_image,
+                loaded_base,
+                memory,
+                &mut report,
+            )?;
         }
 
         read_bytes += block_size as usize;
@@ -234,9 +320,77 @@ pub fn apply_relocations(
     Ok(report)
 }
 
+fn apply_entries(
+    entries: impl Iterator<Item = u16>,
+    page_rva: u32,
+    image_size: u32,
+    loaded_base: u64,
+    memory: &mut GuestMemory,
+    report: &mut RelocationReport,
+) -> Result<(), RelocationError> {
+    for entry_val in entries {
+        let reloc_type = (entry_val >> 12) as u8;
+        let offset_in_page = (entry_val & 0x0FFF) as u32;
+
+        report.total_entries += 1;
+
+        match reloc_type {
+            IMAGE_REL_BASED_ABSOLUTE => {
+                // Padding entry, ignore
+                report.skipped_absolute += 1;
+            }
+            IMAGE_REL_BASED_DIR64 => {
+                // Target VA = loaded_base + page_rva + offset_in_page
+                let target_rva = page_rva
+                    .checked_add(offset_in_page)
+                    .ok_or(RelocationError::ArithmeticOverflow)?;
+                // The 8-byte target must lie inside the image, not in other mapped memory.
+                if target_rva.checked_add(8).is_none_or(|end| end > image_size) {
+                    return Err(RelocationError::TargetOutOfBounds {
+                        target_va: loaded_base.wrapping_add(u64::from(target_rva)),
+                    });
+                }
+                let target_va = loaded_base
+                    .checked_add(target_rva as u64)
+                    .ok_or(RelocationError::ArithmeticOverflow)?;
+
+                // Read current 64-bit value at target_va
+                // Use write_u64_bypass / read_u64_bypass if section is read-only
+                let orig_val = memory.read_u64_bypass(target_va).map_err(|e| match e {
+                    MemoryError::UnmappedAddress(_) => {
+                        RelocationError::TargetOutOfBounds { target_va }
+                    }
+                    other => RelocationError::Memory(other),
+                })?;
+
+                // Rebase: new_val = orig_val + delta_i64
+                let new_val = ((orig_val as i128) + (report.delta as i128)) as u64;
+
+                memory
+                    .write_u64_bypass(target_va, new_val)
+                    .map_err(|e| match e {
+                        MemoryError::UnmappedAddress(_) => {
+                            RelocationError::TargetOutOfBounds { target_va }
+                        }
+                        other => RelocationError::Memory(other),
+                    })?;
+
+                report.applied_dir64 += 1;
+            }
+            other => {
+                return Err(RelocationError::UnsupportedRelocationType(other));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// Called only for loads at a nonpreferred base.
 fn find_reloc_directory(
     bytes: &[u8],
-    _pe: &ParsedPe,
+    preferred_base: u64,
+    loaded_base: u64,
 ) -> Result<Option<(u32, u32)>, RelocationError> {
     if bytes.len() < 0x40 {
         return Ok(None);
@@ -244,14 +398,17 @@ fn find_reloc_directory(
     let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
     let coff_offset = e_lfanew + 4;
     let opt_offset = coff_offset + 20;
-    if bytes.len() < coff_offset + 18 {
+    let Some(coff) = bytes.get(coff_offset..opt_offset) else {
         return Ok(None);
+    };
+    let characteristics = u16::from_le_bytes([coff[18], coff[19]]);
+    if characteristics & IMAGE_FILE_RELOCS_STRIPPED != 0 {
+        return Err(RelocationError::FixedImageBase {
+            preferred_base,
+            loaded_base,
+        });
     }
-    let size_of_opt = u16::from_le_bytes(
-        bytes[coff_offset + 16..coff_offset + 18]
-            .try_into()
-            .unwrap(),
-    ) as usize;
+    let size_of_opt = usize::from(u16::from_le_bytes([coff[16], coff[17]]));
 
     // Relocation directory is directory index 5 (offset 112 + 5 * 8 = 152 in Optional Header).
     // It exists only when NumberOfRvaAndSizes (offset 108) covers index 5.

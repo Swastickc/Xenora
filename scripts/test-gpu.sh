@@ -13,42 +13,7 @@ export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
 # allow slower hosts to raise it without editing the script.
 export XENORA_SEMANTIC_TIMEOUT=${XENORA_SEMANTIC_TIMEOUT:-300s}
 
-# macOS does not ship GNU timeout. Python 3 is already a project requirement,
-# so use a small POSIX-compatible fallback rather than making coreutils a
-# prerequisite for the native suite.
-if ! command -v timeout >/dev/null 2>&1; then
-    timeout() {
-        duration=$1
-        shift
-        python3 - "$duration" "$@" <<'PY'
-import os
-import re
-import signal
-import subprocess
-import sys
-
-text = sys.argv[1]
-match = re.fullmatch(r"(\d+(?:\.\d+)?)([smh]?)", text)
-if match is None:
-    print(f"timeout: invalid duration {text!r}", file=sys.stderr)
-    raise SystemExit(2)
-seconds = float(match.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group(2)]
-try:
-    process = subprocess.Popen(sys.argv[2:], start_new_session=True)
-except FileNotFoundError as error:
-    print(f"timeout: {error}", file=sys.stderr)
-    raise SystemExit(127)
-try:
-    code = process.wait(timeout=seconds)
-except subprocess.TimeoutExpired:
-    os.killpg(process.pid, signal.SIGKILL)
-    process.wait()
-    print(f"timeout: command exceeded {seconds:g} seconds", file=sys.stderr)
-    raise SystemExit(124)
-raise SystemExit(code)
-PY
-    }
-fi
+. scripts/lib/timeout.sh
 
 cargo test --locked -p xenora-metal --features gpu-tests --test native_compute --no-run
 timeout 30s cargo test --locked -p xenora-metal --features gpu-tests --test native_compute -- \

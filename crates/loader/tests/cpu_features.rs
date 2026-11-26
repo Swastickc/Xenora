@@ -9,7 +9,9 @@
 //! engines refuse. The witness must be removed before its bit can be set.
 //!
 //! Bit positions and the feature each instruction belongs to are from the
-//! Intel SDM Vol. 2, CPUID and the instruction entries. Encodings were
+//! Intel SDM Vol. 2, CPUID and the instruction entries. A feature whose own
+//! instructions all run stays clear while one it builds on is clear, and has
+//! its instruction list checked instead. Encodings were
 //! assembled with `clang -target x86_64-apple-macos` and read with `objdump`.
 
 use xenora_loader::cpu::{
@@ -225,15 +227,13 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
             1,
             &[0x66, 0x0F, 0x3A, 0x44, 0xC1, 0x00],
         ), // pclmulqdq xmm0, xmm1, 0
-        ("SSSE3", 1, ECX, 9, &[0x66, 0x0F, 0x38, 0x00, 0xC1]), // pshufb xmm0, xmm1
+        ("SSSE3", 1, ECX, 9, &[0x0F, 0x38, 0x00, 0xC1]), // pshufb mm0, mm1
         ("FMA", 1, ECX, 12, &[0xC4, 0xE2, 0x71, 0x98, 0xC2]), // vfmadd132ps xmm0, xmm1, xmm2
         ("CMPXCHG16B", 1, ECX, 13, &[0x48, 0x0F, 0xC7, 0x0E]), // cmpxchg16b [rsi]
-        ("SSE4.1", 1, ECX, 19, &[0x66, 0x0F, 0x38, 0x40, 0xC1]), // pmulld xmm0, xmm1
-        ("SSE4.2", 1, ECX, 20, &[0xF2, 0x0F, 0x38, 0xF1, 0xC1]), // crc32 eax, ecx
         ("MOVBE", 1, ECX, 22, &[0x0F, 0x38, 0xF0, 0x06]), // movbe eax, [rsi]
         ("AESNI", 1, ECX, 25, &[0x66, 0x0F, 0x38, 0xDC, 0xC1]), // aesenc xmm0, xmm1
         ("XSAVE", 1, ECX, 26, &[0x0F, 0x01, 0xD0]),      // xgetbv
-        ("AVX", 1, ECX, 28, &[0xC5, 0xF4, 0x58, 0xC2]),  // vaddps ymm0, ymm1, ymm2
+        ("AVX", 1, ECX, 28, &[0xC5, 0xFC, 0x53, 0xC1]),  // vrcpps ymm0, ymm1
         ("F16C", 1, ECX, 29, &[0xC4, 0xE2, 0x79, 0x13, 0xC1]), // vcvtph2ps xmm0, xmm1
         ("RDRAND", 1, ECX, 30, &[0x0F, 0xC7, 0xF0]),     // rdrand eax
         ("BMI1", 7, EBX, 3, &[0xC4, 0xE2, 0x70, 0xF2, 0xC2]), // andn eax, ecx, edx
@@ -265,6 +265,48 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
             assert_eq!(state, cpu, "{feature} on the {engine}");
         }
     }
+}
+
+/// SDM Vol. 1, 12.12: an application checks for SSE, SSE2, SSE3 and SSSE3 before
+/// SSE4.1, and for SSE, SSE2, SSSE3 and SSE4.1 before most of SSE4.2. Those are not
+/// complete, so the two bits stay clear although every instruction of both runs.
+/// Each has a fixture that the tests of `x86_integer.rs`,
+/// `x86_vector.rs` or `x86_float.rs` run in both engines.
+#[test]
+fn sse4_is_complete_but_unreported_while_its_prerequisites_are() {
+    let fixtures = [
+        include_str!("x86/integer.txt"),
+        include_str!("x86/vector.txt"),
+        include_str!("x86/float.txt"),
+    ]
+    .concat();
+    let has = |name: &str, memory: bool| {
+        fixtures.lines().any(|line| {
+            let text = line.split_once(" | ").unwrap().1;
+            text.split(' ').next() == Some(name) && text.contains(" ptr ") == memory
+        })
+    };
+    // Every instruction the SDM assigns to the features; POPCNT has its own bit,
+    // which is reported. MOVNTDQA has no register
+    // form; PEXTRW belongs to SSE4.1 only as a store.
+    let names = "blendpd blendps blendvpd blendvps dppd dpps extractps insertps mpsadbw packusdw \
+                 pblendvb pblendw pcmpeqq pextrb pextrd pextrq phminposuw pinsrb pinsrd pinsrq \
+                 pmaxsb pmaxsd pmaxud pmaxuw pminsb pminsd pminud pminuw pmovsxbw pmovsxbd \
+                 pmovsxbq pmovsxwd pmovsxwq pmovsxdq pmovzxbw pmovzxbd pmovzxbq pmovzxwd \
+                 pmovzxwq pmovzxdq pmuldq pmulld ptest roundpd roundps roundsd roundss \
+                 crc32 pcmpestri pcmpestrm pcmpgtq pcmpistri pcmpistrm";
+    for name in names.split_whitespace() {
+        assert!(has(name, false) && has(name, true), "{name}");
+    }
+    assert!(has("movntdqa", true) && has("pextrw", true));
+
+    let [_, _, ecx, edx] = cpuid(1, 0);
+    let prerequisites = [edx >> 25, edx >> 26, ecx, ecx >> 9].map(|bit| bit & 1);
+    assert_eq!(
+        (prerequisites, ecx >> 19 & 3),
+        ([0; 4], 0),
+        "SSE, SSE2, SSE3 and SSSE3 come before SSE4"
+    );
 }
 
 #[test]

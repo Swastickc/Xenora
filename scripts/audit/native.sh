@@ -41,7 +41,9 @@ for path in sorted(executables):
         raise SystemExit(f"Non-ARM64 build artifact: {path}")
     linkage = subprocess.check_output(["otool", "-L", path], encoding="utf-8")
     print(linkage, end="", flush=True)
-    if any(name in linkage.casefold() for name in ("vulkan", "moltenvk")):
+    # otool prints the artifact path before the dependency rows.
+    dependencies = linkage.partition("\n")[2].casefold()
+    if any(name in dependencies for name in ("vulkan", "moltenvk")):
         raise SystemExit(f"Unexpected graphics linkage: {path}")
 print(f"Checked {len(executables)} native executables and loadable dependencies.")
 PY

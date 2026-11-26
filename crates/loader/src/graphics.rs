@@ -16,6 +16,11 @@
 use crate::memory::{GuestMemory, MemoryError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const MAX_FENCES: usize = 16;
+const MAX_QUEUE_WAITS: usize = 8;
+const MAX_FENCE_WAIT: Duration = Duration::from_secs(1);
 
 /// Generation-checked opaque guest graphics handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,6 +109,12 @@ pub struct ExecutionOutcome {
 pub enum GraphicsError {
     InvalidDeviceHandle,
     InvalidQueueHandle,
+    InvalidFenceHandle,
+    FenceLimitExceeded,
+    FenceTimeout {
+        requested: u64,
+        completed: u64,
+    },
     InvalidAllocatorHandle,
     InvalidCommandListHandle,
     InvalidResourceHandle,
@@ -133,6 +144,17 @@ impl std::fmt::Display for GraphicsError {
         match self {
             Self::InvalidDeviceHandle => write!(f, "invalid or stale graphics device handle"),
             Self::InvalidQueueHandle => write!(f, "invalid or stale command queue handle"),
+            Self::InvalidFenceHandle => write!(f, "invalid or stale graphics fence handle"),
+            Self::FenceLimitExceeded => write!(f, "graphics fence or queue wait limit exceeded"),
+            Self::FenceTimeout {
+                requested,
+                completed,
+            } => {
+                write!(
+                    f,
+                    "graphics fence timed out waiting for {requested}; completed {completed}"
+                )
+            }
             Self::InvalidAllocatorHandle => write!(f, "invalid or stale command allocator handle"),
             Self::InvalidCommandListHandle => write!(f, "invalid or stale command list handle"),
             Self::InvalidResourceHandle => write!(f, "invalid or stale graphics resource handle"),
@@ -676,6 +698,38 @@ pub struct GraphicsCommandQueue {
     pub device: GraphicsHandle,
     pub list_type: CommandListType,
     pub submitted_lists: Vec<GraphicsHandle>,
+    fence_waits: Vec<(GraphicsHandle, u64)>,
+}
+
+/// A native fence operation. The adapter returns the completed value it
+/// observed. Queue signals and waits are encoded on the GPU. A host wait
+/// that reaches its deadline returns the last observed value.
+#[derive(Clone, Copy, Debug)]
+pub enum FenceOperation {
+    CompletedValue,
+    Signal(u64),
+    QueueWait { value: u64, timeout: Duration },
+    HostWait { value: u64, timeout: Duration },
+}
+
+pub type NativeFence = Box<dyn Fn(FenceOperation) -> Result<u64, GraphicsError> + Send + Sync>;
+type NativeFenceFactory = Box<dyn Fn(u64) -> Result<NativeFence, GraphicsError> + Send + Sync>;
+
+struct GraphicsFence {
+    device: GraphicsHandle,
+    // The software model executes serially, so a submitted signal has already
+    // completed. The native adapter reads its own shared event.
+    last_signal: u64,
+    native: Option<NativeFence>,
+}
+
+impl GraphicsFence {
+    fn completed_value(&self) -> Result<u64, GraphicsError> {
+        match &self.native {
+            Some(native) => native(FenceOperation::CompletedValue),
+            None => Ok(self.last_signal),
+        }
+    }
 }
 
 /// Custom backend renderer signature for testing or Metal dispatch.
@@ -704,6 +758,8 @@ pub struct GraphicsContext {
     next_id: u32,
     devices: HashMap<GraphicsHandle, bool>,
     queues: HashMap<GraphicsHandle, GraphicsCommandQueue>,
+    fences: HashMap<GraphicsHandle, GraphicsFence>,
+    native_fences: Option<NativeFenceFactory>,
     allocators: HashMap<GraphicsHandle, GraphicsCommandAllocator>,
     command_lists: HashMap<GraphicsHandle, GraphicsCommandList>,
     resources: HashMap<GraphicsHandle, GraphicsResource>,
@@ -730,6 +786,8 @@ impl GraphicsContext {
             next_id: 1,
             devices: HashMap::new(),
             queues: HashMap::new(),
+            fences: HashMap::new(),
+            native_fences: None,
             allocators: HashMap::new(),
             command_lists: HashMap::new(),
             resources: HashMap::new(),
@@ -819,9 +877,234 @@ impl GraphicsContext {
                 device,
                 list_type,
                 submitted_lists: Vec::new(),
+                fence_waits: Vec::new(),
             },
         );
         Ok(handle)
+    }
+
+    /// Install the shared-event factory for the configured native renderer.
+    /// A context cannot switch fence backends while it owns live fences.
+    pub fn set_native_fence_factory(
+        &mut self,
+        factory: impl Fn(u64) -> Result<NativeFence, GraphicsError> + Send + Sync + 'static,
+    ) -> Result<(), GraphicsError> {
+        if !self.fences.is_empty() {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.native_fences = Some(Box::new(factory));
+        Ok(())
+    }
+
+    /// Create a device-owned timeline fence at the supplied initial value.
+    pub fn create_fence(
+        &mut self,
+        device: GraphicsHandle,
+        initial_value: u64,
+    ) -> Result<GraphicsHandle, GraphicsError> {
+        if !self.devices.contains_key(&device) {
+            return Err(GraphicsError::InvalidDeviceHandle);
+        }
+        if self.fences.len() >= MAX_FENCES {
+            return Err(GraphicsError::FenceLimitExceeded);
+        }
+        // D3D12 uses UINT64_MAX to report device removal.
+        if initial_value == u64::MAX {
+            return Err(GraphicsError::Unsupported("reserved fence value"));
+        }
+        let native = match self.backend_id {
+            GraphicsBackendId::SoftwareReference => None,
+            GraphicsBackendId::MetalNative => {
+                let factory = self
+                    .native_fences
+                    .as_ref()
+                    .ok_or(GraphicsError::NativeMetalRequired)?;
+                Some(factory(initial_value)?)
+            }
+        };
+        let handle = self.allocate_handle();
+        self.fences.insert(
+            handle,
+            GraphicsFence {
+                device,
+                last_signal: initial_value,
+                native,
+            },
+        );
+        Ok(handle)
+    }
+
+    pub fn destroy_fence(&mut self, fence: GraphicsHandle) -> Result<(), GraphicsError> {
+        self.fence(fence)?;
+        if self
+            .queues
+            .values()
+            .any(|queue| queue.fence_waits.iter().any(|(handle, _)| *handle == fence))
+        {
+            return Err(GraphicsError::ResourceLifetimeViolation);
+        }
+        self.fences.remove(&fence);
+        Ok(())
+    }
+
+    pub fn fence_completed_value(&self, fence: GraphicsHandle) -> Result<u64, GraphicsError> {
+        self.fence(fence)?.completed_value()
+    }
+
+    /// Block the host for at most the caller's budget (up to one second).
+    /// Zero is a poll. Times beyond the bound are explicitly unsupported.
+    pub fn wait_for_fence(
+        &self,
+        fence: GraphicsHandle,
+        value: u64,
+        timeout: Duration,
+    ) -> Result<(), GraphicsError> {
+        let fence = self.fence(fence)?;
+        if timeout > MAX_FENCE_WAIT || value == u64::MAX {
+            return Err(GraphicsError::Unsupported("fence wait value or timeout"));
+        }
+        let completed = fence.completed_value()?;
+        if completed >= value || timeout.is_zero() {
+            return Self::check_fence_value(value, completed);
+        }
+        let reached = match &fence.native {
+            Some(native) => native(FenceOperation::HostWait { value, timeout })?,
+            None => {
+                // No other thread can submit work to this context during a
+                // host wait in the deterministic reference implementation.
+                std::thread::sleep(timeout);
+                completed
+            }
+        };
+        Self::check_fence_value(value, reached)
+    }
+
+    /// Record an ordered dependency and return without waiting on the host.
+    /// In this synchronous graphics path the next execute or signal applies
+    /// the dependency. A not-yet-submitted signal makes that operation
+    /// retryable; the queue retains its dependency in that case.
+    pub fn queue_wait(
+        &mut self,
+        queue: GraphicsHandle,
+        fence: GraphicsHandle,
+        value: u64,
+    ) -> Result<(), GraphicsError> {
+        self.check_queue_fence(queue, fence)?;
+        if value == u64::MAX {
+            return Err(GraphicsError::Unsupported("reserved fence value"));
+        }
+        let waits = &mut self.queues.get_mut(&queue).unwrap().fence_waits;
+        if let Some((_, wanted)) = waits.iter_mut().find(|(handle, _)| *handle == fence) {
+            *wanted = (*wanted).max(value);
+        } else {
+            if waits.len() >= MAX_QUEUE_WAITS {
+                return Err(GraphicsError::FenceLimitExceeded);
+            }
+            waits.push((fence, value));
+        }
+        Ok(())
+    }
+
+    /// Signal after earlier work on this queue. The existing render backend
+    /// returns only after its draw and readback complete.
+    pub fn queue_signal(
+        &mut self,
+        queue: GraphicsHandle,
+        fence: GraphicsHandle,
+        value: u64,
+    ) -> Result<(), GraphicsError> {
+        self.check_queue_fence(queue, fence)?;
+        let timeline = self.fence(fence)?;
+        if value == u64::MAX || value < timeline.last_signal {
+            return Err(GraphicsError::Unsupported(
+                "reserved or decreasing fence signal",
+            ));
+        }
+        self.apply_queue_waits(queue, self.backend_id)?;
+        let timeline = self.fences.get_mut(&fence).unwrap();
+        if let Some(native) = &timeline.native {
+            native(FenceOperation::Signal(value))?;
+        }
+        timeline.last_signal = value;
+        Ok(())
+    }
+
+    fn fence(&self, fence: GraphicsHandle) -> Result<&GraphicsFence, GraphicsError> {
+        self.fences
+            .get(&fence)
+            .ok_or(GraphicsError::InvalidFenceHandle)
+    }
+
+    fn check_queue_fence(
+        &self,
+        queue: GraphicsHandle,
+        fence: GraphicsHandle,
+    ) -> Result<(), GraphicsError> {
+        let queue = self
+            .queues
+            .get(&queue)
+            .ok_or(GraphicsError::InvalidQueueHandle)?;
+        let fence = self.fence(fence)?;
+        if queue.device != fence.device {
+            return Err(GraphicsError::Unsupported(
+                "fence belongs to another device",
+            ));
+        }
+        if fence.native.is_some() != (self.backend_id == GraphicsBackendId::MetalNative) {
+            return Err(GraphicsError::Unsupported(
+                "fence belongs to another backend",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_fence_value(value: u64, completed: u64) -> Result<(), GraphicsError> {
+        if completed < value {
+            return Err(GraphicsError::FenceTimeout {
+                requested: value,
+                completed,
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_queue_waits(
+        &mut self,
+        queue: GraphicsHandle,
+        backend: GraphicsBackendId,
+    ) -> Result<(), GraphicsError> {
+        let waits = &self
+            .queues
+            .get(&queue)
+            .ok_or(GraphicsError::InvalidQueueHandle)?
+            .fence_waits;
+        // Check all prerequisites before submitting any command. In
+        // particular, do not enqueue a Metal wait whose producer is missing.
+        for &(handle, value) in waits {
+            let fence = self.fence(handle)?;
+            if fence.native.is_some() != (backend == GraphicsBackendId::MetalNative) {
+                return Err(GraphicsError::Unsupported(
+                    "fence belongs to another backend",
+                ));
+            }
+            if fence.last_signal < value {
+                return Err(GraphicsError::FenceTimeout {
+                    requested: value,
+                    completed: fence.completed_value()?,
+                });
+            }
+        }
+        let started = Instant::now();
+        for &(handle, value) in waits {
+            let fence = self.fence(handle)?;
+            if let Some(native) = &fence.native {
+                let timeout = MAX_FENCE_WAIT.saturating_sub(started.elapsed());
+                let completed = native(FenceOperation::QueueWait { value, timeout })?;
+                Self::check_fence_value(value, completed)?;
+            }
+        }
+        self.queues.get_mut(&queue).unwrap().fence_waits.clear();
+        Ok(())
     }
 
     /// Create command allocator (`ID3D12Device::CreateCommandAllocator`).
@@ -1460,12 +1743,13 @@ impl GraphicsContext {
 
     /// Destroy a guest device (`ID3D12Device` release). The device must have
     /// no live child object: command queues, command allocators, command
-    /// lists, resources, descriptor heaps or root signatures.
+    /// lists, resources, descriptor heaps, root signatures or fences.
     pub fn destroy_device(&mut self, device: GraphicsHandle) -> Result<(), GraphicsError> {
         if !self.devices.contains_key(&device) {
             return Err(GraphicsError::InvalidDeviceHandle);
         }
         let has_children = self.queues.values().any(|queue| queue.device == device)
+            || self.fences.values().any(|fence| fence.device == device)
             || self
                 .allocators
                 .values()
@@ -1647,10 +1931,9 @@ impl GraphicsContext {
             Some(arc) => Some(arc.as_ref()),
             None => None,
         };
-        let cmd_queue = self
-            .queues
-            .get_mut(&queue)
-            .ok_or(GraphicsError::InvalidQueueHandle)?;
+        if !self.queues.contains_key(&queue) {
+            return Err(GraphicsError::InvalidQueueHandle);
+        }
         let cmd_list = self
             .command_lists
             .get(&list)
@@ -1663,7 +1946,13 @@ impl GraphicsContext {
             return Err(GraphicsError::EmptyCommandList);
         }
 
-        cmd_queue.submitted_lists.push(list);
+        self.apply_queue_waits(queue, backend_id)?;
+        let cmd_list = self.command_lists.get(&list).unwrap();
+        self.queues
+            .get_mut(&queue)
+            .unwrap()
+            .submitted_lists
+            .push(list);
 
         // State machine parsing recorded commands
         let mut viewport = (4usize, 3usize);

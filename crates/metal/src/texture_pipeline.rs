@@ -12,8 +12,8 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder,
-    MTLCommandQueue, MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLResourceOptions, MTLSize,
-    MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
+    MTLCommandQueue, MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLResource,
+    MTLResourceOptions, MTLSize, MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use xenora_texture::{SamplerError, TextureMetadata};
 
@@ -101,8 +101,7 @@ impl Rgba8TextureDesc {
 pub struct MetalRgba8Texture {
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
     desc: Rgba8TextureDesc,
-    /// Shared storage, which `replaceRegion` may write. Private textures are
-    /// filled only through `upload_staged`.
+    /// Whether `replaceRegion` can write the texture directly.
     cpu_writable: bool,
 }
 
@@ -112,6 +111,7 @@ impl MetalRgba8Texture {
         device: &ProtocolObject<dyn MTLDevice>,
         desc: Rgba8TextureDesc,
     ) -> Result<Self, MetalError> {
+        let desc = Rgba8TextureDesc::new(desc.width, desc.height, desc.mips)?;
         Self::allocate_with_storage(device, desc, MTLStorageMode::Shared)
     }
 
@@ -169,7 +169,7 @@ impl MetalRgba8Texture {
         if !self.cpu_writable {
             return Err(MetalError::new(
                 "texture storage",
-                "a Private-storage texture is filled only by upload_staged",
+                "Private-storage textures require staged uploads",
             ));
         }
         validate_mip(&self.desc, mip)?;
@@ -234,13 +234,58 @@ impl MetalRgba8Texture {
         budget: StagingBudget,
     ) -> Result<(Self, StagedUploadReport), MetalError> {
         let plan = plan_staged_upload(&desc, mips, budget)?;
-        let staging_len = plan.iter().map(|s| s.staging_bytes).max().unwrap_or(0);
+        Self::check_staging_device(device, queue)?;
         let texture = Self::allocate_with_storage(device, desc, MTLStorageMode::Private)?;
+        let report = texture.execute_staged(device, queue, mips, &plan)?;
+        Ok((texture, report))
+    }
+
+    /// Replace only the supplied mip levels in an existing RGBA8 texture.
+    ///
+    /// Distinct input levels are validated together before any write. Copies
+    /// may share a blit and use the same staging buffer across submissions.
+    /// This returns after the last command completes. Omitted levels keep
+    /// their contents. If Metal fails after an earlier command completed, its
+    /// writes are retained. The caller must order any accesses through aliased
+    /// handles or other queues around this update.
+    pub fn update_staged(
+        &mut self,
+        queue: &ProtocolObject<dyn MTLCommandQueue>,
+        mips: &[Rgba8MipLevel<'_>],
+        budget: StagingBudget,
+    ) -> Result<StagedUploadReport, MetalError> {
+        let plan = plan_staged(&self.desc, mips, budget, false)?;
+        let device = self.texture.device();
+        Self::check_staging_device(&device, queue)?;
+        self.execute_staged(&device, queue, mips, &plan)
+    }
+
+    fn check_staging_device(
+        device: &ProtocolObject<dyn MTLDevice>,
+        queue: &ProtocolObject<dyn MTLCommandQueue>,
+    ) -> Result<(), MetalError> {
+        if !std::ptr::eq(device, &*queue.device()) {
+            return Err(MetalError::new(
+                "staged upload",
+                "the queue uses a different Metal device",
+            ));
+        }
+        Ok(())
+    }
+
+    fn execute_staged(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        queue: &ProtocolObject<dyn MTLCommandQueue>,
+        mips: &[Rgba8MipLevel<'_>],
+        plan: &[StagedSubmission],
+    ) -> Result<StagedUploadReport, MetalError> {
+        let staging_len = plan.iter().map(|s| s.staging_bytes).max().unwrap_or(0);
         let staging = device
             .newBufferWithLength_options(staging_len, MTLResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::new("newBufferWithLength", "staging allocation failed"))?;
         let mut copied = 0;
-        for submission in &plan {
+        for submission in plan {
             for copy in &submission.copies {
                 let mip = mips
                     .iter()
@@ -260,14 +305,13 @@ impl MetalRgba8Texture {
                 }
                 copied += copy.rows * tight;
             }
-            autoreleasepool(|_| texture.encode_staged(queue, &staging, submission))?;
+            autoreleasepool(|_| self.encode_staged(queue, &staging, submission))?;
         }
-        let report = StagedUploadReport {
+        Ok(StagedUploadReport {
             submissions: plan.len(),
             peak_staging_bytes: staging_len,
             bytes_copied: copied,
-        };
-        Ok((texture, report))
+        })
     }
 
     fn encode_staged(
@@ -440,6 +484,19 @@ pub fn plan_staged_upload(
     mips: &[Rgba8MipLevel<'_>],
     budget: StagingBudget,
 ) -> Result<Vec<StagedSubmission>, MetalError> {
+    let desc = Rgba8TextureDesc::new(desc.width, desc.height, desc.mips)?;
+    plan_staged(&desc, mips, budget, true)
+}
+
+fn plan_staged(
+    desc: &Rgba8TextureDesc,
+    mips: &[Rgba8MipLevel<'_>],
+    budget: StagingBudget,
+    fill_all: bool,
+) -> Result<Vec<StagedSubmission>, MetalError> {
+    if !fill_all && mips.is_empty() {
+        return Err(MetalError::new("staged upload", "no mip levels to update"));
+    }
     let mut by_level: Vec<Option<&Rgba8MipLevel<'_>>> = vec![None; desc.mips as usize];
     for mip in mips {
         validate_mip(desc, mip)?;
@@ -458,9 +515,15 @@ pub fn plan_staged_upload(
         staging_bytes: 0,
     };
     for (level, mip) in by_level.iter().enumerate() {
-        let mip = mip.ok_or_else(|| {
-            MetalError::new("staged upload", format!("mip level {level} is missing"))
-        })?;
+        let Some(mip) = mip else {
+            if fill_all {
+                return Err(MetalError::new(
+                    "staged upload",
+                    format!("mip level {level} is missing"),
+                ));
+            }
+            continue;
+        };
         let pitch = mip.width * RGBA8_TEXEL_BYTES;
         if pitch > budget.max_bytes {
             return Err(MetalError::new(

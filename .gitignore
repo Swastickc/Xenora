@@ -29,15 +29,17 @@
 .cursor/
 .gemini/
 
+# Coding-agent session transcripts, which must not be committed at the root
+/session-*.md
+
 # Local gate evidence and intermediate fixture objects
 /artifacts/
 /tests/validation/target/
 
 __pycache__/
 *.pyc
-/diagnostics/probe/
-/diagnostics/gta6-candidate-*/
-/diagnostics/gta6-check/
+# Local probe reports and other diagnostics
+/diagnostics/
 
 # Native application build output
 /app/.build/

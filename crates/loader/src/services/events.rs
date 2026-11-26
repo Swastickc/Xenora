@@ -4,7 +4,7 @@
 //! resolve at once blocks the guest thread if a scheduler is attached, and is
 //! unsupported otherwise.
 
-use super::threads::PendingWait;
+use super::threads::{Pending, PendingWait};
 use super::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOACCESS,
     ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, GuestObject, KERNEL32, ServicesState,
@@ -19,8 +19,8 @@ const EVENT_MODIFY_STATE: u32 = 0x0002;
 pub(super) const SYNCHRONIZE: u32 = 0x0010_0000;
 const EVENT_ALL_ACCESS: u32 = 0x001f_0003;
 const WAIT_OBJECT_0: u64 = 0;
-const INFINITE: u32 = u32::MAX;
-const TICKS_PER_MILLI: u64 = 10_000;
+pub(super) const INFINITE: u32 = u32::MAX;
+pub(super) const TICKS_PER_MILLI: u64 = 10_000;
 const WAIT_TIMEOUT: u64 = 258;
 const WAIT_FAILED: u64 = u32::MAX as u64;
 const WAIT_ABANDONED_0: u64 = 0x80;
@@ -180,14 +180,29 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         });
     }
 
-    for symbol in ["CreateSemaphoreA", "CreateSemaphoreW"] {
+    for (symbol, extended) in [
+        ("CreateSemaphoreA", false),
+        ("CreateSemaphoreW", false),
+        ("CreateSemaphoreExA", true),
+        ("CreateSemaphoreExW", true),
+    ] {
         let state = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, mem| {
             let attributes = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
             let count = args.get(1, mem).map_err(ExitReason::MemoryFault)? as i32;
             let maximum = args.get(2, mem).map_err(ExitReason::MemoryFault)? as i32;
             let name = args.get(3, mem).map_err(ExitReason::MemoryFault)?;
-            if attributes != 0 || name != 0 {
+            let access = if extended {
+                let flags = args.get(4, mem).map_err(ExitReason::MemoryFault)? as u32;
+                let access = args.get(5, mem).map_err(ExitReason::MemoryFault)? as u32;
+                if flags != 0 {
+                    return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+                }
+                access
+            } else {
+                SEMAPHORE_ALL_ACCESS
+            };
+            if attributes != 0 || name != 0 || access & !SEMAPHORE_ALL_ACCESS != 0 {
                 return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
             if maximum <= 0 || count < 0 || count > maximum {
@@ -197,7 +212,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 &state,
                 cpu.gs_base,
                 Waitable::Semaphore { count, maximum },
-                SEMAPHORE_ALL_ACCESS,
+                access,
             )
         });
     }
@@ -357,6 +372,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.alias(SYNCH_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
+    // Microsoft’s API-set catalog lists the ANSI entry separately and the
+    // wide entry in three revisions of the core synchronization API set.
+    for (module, symbol) in [
+        (
+            "api-ms-win-core-synch-ansi-l1-1-0.dll",
+            "CreateSemaphoreExA",
+        ),
+        (SYNCH_API, "CreateSemaphoreExW"),
+        ("api-ms-win-core-synch-l1-2-0.dll", "CreateSemaphoreExW"),
+        ("api-ms-win-core-synch-l1-2-1.dll", "CreateSemaphoreExW"),
+    ] {
+        registry.alias(module, KERNEL32, symbol);
+    }
+    registry.set_status(KERNEL32, "CreateSemaphoreExA", ServiceStatus::Partial);
+    registry.set_status(KERNEL32, "CreateSemaphoreExW", ServiceStatus::Partial);
     for symbol in ["WaitForMultipleObjects", "WaitForMultipleObjectsEx"] {
         registry.alias("api-ms-win-core-synch-l1-2-1.dll", KERNEL32, symbol);
     }
@@ -411,17 +441,11 @@ fn wait_for_objects(
     }
     // Keep the objects themselves: closing a handle or changing the guest's
     // handle array does not change a wait already in progress.
-    let deadline = (timeout != INFINITE).then(|| {
-        state
-            .clock
-            .performance_count()
-            .saturating_add(u64::from(timeout) * TICKS_PER_MILLI)
-    });
-    let pending = PendingWait {
+    let pending = Pending::Objects(PendingWait {
         objects: waitables.into_iter().map(Arc::clone).collect(),
         all,
-        deadline,
-    };
+        deadline: state.deadline(timeout),
+    });
     state
         .threads
         .lock()
@@ -436,7 +460,9 @@ fn wait_for_objects(
 /// passed was signaled too late and is left alone.
 fn resume_wait(state: &ServicesState, teb: u64) -> Option<Result<u64, ExitReason>> {
     let mut table = state.threads.lock().expect("guest thread table");
-    let pending = table.waits.get(&teb)?;
+    let Some(Pending::Objects(pending)) = table.waits.get(&teb) else {
+        return None;
+    };
     let expired = pending
         .deadline
         .is_some_and(|deadline| state.clock.performance_count() >= deadline);
@@ -502,7 +528,10 @@ impl ServicesState {
             _ => None,
         });
         // A waiter keeps an object alive after its last handle is closed.
-        let waiting = table.waits.values().flat_map(|wait| &wait.objects);
+        let waiting = table.waits.values().flat_map(|pending| match pending {
+            Pending::Objects(wait) => wait.objects.as_slice(),
+            _ => &[],
+        });
         for object in handles.chain(waiting) {
             if let Waitable::Mutex {
                 owner,

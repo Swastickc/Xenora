@@ -78,9 +78,110 @@ pub fn run_synthetic_startup(
 pub fn run_synthetic_startup_with_observer(
     bytes: &[u8],
     layout: StartupLayout,
+    imports: ImportRegistry,
+    entry_budget: usize,
+    observe: impl FnMut(StartupEvent),
+) -> Result<StartupResult, Box<dyn std::error::Error>> {
+    run_startup_with(
+        bytes,
+        layout,
+        imports,
+        entry_budget,
+        observe,
+        #[cfg(test)]
+        |_| {},
+        DbtEngine::run,
+    )
+}
+
+/// Run a trusted synthetic fixture with the entry point driven by the
+/// deterministic cooperative scheduler.
+///
+/// The scheduler runs one guest thread at a time, so a guest that creates a
+/// thread with `CreateThread` runs to completion with every thread taking
+/// turns. The entry point and the threads it creates share one instruction
+/// budget.
+///
+/// The state must be the one the import registry was built with: the
+/// scheduler finds the guest's threads through it.
+pub fn run_synthetic_startup_scheduled(
+    bytes: &[u8],
+    layout: StartupLayout,
+    imports: ImportRegistry,
+    state: std::sync::Arc<crate::services::ServicesState>,
+    entry_budget: usize,
+    quantum: usize,
+    observe: impl FnMut(StartupEvent),
+) -> Result<StartupResult, Box<dyn std::error::Error>> {
+    run_startup_with(
+        bytes,
+        layout,
+        imports,
+        entry_budget,
+        observe,
+        #[cfg(test)]
+        |_| {},
+        move |engine, entry_cpu, memory, budget| match crate::scheduler::Scheduler::new(
+            std::sync::Arc::clone(&state),
+            quantum,
+        )
+        .run(engine, memory, entry_cpu, budget)
+        {
+            Ok(report) => ExecutionResult {
+                instructions_executed: report.instructions,
+                final_state: report.main,
+                exit_reason: scheduled_exit_reason(report.outcome),
+            },
+            Err(reason) => ExecutionResult {
+                instructions_executed: 0,
+                final_state: entry_cpu.clone(),
+                exit_reason: reason,
+            },
+        },
+    )
+}
+
+/// The guest's exit reason from the scheduler's report of how the run ended.
+fn scheduled_exit_reason(outcome: crate::scheduler::Outcome) -> ExitReason {
+    use crate::scheduler::Outcome;
+    match outcome {
+        Outcome::Halted => ExitReason::Halt,
+        Outcome::AllThreadsExited => ExitReason::Halt,
+        Outcome::BudgetExhausted => ExitReason::StepLimitExceeded,
+        Outcome::Deadlock { .. } => ExitReason::GuestBlocked,
+        Outcome::Fault { reason, .. } => reason,
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum StartupStage {
+    ValidateLayout,
+    Parse,
+    Map,
+    Relocate,
+    RegisterExceptions,
+    BindImports,
+    SetupTls,
+    SetupExecution,
+    RunTls,
+    RunEntry,
+}
+
+/// The shared startup, with the entry point left to the caller to run.
+fn run_startup_with(
+    bytes: &[u8],
+    layout: StartupLayout,
     mut imports: ImportRegistry,
     entry_budget: usize,
     mut observe: impl FnMut(StartupEvent),
+    #[cfg(test)] mut stage_finished: impl FnMut(StartupStage),
+    run_entry: impl FnOnce(
+        &mut DbtEngine,
+        &mut CpuState,
+        &mut crate::memory::GuestMemory,
+        usize,
+    ) -> ExecutionResult,
 ) -> Result<StartupResult, Box<dyn std::error::Error>> {
     if !layout.stack_top.is_multiple_of(16) {
         return Err(std::io::Error::new(
@@ -91,36 +192,61 @@ pub fn run_synthetic_startup_with_observer(
     }
     // Reject an impossible layout before parsing or mapping anything.
     let (stack_base, teb_base) = layout_regions(&layout)?;
+    #[cfg(test)]
+    stage_finished(StartupStage::ValidateLayout);
     let pe = ParsedPe::parse(bytes)?;
+    #[cfg(test)]
+    stage_finished(StartupStage::Parse);
     observe(StartupEvent::Parsed {
         sections: pe.sections.len(),
         entry_rva: pe.entry_point_rva,
     });
     let mut image = pe.load_at_base(bytes, layout.image_base)?;
+    let pe = &image.pe;
     let image_base_field = image.image_base_field;
     let memory = &mut image.memory;
     memory
         .fetch_instruction_byte(image.entry_point)
         .map_err(|_| PeError::InvalidEntryPoint)?;
+    #[cfg(test)]
+    stage_finished(StartupStage::Map);
     observe(StartupEvent::Mapped {
         entry_va: image.entry_point,
     });
 
-    let relocations = apply_relocations(&pe, bytes, layout.image_base, memory)?;
+    let relocations = apply_relocations(pe, bytes, layout.image_base, memory)?;
     // The mapped optional header names the base the image is loaded at. This
     // is written after the relocations so that an entry aimed at the field
     // itself cannot leave it holding anything else.
     memory
         .write_u64_bypass(image_base_field, layout.image_base)
         .map_err(PeError::SectionMappingError)?;
+    #[cfg(test)]
+    stage_finished(StartupStage::Relocate);
     observe(StartupEvent::Relocated {
         applied_dir64: relocations.applied_dir64,
     });
-    let bound_imports = imports.bind_imports(&pe, bytes, layout.image_base, memory)?;
+    memory.main_image = Some(crate::memory::MainImage {
+        base: layout.image_base,
+        size: pe.size_of_image,
+        entry_point: image.entry_point,
+    });
+    crate::exceptions::register_exception_directory(
+        bytes,
+        layout.image_base,
+        pe.size_of_image,
+        memory,
+    )
+    .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, why))?;
+    #[cfg(test)]
+    stage_finished(StartupStage::RegisterExceptions);
+    let bound_imports = imports.bind_imports(pe, bytes, layout.image_base, memory)?;
+    #[cfg(test)]
+    stage_finished(StartupStage::BindImports);
     observe(StartupEvent::ImportsBound {
         count: bound_imports,
     });
-    let tls = parse_tls_directory(bytes, &pe)?;
+    let tls = parse_tls_directory(bytes, pe)?;
     if let Some(tls) = &tls {
         setup_tls(
             tls,
@@ -131,6 +257,8 @@ pub fn run_synthetic_startup_with_observer(
         )?;
     }
 
+    #[cfg(test)]
+    stage_finished(StartupStage::SetupTls);
     memory.map_region(stack_base, STACK_SIZE, MemoryPermissions::READ_WRITE)?;
     // Keep guest code and data out of the page that holds the return
     // addresses the engine intercepts. An image or layout that already covers
@@ -146,6 +274,8 @@ pub fn run_synthetic_startup_with_observer(
     let mut engine = DbtEngine::new(JIT_CAPACITY)?;
     engine.set_import_registry(imports);
 
+    #[cfg(test)]
+    stage_finished(StartupStage::SetupExecution);
     let mut tls_cpu = CpuState::new(image.entry_point, layout.stack_top);
     tls_cpu.gs_base = teb_base;
     let mut tls_callbacks = 0;
@@ -174,6 +304,8 @@ pub fn run_synthetic_startup_with_observer(
         }
     }
 
+    #[cfg(test)]
+    stage_finished(StartupStage::RunTls);
     observe(StartupEvent::TlsCompleted {
         callbacks: tls_callbacks,
         native_steps: engine.metrics.instructions_executed,
@@ -204,7 +336,9 @@ pub fn run_synthetic_startup_with_observer(
     memory.write_u64_bypass(layout.stack_top - 40, crate::imports::ENTRY_RETURN)?;
     let mut entry_cpu = CpuState::new(image.entry_point, layout.stack_top - 40);
     entry_cpu.gs_base = teb_base;
-    let execution = engine.run(&mut entry_cpu, memory, entry_budget);
+    let execution = run_entry(&mut engine, &mut entry_cpu, memory, entry_budget);
+    #[cfg(test)]
+    stage_finished(StartupStage::RunEntry);
     Ok(StartupResult {
         image,
         relocations,
@@ -337,5 +471,130 @@ mod tests {
         assert_eq!(memory.read_u64(teb + 0x30), Ok(teb));
         assert_eq!(memory.read_u64(teb + 0x58), Ok(0x3_0000_0000));
         assert!(memory.read_u8(teb + TEB_SIZE as u64).is_err());
+    }
+
+    #[test]
+    #[ignore = "manual CPU startup profile; run in release mode on an idle host"]
+    fn synthetic_startup_profile() {
+        const TICKET_ADDRESS: u64 = 0x1_5000_3000;
+        profile_startup(
+            "runtime-services",
+            include_bytes!("../../../fixtures/pe/runtime-services.exe"),
+            0x1_5000_0000,
+            |imports| {
+                imports.register("xenora.dll", "fixture_draw", |args, _, memory| {
+                    let ticket_address = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
+                    assert_eq!(ticket_address, TICKET_ADDRESS);
+                    assert_eq!(memory.read_u64(ticket_address), Ok(23));
+                    Ok(0x42)
+                });
+            },
+            |result| {
+                assert_eq!(result.bound_imports, 3);
+                assert_eq!(result.tls_callbacks, 1);
+                assert_eq!(result.relocations.applied_dir64, 4);
+                assert_eq!(result.execution.final_state.get(crate::Register::Rax), 0x42);
+            },
+        );
+        // Run the original two-section fixture at its preferred base. Its
+        // CPU-only submission service ends the frame loop after three frames.
+        profile_startup(
+            "frame-loop",
+            include_bytes!("../../../fixtures/pe/frame-loop.exe"),
+            0x1_4000_0000,
+            |imports| {
+                imports.register("xenora.dll", "frame_submit", |args, _, _| {
+                    assert!(args.rcx <= 2);
+                    Ok(u64::from(args.rcx < 2))
+                });
+            },
+            |result| {
+                assert_eq!(result.bound_imports, 1);
+                assert_eq!(result.tls_callbacks, 0);
+                assert_eq!(result.relocations.applied_dir64, 0);
+                assert_eq!(result.execution.final_state.get(crate::Register::Rbx), 3);
+                assert_eq!(result.execution.final_state.get(crate::Register::Rax), 0);
+            },
+        );
+    }
+
+    fn profile_startup(
+        fixture: &str,
+        bytes: &[u8],
+        image_base: u64,
+        register_fixture: impl Fn(&mut ImportRegistry),
+        check: impl Fn(&StartupResult),
+    ) {
+        use crate::services::{ServicesState, SystemClock, register_standard_services};
+        use std::{hint::black_box, sync::Arc, time::Instant};
+
+        const WARMUP: usize = 5;
+        const SAMPLES: usize = 31;
+        const BATCH: usize = 64;
+        const STAGES: [&str; 10] = [
+            "validate_layout",
+            "parse",
+            "map",
+            "relocate",
+            "register_exceptions",
+            "bind_imports",
+            "setup_tls",
+            "setup_execution",
+            "run_tls",
+            "run_entry",
+        ];
+        let mut measurements: [Vec<f64>; STAGES.len()] =
+            std::array::from_fn(|_| Vec::with_capacity(SAMPLES));
+        for sample in 0..WARMUP + SAMPLES {
+            let mut totals = [0.0; STAGES.len()];
+            for _ in 0..BATCH {
+                let mut imports = ImportRegistry::new();
+                register_standard_services(
+                    &mut imports,
+                    Arc::new(ServicesState::new(Arc::new(SystemClock))),
+                );
+                register_fixture(&mut imports);
+                let mut previous = Instant::now();
+                let result = run_startup_with(
+                    black_box(bytes),
+                    StartupLayout {
+                        image_base,
+                        stack_top: 0x2_0001_0000,
+                        tls_base: 0x3_0000_0000,
+                    },
+                    imports,
+                    1_000,
+                    |_| {},
+                    |stage| {
+                        let now = Instant::now();
+                        totals[stage as usize] += (now - previous).as_nanos() as f64;
+                        previous = now;
+                    },
+                    DbtEngine::run,
+                )
+                .unwrap_or_else(|error| panic!("{fixture} synthetic startup: {error}"));
+                check(&result);
+                assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+                black_box(result);
+            }
+            if sample >= WARMUP {
+                for (measurements, total) in measurements.iter_mut().zip(totals) {
+                    measurements.push(total / BATCH as f64);
+                }
+            }
+        }
+        for (stage, measurements) in STAGES.into_iter().zip(measurements.iter_mut()) {
+            measurements.sort_by(f64::total_cmp);
+            let mean = measurements.iter().sum::<f64>() / SAMPLES as f64;
+            let variance = measurements
+                .iter()
+                .map(|sample| (sample - mean).powi(2))
+                .sum::<f64>()
+                / (SAMPLES - 1) as f64;
+            println!(
+                "{fixture}/{stage}: n={SAMPLES} batch={BATCH} median_ns={:.1} sample_variance_ns2={variance:.1}",
+                measurements[SAMPLES / 2],
+            );
+        }
     }
 }

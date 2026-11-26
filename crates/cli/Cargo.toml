@@ -1,5 +1,6 @@
 [package]
 name = "xenora"
+default-run = "xenora"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,3 +17,4 @@ xenora-ref = { path = "../ref" }
 xenora-shader = { path = "../shader" }
 xenora-loader = { path = "../loader" }
 xenora-import-gen = { path = "../import-gen" }
+sha2 = "0.10"

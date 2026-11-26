@@ -2,7 +2,8 @@
 //
 // Native shell over the versioned C interface. "Run trusted fixture" executes the
 // bundled trusted PE fixture (x86-64 translated to ARM64; its draw request is rendered
-// by native Metal) and shows the verified read-back frame. No other executable can run.
+// by native Metal) and shows the verified read-back frame. Any other executable runs
+// through the bundled `xenora run` worker (ProgramRun.swift).
 
 import AppKit
 import AVFoundation
@@ -110,6 +111,9 @@ struct TexturedFrame {
 
 /// The frame and audio status produced by running the audio/VFS fixture (Gate 6, #284).
 struct AudioVfsFrame {
+    static let expectedSamples: UInt32 = 256
+    static let expectedPCMBytes = Int(expectedSamples) * 2
+
     let status: Int32
     let width: Int
     let height: Int
@@ -117,12 +121,20 @@ struct AudioVfsFrame {
     let totalAudioBytes: UInt64
     let rgba: [UInt8]
     let pcm: [UInt8]
+    let audioCaptureError: String?
 
-    static func run(captureAudio: Bool = false) -> AudioVfsFrame {
+    var previewPCM: [UInt8]? {
+        guard status == XENORA_OK, audioCaptureError == nil, pcm.count == Self.expectedPCMBytes else { return nil }
+        return pcm
+    }
+
+    static func run() -> AudioVfsFrame {
         var session: xenora_session = 0
         var status = xenora_session_create(XENORA_ABI_VERSION, &session)
         guard status == XENORA_OK else {
-            return AudioVfsFrame(status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0, rgba: [], pcm: [])
+            return AudioVfsFrame(
+                status: status, width: 0, height: 0, samples: 0, totalAudioBytes: 0,
+                rgba: [], pcm: [], audioCaptureError: nil)
         }
         defer { _ = xenora_session_destroy(session) }
         var rgba = [UInt8](repeating: 0, count: 16)
@@ -136,16 +148,28 @@ struct AudioVfsFrame {
         var queued: UInt32 = 0
         var underruns: UInt32 = 0
         var total: UInt64 = 0
-        _ = xenora_session_audio_status(session, &queued, &underruns, &total)
         var pcm: [UInt8] = []
-        if captureAudio && status == XENORA_OK && queued > 0 && queued <= 256 * 1024 {
-            pcm = [UInt8](repeating: 0, count: Int(queued))
-            var read: UInt64 = 0
-            let readStatus = pcm.withUnsafeMutableBufferPointer { buffer in
-                xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
-            }
-            if readStatus != XENORA_OK || read != UInt64(queued) {
-                pcm.removeAll()
+        var audioCaptureError: String?
+        if status == XENORA_OK {
+            let audioStatus = xenora_session_audio_status(session, &queued, &underruns, &total)
+            if audioStatus != XENORA_OK {
+                audioCaptureError = "Could not read the fixture audio status (status \(audioStatus))."
+            } else if samples != expectedSamples || queued != UInt32(expectedPCMBytes)
+                        || total != UInt64(expectedPCMBytes) || underruns != 0 {
+                audioCaptureError = "The fixture returned an unexpected audio length or an underrun."
+            } else {
+                var bytes = [UInt8](repeating: 0, count: expectedPCMBytes)
+                var read: UInt64 = 0
+                let readStatus = bytes.withUnsafeMutableBufferPointer { buffer in
+                    xenora_session_audio_read(session, buffer.baseAddress, UInt64(buffer.count), &read)
+                }
+                if readStatus != XENORA_OK {
+                    audioCaptureError = "Could not capture fixture audio (status \(readStatus))."
+                } else if read != UInt64(expectedPCMBytes) {
+                    audioCaptureError = "The fixture audio sample was incomplete."
+                } else {
+                    pcm = bytes
+                }
             }
         }
         return AudioVfsFrame(
@@ -155,7 +179,8 @@ struct AudioVfsFrame {
             samples: samples,
             totalAudioBytes: total,
             rgba: status == XENORA_OK ? rgba : [],
-            pcm: pcm
+            pcm: pcm,
+            audioCaptureError: audioCaptureError
         )
     }
 
@@ -174,7 +199,7 @@ struct AudioVfsFrame {
     }
 }
 
-private enum FixturePlaybackError: Error {
+private enum FixturePlaybackError: LocalizedError {
     case invalidPCM
     case noDefaultOutput(OSStatus)
     case deviceDiscovery(OSStatus)
@@ -184,7 +209,41 @@ private enum FixturePlaybackError: Error {
     case unexpectedOutput(AudioDeviceID)
     case queueFailure(Int32)
     case queueShortfall(UInt64)
+    case interrupted
     case timedOut
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPCM:
+            "The fixture audio sample is invalid."
+        case .noDefaultOutput(let status):
+            "No default audio output is available (status \(status))."
+        case .deviceDiscovery(let status):
+            "Could not list audio outputs (status \(status))."
+        case .unavailableOutput(let device):
+            "Audio output \(device) is unavailable."
+        case .outputUnitUnavailable:
+            "The audio engine has no output unit."
+        case .outputRouting(let status):
+            "Could not route audio to the output device (status \(status))."
+        case .unexpectedOutput(let device):
+            "The audio engine reported unexpected output \(device)."
+        case .queueFailure(let status):
+            "The fixture audio queue failed (status \(status))."
+        case .queueShortfall(let supplied):
+            "The fixture audio queue returned only \(supplied) bytes."
+        case .interrupted:
+            "Audio output stopped before the preview completed."
+        case .timedOut:
+            "Audio playback did not complete before the deadline."
+        }
+    }
+}
+
+private enum FixturePlaybackMode {
+    case sample
+    case preview
+    case stream
 }
 
 private struct FixturePlayback {
@@ -251,20 +310,22 @@ private func audioOutputDevices() throws -> [AudioDeviceID] {
 }
 
 private func playFixturePCM(
-    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, streamingFixture: Bool = false
+    _ pcm: [UInt8], requestedOutput: AudioDeviceID? = nil, mode: FixturePlaybackMode
 ) throws -> FixturePlayback {
     // The embedded audio/VFS fixture submits mono 48 kHz S16LE frames.
-    guard !pcm.isEmpty, pcm.count.isMultiple(of: 2),
+    guard pcm.count == AudioVfsFrame.expectedPCMBytes,
           let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) else {
         throw FixturePlaybackError.invalidPCM
     }
     let sourceFrames = pcm.count / 2
-    let frames = sourceFrames * (streamingFixture ? 32 : 1)
-    let framesPerBuffer = streamingFixture ? 1024 : 128
+    // The single sample block is shorter than six milliseconds. Repeat it
+    // for a short preview at a fixed, low player gain.
+    let frames = sourceFrames * (mode == .sample ? 1 : 32)
+    let framesPerBuffer = mode == .sample ? 128 : 1024
     let bufferWindow = 3
     var streamSession: xenora_session = 0
     let producer = DispatchQueue(label: "xenora.fixture.pcm")
-    if streamingFixture {
+    if mode == .stream {
         let createStatus = xenora_session_create(XENORA_ABI_VERSION, &streamSession)
         guard createStatus == XENORA_OK else { throw FixturePlaybackError.queueFailure(createStatus) }
     }
@@ -294,6 +355,9 @@ private func playFixturePCM(
         guard status == noErr else { throw FixturePlaybackError.outputRouting(status) }
     }
     let player = AVAudioPlayerNode()
+    if mode == .preview {
+        player.volume = 0.15
+    }
     let played = DispatchSemaphore(value: 0)
     engine.attach(player)
     engine.connect(player, to: engine.mainMixerNode, format: format)
@@ -321,7 +385,7 @@ private func playFixturePCM(
         let firstByte = first * 2
         let byteCount = count * 2
         if session == 0 {
-            return Array(pcm[firstByte..<(firstByte + byteCount)])
+            return (0..<byteCount).map { pcm[(firstByte + $0) % pcm.count] }
         }
         let submitted = DispatchSemaphore(value: 0)
         producer.async {
@@ -377,6 +441,10 @@ private func playFixturePCM(
         guard played.wait(timeout: deadline) == .success else {
             throw FixturePlaybackError.timedOut
         }
+        // A player stop can invoke pending completion handlers too.
+        if mode == .preview && (!engine.isRunning || !player.isPlaying) {
+            throw FixturePlaybackError.interrupted
+        }
         completedBuffers += 1
         if nextFrame < frames {
             try scheduleNextBuffer()
@@ -409,14 +477,23 @@ final class FrameModel: ObservableObject {
     @Published var running = false
     @Published var texturedFrame: TexturedFrame?
     @Published var runningTextured = false
-    @Published var audioVfsFrame: AudioVfsFrame?
-    @Published var runningAudioVfs = false
+    /// Host wall time of the latest run of each fixture, measured here, for the HUD.
+    @Published var frameMs: Double?
+    @Published var texturedMs: Double?
+
+    private static func timed<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> (T, Double) {
+        await Task.detached {
+            let started = Date()
+            let value = body()
+            return (value, Date().timeIntervalSince(started) * 1000)
+        }.value
+    }
 
     func run() {
         running = true
         Task {
             // The fixture blocks while it executes and renders, so keep it off the main thread.
-            frame = await Task.detached { GuestFrame.run() }.value
+            (frame, frameMs) = await Self.timed { GuestFrame.run() }
             running = false
         }
     }
@@ -424,208 +501,8 @@ final class FrameModel: ObservableObject {
     func runTextured() {
         runningTextured = true
         Task {
-            texturedFrame = await Task.detached { TexturedFrame.run() }.value
+            (texturedFrame, texturedMs) = await Self.timed { TexturedFrame.run() }
             runningTextured = false
-        }
-    }
-
-    func runAudioVfs() {
-        runningAudioVfs = true
-        Task {
-            audioVfsFrame = await Task.detached { AudioVfsFrame.run() }.value
-            runningAudioVfs = false
-        }
-    }
-}
-
-/// Persistent guest rendering model (Gate 3, #266; Gate 4, #276).
-@MainActor
-final class FrameLoopModel: ObservableObject {
-    @Published var state: UInt32 = UInt32(XENORA_LOOP_NONE)
-    @Published var completed: UInt32 = 0
-    @Published var frameId: UInt32 = XENORA_NO_FRAME
-    @Published var image: CGImage?
-    @Published var errorMessage: String?
-    @Published var isInteractive: Bool = false
-    @Published private(set) var controller: DetectedController?
-
-    private var session: xenora_session = 0
-    private var pollTask: Task<Void, Never>?
-
-    deinit {
-        pollTask?.cancel()
-        if session != 0 {
-            _ = xenora_session_destroy(session)
-        }
-    }
-
-    var isRunning: Bool { state == UInt32(XENORA_LOOP_RUNNING) }
-    var isPaused: Bool { state == UInt32(XENORA_LOOP_PAUSED) }
-    var canStart: Bool {
-        session == 0 || state == UInt32(XENORA_LOOP_NONE) || state == UInt32(XENORA_LOOP_FINISHED)
-            || state == UInt32(XENORA_LOOP_STOPPED) || state == UInt32(XENORA_LOOP_FAILED)
-    }
-
-    var stateDescription: String {
-        switch state {
-        case UInt32(XENORA_LOOP_NONE): return "Idle"
-        case UInt32(XENORA_LOOP_RUNNING): return "Running"
-        case UInt32(XENORA_LOOP_PAUSED): return "Paused"
-        case UInt32(XENORA_LOOP_FINISHED): return "Finished"
-        case UInt32(XENORA_LOOP_STOPPED): return "Stopped"
-        case UInt32(XENORA_LOOP_FAILED): return "Failed"
-        default: return "Unknown (\(state))"
-        }
-    }
-
-    func start(frameCount: UInt32 = 300) {
-        errorMessage = nil
-        if session != 0 {
-            _ = xenora_session_destroy(session)
-            session = 0
-        }
-        var newSession: xenora_session = 0
-        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &newSession)
-        guard createStatus == XENORA_OK else {
-            errorMessage = "Failed to create session (status \(createStatus))"
-            return
-        }
-        session = newSession
-        let startStatus = xenora_session_start_frame_loop(session, frameCount)
-        guard startStatus == XENORA_OK else {
-            errorMessage = "Failed to start frame loop (status \(startStatus))"
-            _ = xenora_session_destroy(session)
-            session = 0
-            return
-        }
-        isInteractive = false
-        state = UInt32(XENORA_LOOP_RUNNING)
-        completed = 0
-        frameId = XENORA_NO_FRAME
-        image = nil
-        startPolling()
-    }
-
-    func startInteractive(frameCount: UInt32 = 300) {
-        errorMessage = nil
-        if session != 0 {
-            _ = xenora_session_destroy(session)
-            session = 0
-        }
-        var newSession: xenora_session = 0
-        let createStatus = xenora_session_create(XENORA_ABI_VERSION, &newSession)
-        guard createStatus == XENORA_OK else {
-            errorMessage = "Failed to create session (status \(createStatus))"
-            return
-        }
-        session = newSession
-        let startStatus = xenora_session_start_interactive_loop(session, frameCount)
-        guard startStatus == XENORA_OK else {
-            errorMessage = "Failed to start interactive loop (status \(startStatus))"
-            _ = xenora_session_destroy(session)
-            session = 0
-            return
-        }
-        isInteractive = true
-        controller = nil
-        state = UInt32(XENORA_LOOP_RUNNING)
-        completed = 0
-        frameId = XENORA_NO_FRAME
-        image = nil
-        startPolling()
-    }
-
-    func sendInput(buttons: UInt32) {
-        sendInput(buttons: buttons, x: 0, y: 0, connected: true)
-    }
-
-    private func sendInput(
-        buttons: UInt32, x: Int16, y: Int16, connected: Bool,
-        leftTrigger: Float = 0, rightTrigger: Float = 0
-    ) {
-        guard session != 0 else { return }
-        let state = xenora_input_state(
-            buttons: buttons,
-            stick_x: x,
-            stick_y: y,
-            mouse_dx: 0,
-            mouse_dy: 0,
-            mouse_buttons: 0,
-            connected: connected ? 1 : 0,
-            reserved: 0
-        )
-        var input = xenora_controller_input(
-            state: state, left_trigger: UInt16((leftTrigger * 65535).rounded()),
-            right_trigger: UInt16((rightTrigger * 65535).rounded())
-        )
-        _ = xenora_session_send_controller_input(session, &input)
-    }
-
-    private func updateGameController() {
-        let next = pollGameController()
-        guard next != controller else { return }
-        controller = next
-        let snapshot = next?.snapshot
-        sendInput(buttons: snapshot?.buttons ?? 0, x: snapshot?.x ?? 0, y: snapshot?.y ?? 0,
-                  connected: next != nil, leftTrigger: snapshot?.leftTrigger ?? 0,
-                  rightTrigger: snapshot?.rightTrigger ?? 0)
-    }
-
-    func pause() {
-        guard session != 0 else { return }
-        _ = xenora_session_pause_frame_loop(session)
-    }
-
-    func resume() {
-        guard session != 0 else { return }
-        _ = xenora_session_resume_frame_loop(session)
-    }
-
-    func stop() {
-        guard session != 0 else { return }
-        _ = xenora_session_stop_frame_loop(session)
-    }
-
-    private func startPolling() {
-        pollTask?.cancel()
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 16_000_000)
-                guard let self = self, self.session != 0 else { break }
-                if self.isInteractive {
-                    self.updateGameController()
-                }
-                var st: UInt32 = 0
-                var comp: UInt32 = 0
-                var fId: UInt32 = 0
-                var rgba = [UInt8](repeating: 0, count: Int(XENORA_FIXTURE_FRAME_WIDTH * XENORA_FIXTURE_FRAME_HEIGHT * 4))
-                let code = rgba.withUnsafeMutableBufferPointer { buffer in
-                    xenora_session_frame_loop_status(
-                        self.session, &st, &comp, &fId, buffer.baseAddress, UInt64(buffer.count))
-                }
-                guard code == XENORA_OK else { break }
-                self.state = st
-                self.completed = comp
-                self.frameId = fId
-                if fId != XENORA_NO_FRAME, let provider = CGDataProvider(data: Data(rgba) as CFData) {
-                    self.image = CGImage(
-                        width: Int(XENORA_FIXTURE_FRAME_WIDTH),
-                        height: Int(XENORA_FIXTURE_FRAME_HEIGHT),
-                        bitsPerComponent: 8,
-                        bitsPerPixel: 32,
-                        bytesPerRow: Int(XENORA_FIXTURE_FRAME_WIDTH) * 4,
-                        space: CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                        provider: provider,
-                        decode: nil,
-                        shouldInterpolate: false,
-                        intent: .defaultIntent
-                    )
-                }
-                if st != UInt32(XENORA_LOOP_RUNNING) && st != UInt32(XENORA_LOOP_PAUSED) {
-                    break
-                }
-            }
         }
     }
 }
@@ -635,6 +512,8 @@ final class FrameLoopModel: ObservableObject {
 final class InspectionModel: ObservableObject {
     static let shared = InspectionModel()
     @Published var fileName: String?
+    /// The inspected file, which the Run action runs.
+    @Published var url: URL?
     @Published var report = ""
     @Published var status: Int32 = Int32(XENORA_OK)
     @Published var busy = false
@@ -678,6 +557,8 @@ final class InspectionModel: ObservableObject {
         let request = latestRequest
         selectionError = nil
         fileName = url.lastPathComponent
+        self.url = url
+        ProgramRunModel.shared.clear()
         report = ""
         status = Int32(XENORA_OK)
         busy = true
@@ -753,7 +634,7 @@ struct InspectorView: View {
                 }
                 .frame(minHeight: 160, maxHeight: 320)
             }
-            Text("Opened files are inspected only. Running them is not available.")
+            Text("Inspection is read-only; nothing in the file runs until you choose Run below.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }
@@ -764,13 +645,27 @@ struct ContentView: View {
     let probe = RuntimeProbe.run()
     @ObservedObject var model: FrameModel
     @ObservedObject var loop: FrameLoopModel
+    @ObservedObject var audio: AudioVfsPlaybackModel
     @ObservedObject var inspection = InspectionModel.shared
+    @ObservedObject var programRun = ProgramRunModel.shared
+    @ObservedObject var hud = HudSettings.shared
     private var frame: GuestFrame? { model.frame }
+
+    private func ms(_ value: Double?) -> String {
+        value.map { String(format: "host run %.1f ms", $0) } ?? "host run -"
+    }
     private var running: Bool { model.running }
 
     var body: some View {
         Form {
             InspectorView(model: inspection)
+            ProgramRunView(url: inspection.url, model: programRun, hud: hud)
+            Section("Display") {
+                Toggle("Show Metal HUD", isOn: $hud.enabled)
+                Text("Overlays the Metal device, frame size, frame counters and host-measured timings on guest frames. Program runs get startup stage traces instead, because they have no draw path yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Guest display") {
                 if let image = frame?.image {
                     Image(decorative: image, scale: 1)
@@ -778,6 +673,7 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 240)
+                        .metalHud(hud.enabled, ["\(frame!.width)x\(frame!.height) offscreen, 1 draw", ms(model.frameMs)])
                         .accessibilityLabel("Guest frame, \(frame!.width) by \(frame!.height) pixels")
                     Text("Guest code ran, its draw was rendered by native Metal, and all \(frame!.width * frame!.height) pixels matched the fixture shader's output.")
                         .font(.callout)
@@ -792,19 +688,9 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
+                        .metalHud(hud.enabled, ["2x2 textured", ms(model.texturedMs)])
                         .accessibilityLabel("Textured guest frame, 2 by 2 pixels")
                     Text("Textured fixture ran: persistent texture created, dynamically updated, rendered on Metal, and retired.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                if let aImage = model.audioVfsFrame?.image {
-                    Image(decorative: aImage, scale: 1)
-                        .resizable()
-                        .interpolation(.none)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity, minHeight: 80, maxHeight: 160)
-                        .accessibilityLabel("Audio/VFS guest frame, 2 by 2 pixels")
-                    Text("Audio/VFS fixture ran: asset.bin loaded through sandboxed VFS, \(model.audioVfsFrame!.samples) audio samples queued (\(model.audioVfsFrame!.totalAudioBytes) bytes), texture rendered on Metal.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -813,10 +699,9 @@ struct ContentView: View {
                         .disabled(running || !probe.connected)
                     Button(model.runningTextured ? "Running…" : "Run textured fixture") { model.runTextured() }
                         .disabled(model.runningTextured || !probe.connected)
-                    Button(model.runningAudioVfs ? "Running…" : "Run Audio/VFS fixture") { model.runAudioVfs() }
-                        .disabled(model.runningAudioVfs || !probe.connected)
                 }
             }
+            AudioVfsFixtureView(model: audio, connected: probe.connected, hudEnabled: hud.enabled)
             Section("Persistent frame loop") {
                 if let image = loop.image {
                     Image(decorative: image, scale: 1)
@@ -824,16 +709,21 @@ struct ContentView: View {
                         .interpolation(.none)
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 240)
+                        .metalHud(hud.enabled, [
+                            "\(XENORA_FIXTURE_FRAME_WIDTH)x\(XENORA_FIXTURE_FRAME_HEIGHT) frame #\(loop.frameId), \(loop.completed) completed",
+                            loop.hostFps.map { String(format: "%.1f frames/s (host)", $0) } ?? "frames/s -",
+                        ])
                         .accessibilityLabel("Guest frame #\(loop.frameId)")
                     Text("Frame #\(loop.frameId) (\(loop.completed) completed) • \(loop.stateDescription)")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                } else if let error = loop.errorMessage {
-                    Text(error).foregroundStyle(.red)
                 } else if loop.state != UInt32(XENORA_LOOP_NONE) {
                     Text("State: \(loop.stateDescription) • \(loop.completed) completed")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                }
+                if let error = loop.errorMessage {
+                    Text(error).foregroundStyle(.red)
                 }
                 HStack {
                     Button("Start 300 frames") { loop.start(frameCount: 300) }
@@ -867,7 +757,7 @@ struct ContentView: View {
             LabeledContent("Interface version", value: "\(probe.abiVersion)")
             LabeledContent("Trusted fixture sections", value: "\(probe.sections)")
             LabeledContent("Trusted fixture entry RVA", value: String(format: "0x%X", probe.entryRVA))
-            Text("Only the bundled trusted fixtures (single-frame, frame-loop, and interactive guest) can run. Presentation uses read-back Metal frames. Arbitrary executables are not available yet.")
+            Text("The bundled fixtures run in the app. Other executables run through the bundled xenora runner and show their output; they do not draw yet. Presentation uses read-back Metal frames.")
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
@@ -885,15 +775,25 @@ struct ContentView: View {
 
 struct XenoraApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @ObservedObject var hud = HudSettings.shared
     let model = FrameModel()
     let loop = FrameLoopModel()
+    let audio = AudioVfsPlaybackModel { pcm in
+        try await Task.detached(priority: .userInitiated) {
+            _ = try playFixturePCM(pcm, mode: .preview)
+        }.value
+    }
 
     var body: some Scene {
-        WindowGroup("Xenora") { ContentView(model: model, loop: loop) }
+        WindowGroup("Xenora") { ContentView(model: model, loop: loop, audio: audio) }
             .commands {
                 CommandGroup(after: .newItem) {
                     Button("Open Executable…") { InspectionModel.shared.requestImport() }
                         .keyboardShortcut("o")
+                }
+                CommandGroup(after: .toolbar) {
+                    Toggle("Show Metal HUD", isOn: $hud.enabled)
+                        .keyboardShortcut("h", modifiers: [.command, .shift])
                 }
             }
     }
@@ -952,7 +852,8 @@ if CommandLine.arguments.contains("--list-audio-outputs") {
 }
 
 let nativeAudioStreamSmoke = CommandLine.arguments.contains("--smoke-native-audio-stream")
-if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke {
+let nativeAudioPreviewSmoke = CommandLine.arguments.contains("--smoke-native-audio-preview")
+if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSmoke || nativeAudioPreviewSmoke {
     var requestedOutput: AudioDeviceID?
     if let index = CommandLine.arguments.firstIndex(of: "--audio-output") {
         let values = CommandLine.arguments
@@ -962,17 +863,25 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
         }
         requestedOutput = device
     }
-    let frame = AudioVfsFrame.run(captureAudio: true)
-    guard frame.status == XENORA_OK, frame.samples == 256, frame.pcm.count == 512 else {
+    let frame = AudioVfsFrame.run()
+    guard let pcm = frame.previewPCM else {
+        print(frame.audioCaptureError ?? "Audio/VFS fixture failed (status \(frame.status)).")
         print("smoke-native-audio: fixture PCM unavailable")
         exit(1)
     }
     do {
-        let played = try playFixturePCM(
-            frame.pcm, requestedOutput: requestedOutput, streamingFixture: nativeAudioStreamSmoke
-        )
+        let mode: FixturePlaybackMode = if nativeAudioPreviewSmoke {
+            .preview
+        } else if nativeAudioStreamSmoke {
+            .stream
+        } else {
+            .sample
+        }
+        // Exercise the native preview schedule without emitting the fixture tone.
+        let source = nativeAudioPreviewSmoke ? [UInt8](repeating: 0, count: pcm.count) : pcm
+        let played = try playFixturePCM(source, requestedOutput: requestedOutput, mode: mode)
         print("smoke-native-audio: playedBackFrames=\(played.frames) playedBackBuffers=\(played.buffers) refills=\(played.refills) queueUnderruns=\(played.underruns) outputDevice=\(played.outputDevice) outputRate=\(played.outputSampleRate) outputChannels=\(played.outputChannels) presentationLatencyMs=\(played.presentationLatency * 1000) completionElapsedMs=\(played.completionElapsed * 1000)")
-        let expected = nativeAudioStreamSmoke ? (8192, 8, 5) : (256, 2, 0)
+        let expected = mode == .sample ? (256, 2, 0) : (8192, 8, 5)
         exit((played.frames, played.buffers, played.refills) == expected
              && played.underruns == 0 && played.outputSampleRate > 0 && played.outputChannels > 0 ? 0 : 1)
     } catch {
@@ -981,11 +890,33 @@ if CommandLine.arguments.contains("--smoke-native-audio") || nativeAudioStreamSm
     }
 }
 
+if CommandLine.arguments.contains("--smoke-audio-vfs-controls") {
+    Task.detached {
+        do {
+            try await Task.sleep(for: .seconds(5))
+        } catch {
+            return
+        }
+        print("smoke-audio-vfs-controls: timed out")
+        exit(1)
+    }
+    Task { @MainActor in
+        let failures = await checkAudioVfsPlayback()
+        for failure in failures { print("smoke-audio-vfs-controls: FAILED \(failure)") }
+        print("smoke-audio-vfs-controls: \(failures.isEmpty ? "ok" : "failed")")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+    dispatchMain()
+}
+
 if CommandLine.arguments.contains("--smoke-audio-vfs") {
     let frame = AudioVfsFrame.run()
     print("smoke-audio-vfs: \(frame.summary)")
     let expected: [UInt8] = [255, 128, 0, 255, 128, 0, 255, 255, 0, 255, 128, 255, 255, 0, 128, 255]
-    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256 && frame.rgba == expected && frame.totalAudioBytes == 512 ? 0 : 1)
+    let pcmPrefix: [UInt8] = [0x00, 0x00, 0xaf, 0x03, 0x5b, 0x07, 0x00, 0x0b]
+    exit(frame.status == XENORA_OK && frame.width == 2 && frame.height == 2 && frame.samples == 256
+         && frame.rgba == expected && frame.totalAudioBytes == 512
+         && frame.previewPCM?.starts(with: pcmPrefix) == true ? 0 : 1)
 }
 
 // `--smoke-interactive` runs 60 frames with queued inputs on the Metal device and exits.
@@ -1134,6 +1065,80 @@ if CommandLine.arguments.contains("--smoke-import-result") {
     }
     print("smoke-import-result: \(ok ? "ok" : "failed")")
     exit(ok ? 0 : 1)
+}
+
+// `--smoke-run-program <file> <exit status> <last stage or -> <stderr text> [-- <args>]` runs a
+// file through the bundled worker with tracing on, as the Run button does with the
+// HUD on, and checks what the app would show. It needs no GPU for a program run.
+if let flag = CommandLine.arguments.firstIndex(of: "--smoke-run-program") {
+    let values = CommandLine.arguments
+    guard flag + 4 < values.count, let expectedExit = Int32(values[flag + 2]) else {
+        print("smoke-run-program: usage: --smoke-run-program <file> <exit> <stage|-> <stderr text>")
+        exit(2)
+    }
+    let file = URL(fileURLWithPath: values[flag + 1])
+    let expectedStage = values[flag + 3] == "-" ? nil : values[flag + 3]
+    let programArguments = values.firstIndex(of: "--").map { Array(values[($0 + 1)...]) } ?? []
+    var failures: [String] = []
+    let traced = ProgramRunner.run(file, trace: true, programArguments: programArguments)
+    if traced.exitStatus != expectedExit { failures.append("exit \(String(describing: traced.exitStatus))") }
+    if traced.lastStage != expectedStage { failures.append("stage \(traced.lastStage ?? "none")") }
+    if !traced.standardError.contains(values[flag + 4]) { failures.append("stderr \(traced.standardError)") }
+    // Without the HUD the same run is untraced.
+    let plain = ProgramRunner.run(file, trace: false, programArguments: programArguments)
+    if plain.exitStatus != expectedExit || plain.lastStage != nil { failures.append("untraced run differs") }
+    // A missing runner is reported, not crashed on.
+    let missing = ProgramRunner.run(file, trace: false, worker: nil)
+    if missing.launchError == nil { failures.append("missing runner not reported") }
+    for failure in failures { print("smoke-run-program: FAILED \(failure)") }
+    print("smoke-run-program: \(traced.summary) \(failures.isEmpty ? "ok" : "failed")")
+    exit(failures.isEmpty ? 0 : 1)
+}
+
+// `--smoke-hud` checks that the Metal HUD setting is off by default, persists, and
+// turns tracing on for program runs. It needs no GPU and opens no window.
+if CommandLine.arguments.contains("--smoke-hud") {
+    let ok = MainActor.assumeIsolated { () -> Bool in
+        let suite = "local.xenora.smoke-hud.\(ProcessInfo.processInfo.processIdentifier)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return false }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var failures: [String] = []
+        let first = HudSettings(defaults: defaults)
+        if first.enabled { failures.append("on by default") }
+        first.enabled = true
+        if !HudSettings(defaults: defaults).enabled { failures.append("on does not persist") }
+        first.enabled = false
+        if HudSettings(defaults: defaults).enabled { failures.append("off does not persist") }
+        let file = URL(fileURLWithPath: "/nonexistent/program.exe")
+        let on = ProgramRunner.arguments(for: file, trace: true, programArguments: ["a b", "c"])
+        if on != ["run", "--experimental", "--trace", "--pe", file.path, "--", "a b", "c"] {
+            failures.append("traced arguments \(on)")
+        }
+        let off = ProgramRunner.arguments(for: file, trace: false, programArguments: [])
+        if off != ["run", "--experimental", "--pe", file.path] { failures.append("plain arguments \(off)") }
+        if ProgramRunner.lastStage(in: "x\ntrace stage=mapped base=1\ntrace stage=relocated n=0\nrun failed") != "relocated" {
+            failures.append("stage parsing")
+        }
+        for failure in failures { print("smoke-hud: FAILED \(failure)") }
+        return failures.isEmpty
+    }
+    print("smoke-hud: \(ok ? "ok" : "failed")")
+    exit(ok ? 0 : 1)
+}
+
+// Keep injected status failures separate from the actual Metal fixtures.
+if let check = CommandLine.arguments.first(where: {
+    $0 == "--smoke-loop-lifecycle" || $0 == "--smoke-native-loop-lifecycle"
+}) {
+    Task { @MainActor in
+        let failures = check == "--smoke-loop-lifecycle"
+            ? await checkFrameLoopFailures()
+            : await checkNativeFrameLoop()
+        for failure in failures { print("\(check): FAILED \(failure)") }
+        print("\(check): \(failures.isEmpty ? "ok" : "failed")")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+    dispatchMain()
 }
 
 // `--smoke` prints the probe and exits without opening a window, for scripts and CI.

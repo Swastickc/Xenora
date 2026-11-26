@@ -60,15 +60,24 @@ jobs:
       - name: Test agent task queue
         run: |
           PYTHONPATH=scripts python3 -m unittest discover -s tests/agent_queue
-          sh -n scripts/agent-queue.sh scripts/agent-sync.sh
+          sh -n scripts/agent-queue.sh
+          sh -n scripts/agent-sync.sh
       - name: Test pull request template check
         run: PYTHONPATH=scripts python3 -m unittest discover -s tests/pr_template
       - name: Test native audit JSON decoding
         run: python3 -m unittest discover -s tests/audit
+      - name: Test QA and release tooling
+        env:
+          PYTHONPATH: scripts
+        run: |
+          python3 -m unittest discover -s tests/qa
+          python3 -m unittest discover -s tests/release
       - name: Test semantic registry generator and coverage report
         run: |
           python3 -m unittest discover -s tests/semantics_generator
           PYTHONPATH=scripts python3 -m unittest discover -s tests/semantic_coverage
+      - name: Test x86 table generator
+        run: python3 -m unittest discover -s tests/x86_generator
       - name: Check formatting and lint
         run: |
           cargo fmt --all -- --check

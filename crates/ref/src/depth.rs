@@ -8,6 +8,8 @@
 
 use std::fmt;
 
+const MAX_TARGET_PIXELS: usize = 4096;
+
 /// Depth comparison of the fragment depth against the stored depth.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompareFunction {
@@ -76,6 +78,8 @@ pub struct RefTexture<'a> {
 #[derive(Debug, Eq, PartialEq)]
 pub enum DepthRefError {
     Extent,
+    /// The clear depth is not finite or lies outside 0..=1.
+    InvalidClearDepth,
     NonUnitW,
     /// A position is non-finite or its depth lies outside 0..=1: (draw).
     Unclipped(usize),
@@ -101,8 +105,10 @@ pub type DepthRefOutput = (Vec<[u8; 4]>, Option<Vec<f32>>);
 ///
 /// # Errors
 ///
-/// Returns an error for an empty extent, non-unit `w`, a non-finite position
-/// or depth outside 0..=1, a pixel centre on an edge, a textured draw without texture, or a depth state without attachment.
+/// Returns an error for a target extent outside 1..=4096 pixels, an invalid
+/// texture extent, a clear depth outside 0..=1, non-unit `w`, a non-finite
+/// position or vertex depth outside 0..=1, a pixel centre on an edge, a
+/// textured draw without texture, or a depth state without attachment.
 pub fn render_depth(
     [width, height]: [usize; 2],
     clear_color: [u8; 4],
@@ -110,13 +116,20 @@ pub fn render_depth(
     draws: &[RefDraw],
     texture: Option<RefTexture<'_>>,
 ) -> Result<DepthRefOutput, DepthRefError> {
-    let pixels = width.checked_mul(height).filter(|&n| n > 0);
-    let pixels = pixels.ok_or(DepthRefError::Extent)?;
+    let pixels = width
+        .checked_mul(height)
+        .filter(|n| (1..=MAX_TARGET_PIXELS).contains(n))
+        .ok_or(DepthRefError::Extent)?;
     if let Some(texture) = texture
         && texture.width.checked_mul(texture.height).filter(|&n| n > 0)
             != Some(texture.texels.len())
     {
         return Err(DepthRefError::Extent);
+    }
+    if let Some(clear) = clear_depth
+        && !(0.0..=1.0).contains(&clear)
+    {
+        return Err(DepthRefError::InvalidClearDepth);
     }
     let mut color = vec![clear_color; pixels];
     let mut depth = clear_depth.map(|value| vec![value; pixels]);
@@ -226,6 +239,43 @@ mod tests {
         [0.5, -1.0, 0.25, 1.0],
         [-1.0, 0.5, 0.25, 1.0],
     ];
+
+    #[test]
+    fn accepts_depth_endpoints_and_maximum_extent() {
+        let clear_color = [4, 8, 12, 255];
+        for clear_depth in [0.0, 1.0] {
+            let (color, depth) =
+                render_depth([64, 64], clear_color, Some(clear_depth), &[], None).unwrap();
+            assert_eq!(color, vec![clear_color; 4096]);
+            assert_eq!(depth, Some(vec![clear_depth; 4096]));
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_clear_depths() {
+        for clear_depth in [-0.25, 1.25, f32::NAN, f32::NEG_INFINITY, f32::INFINITY] {
+            assert!(
+                matches!(
+                    render_depth([1, 1], [0; 4], Some(clear_depth), &[], None),
+                    Err(DepthRefError::InvalidClearDepth)
+                ),
+                "accepted clear depth {clear_depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_target_extents() {
+        for extent in [[4097, 1], [0, 4], [4, 0], [usize::MAX, 2]] {
+            assert!(
+                matches!(
+                    render_depth(extent, [0; 4], None, &[], None),
+                    Err(DepthRefError::Extent)
+                ),
+                "accepted invalid extent {extent:?}"
+            );
+        }
+    }
 
     #[test]
     fn covers_by_pixel_centre_and_writes_depth() {

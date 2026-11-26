@@ -1,0 +1,407 @@
+c5 f8 77 | vzeroupper
+c5 fc 77 | vzeroall
+c5 78 29 cb | vmovaps xmm3, xmm9
+c5 78 28 d1 | vmovaps xmm10, xmm1
+c5 f8 28 d2 | vmovaps xmm2, xmm2
+c5 78 28 64 be 10 | vmovaps xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 78 29 5c be 10 | vmovaps xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 79 29 cb | vmovapd xmm3, xmm9
+c5 79 28 d1 | vmovapd xmm10, xmm1
+c5 f9 28 d2 | vmovapd xmm2, xmm2
+c5 79 28 64 be 10 | vmovapd xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 79 29 5c be 10 | vmovapd xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 78 11 cb | vmovups xmm3, xmm9
+c5 78 10 d1 | vmovups xmm10, xmm1
+c5 f8 10 d2 | vmovups xmm2, xmm2
+c5 78 10 64 be 10 | vmovups xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 78 11 5c be 10 | vmovups xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 79 11 cb | vmovupd xmm3, xmm9
+c5 79 10 d1 | vmovupd xmm10, xmm1
+c5 f9 10 d2 | vmovupd xmm2, xmm2
+c5 79 10 64 be 10 | vmovupd xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 79 11 5c be 10 | vmovupd xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 79 7f cb | vmovdqa xmm3, xmm9
+c5 79 6f d1 | vmovdqa xmm10, xmm1
+c5 f9 6f d2 | vmovdqa xmm2, xmm2
+c5 79 6f 64 be 10 | vmovdqa xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 79 7f 5c be 10 | vmovdqa xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 7a 7f cb | vmovdqu xmm3, xmm9
+c5 7a 6f d1 | vmovdqu xmm10, xmm1
+c5 fa 6f d2 | vmovdqu xmm2, xmm2
+c5 7a 6f 64 be 10 | vmovdqu xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 7a 7f 5c be 10 | vmovdqu xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 78 2b 5c be 10 | vmovntps xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 79 2b 5c be 10 | vmovntpd xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 79 e7 5c be 10 | vmovntdq xmmword ptr [rsi + 4*rdi + 16], xmm11
+c5 7b f0 64 be 10 | vlddqu xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c4 c1 30 54 da | vandps xmm3, xmm9, xmm10
+c5 70 54 64 be 10 | vandps xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e8 54 d2 | vandps xmm2, xmm2, xmm2
+c5 b0 54 db | vandps xmm3, xmm3, xmm9
+c5 b0 54 db | vandps xmm3, xmm9, xmm3
+c4 c1 31 54 da | vandpd xmm3, xmm9, xmm10
+c5 71 54 64 be 10 | vandpd xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 54 d2 | vandpd xmm2, xmm2, xmm2
+c5 b1 54 db | vandpd xmm3, xmm3, xmm9
+c5 b1 54 db | vandpd xmm3, xmm9, xmm3
+c4 c1 30 55 da | vandnps xmm3, xmm9, xmm10
+c5 70 55 64 be 10 | vandnps xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e8 55 d2 | vandnps xmm2, xmm2, xmm2
+c4 c1 60 55 d9 | vandnps xmm3, xmm3, xmm9
+c5 b0 55 db | vandnps xmm3, xmm9, xmm3
+c4 c1 31 55 da | vandnpd xmm3, xmm9, xmm10
+c5 71 55 64 be 10 | vandnpd xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 55 d2 | vandnpd xmm2, xmm2, xmm2
+c4 c1 61 55 d9 | vandnpd xmm3, xmm3, xmm9
+c5 b1 55 db | vandnpd xmm3, xmm9, xmm3
+c4 c1 30 56 da | vorps xmm3, xmm9, xmm10
+c5 70 56 64 be 10 | vorps xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e8 56 d2 | vorps xmm2, xmm2, xmm2
+c5 b0 56 db | vorps xmm3, xmm3, xmm9
+c5 b0 56 db | vorps xmm3, xmm9, xmm3
+c4 c1 31 56 da | vorpd xmm3, xmm9, xmm10
+c5 71 56 64 be 10 | vorpd xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 56 d2 | vorpd xmm2, xmm2, xmm2
+c5 b1 56 db | vorpd xmm3, xmm3, xmm9
+c5 b1 56 db | vorpd xmm3, xmm9, xmm3
+c4 c1 30 57 da | vxorps xmm3, xmm9, xmm10
+c5 70 57 64 be 10 | vxorps xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e8 57 d2 | vxorps xmm2, xmm2, xmm2
+c5 b0 57 db | vxorps xmm3, xmm3, xmm9
+c5 b0 57 db | vxorps xmm3, xmm9, xmm3
+c4 c1 31 57 da | vxorpd xmm3, xmm9, xmm10
+c5 71 57 64 be 10 | vxorpd xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 57 d2 | vxorpd xmm2, xmm2, xmm2
+c5 b1 57 db | vxorpd xmm3, xmm3, xmm9
+c5 b1 57 db | vxorpd xmm3, xmm9, xmm3
+c4 c1 7a 12 d9 | vmovsldup xmm3, xmm9
+c5 7a 12 e1 | vmovsldup xmm12, xmm1
+c5 fa 12 d2 | vmovsldup xmm2, xmm2
+c4 c1 7a 16 d9 | vmovshdup xmm3, xmm9
+c5 7a 16 e1 | vmovshdup xmm12, xmm1
+c5 fa 16 d2 | vmovshdup xmm2, xmm2
+c4 c1 7b 12 d9 | vmovddup xmm3, xmm9
+c5 7b 12 e1 | vmovddup xmm12, xmm1
+c5 fb 12 d2 | vmovddup xmm2, xmm2
+c5 7a 12 64 be 10 | vmovsldup xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c5 7a 16 64 be 10 | vmovshdup xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c4 c1 78 50 d9 | vmovmskps ebx, xmm9
+c5 78 50 d3 | vmovmskps r10d, xmm3
+c4 c1 79 50 d9 | vmovmskpd ebx, xmm9
+c5 79 50 d3 | vmovmskpd r10d, xmm3
+c4 62 79 18 64 be 10 | vbroadcastss xmm12, dword ptr [rsi + 4*rdi + 16]
+c4 c3 79 04 d9 00 | vpermilps xmm3, xmm9, 0
+c4 c3 79 04 d9 01 | vpermilps xmm3, xmm9, 1
+c4 c3 79 04 d9 02 | vpermilps xmm3, xmm9, 2
+c4 c3 79 04 d9 05 | vpermilps xmm3, xmm9, 5
+c4 c3 79 04 d9 1b | vpermilps xmm3, xmm9, 27
+c4 c3 79 04 d9 4e | vpermilps xmm3, xmm9, 78
+c4 c3 79 04 d9 b1 | vpermilps xmm3, xmm9, 177
+c4 c3 79 04 d9 e4 | vpermilps xmm3, xmm9, 228
+c4 c3 79 04 d9 ff | vpermilps xmm3, xmm9, 255
+c4 63 79 04 64 be 10 72 | vpermilps xmm12, xmmword ptr [rsi + 4*rdi + 16], 114
+c4 e3 79 04 d2 39 | vpermilps xmm2, xmm2, 57
+c4 c2 31 0c da | vpermilps xmm3, xmm9, xmm10
+c4 62 71 0c 64 be 10 | vpermilps xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c4 e2 69 0c d2 | vpermilps xmm2, xmm2, xmm2
+c4 e2 31 0c db | vpermilps xmm3, xmm9, xmm3
+c4 c3 79 05 d9 00 | vpermilpd xmm3, xmm9, 0
+c4 c3 79 05 d9 01 | vpermilpd xmm3, xmm9, 1
+c4 c3 79 05 d9 02 | vpermilpd xmm3, xmm9, 2
+c4 c3 79 05 d9 05 | vpermilpd xmm3, xmm9, 5
+c4 c3 79 05 d9 1b | vpermilpd xmm3, xmm9, 27
+c4 c3 79 05 d9 4e | vpermilpd xmm3, xmm9, 78
+c4 c3 79 05 d9 b1 | vpermilpd xmm3, xmm9, 177
+c4 c3 79 05 d9 e4 | vpermilpd xmm3, xmm9, 228
+c4 c3 79 05 d9 ff | vpermilpd xmm3, xmm9, 255
+c4 63 79 05 64 be 10 72 | vpermilpd xmm12, xmmword ptr [rsi + 4*rdi + 16], 114
+c4 e3 79 05 d2 39 | vpermilpd xmm2, xmm2, 57
+c4 c2 31 0d da | vpermilpd xmm3, xmm9, xmm10
+c4 62 71 0d 64 be 10 | vpermilpd xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c4 e2 69 0d d2 | vpermilpd xmm2, xmm2, xmm2
+c4 e2 31 0d db | vpermilpd xmm3, xmm9, xmm3
+c5 7c 29 cb | vmovaps ymm3, ymm9
+c5 7c 28 d1 | vmovaps ymm10, ymm1
+c5 fc 28 d2 | vmovaps ymm2, ymm2
+c5 7c 28 64 be 10 | vmovaps ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7c 29 5c be 10 | vmovaps ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7d 29 cb | vmovapd ymm3, ymm9
+c5 7d 28 d1 | vmovapd ymm10, ymm1
+c5 fd 28 d2 | vmovapd ymm2, ymm2
+c5 7d 28 64 be 10 | vmovapd ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7d 29 5c be 10 | vmovapd ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7c 11 cb | vmovups ymm3, ymm9
+c5 7c 10 d1 | vmovups ymm10, ymm1
+c5 fc 10 d2 | vmovups ymm2, ymm2
+c5 7c 10 64 be 10 | vmovups ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7c 11 5c be 10 | vmovups ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7d 11 cb | vmovupd ymm3, ymm9
+c5 7d 10 d1 | vmovupd ymm10, ymm1
+c5 fd 10 d2 | vmovupd ymm2, ymm2
+c5 7d 10 64 be 10 | vmovupd ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7d 11 5c be 10 | vmovupd ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7d 7f cb | vmovdqa ymm3, ymm9
+c5 7d 6f d1 | vmovdqa ymm10, ymm1
+c5 fd 6f d2 | vmovdqa ymm2, ymm2
+c5 7d 6f 64 be 10 | vmovdqa ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7d 7f 5c be 10 | vmovdqa ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7e 7f cb | vmovdqu ymm3, ymm9
+c5 7e 6f d1 | vmovdqu ymm10, ymm1
+c5 fe 6f d2 | vmovdqu ymm2, ymm2
+c5 7e 6f 64 be 10 | vmovdqu ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7e 7f 5c be 10 | vmovdqu ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7c 2b 5c be 10 | vmovntps ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7d 2b 5c be 10 | vmovntpd ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7d e7 5c be 10 | vmovntdq ymmword ptr [rsi + 4*rdi + 16], ymm11
+c5 7f f0 64 be 10 | vlddqu ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c4 c1 34 54 da | vandps ymm3, ymm9, ymm10
+c5 74 54 64 be 10 | vandps ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ec 54 d2 | vandps ymm2, ymm2, ymm2
+c5 b4 54 db | vandps ymm3, ymm3, ymm9
+c5 b4 54 db | vandps ymm3, ymm9, ymm3
+c4 c1 35 54 da | vandpd ymm3, ymm9, ymm10
+c5 75 54 64 be 10 | vandpd ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ed 54 d2 | vandpd ymm2, ymm2, ymm2
+c5 b5 54 db | vandpd ymm3, ymm3, ymm9
+c5 b5 54 db | vandpd ymm3, ymm9, ymm3
+c4 c1 34 55 da | vandnps ymm3, ymm9, ymm10
+c5 74 55 64 be 10 | vandnps ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ec 55 d2 | vandnps ymm2, ymm2, ymm2
+c4 c1 64 55 d9 | vandnps ymm3, ymm3, ymm9
+c5 b4 55 db | vandnps ymm3, ymm9, ymm3
+c4 c1 35 55 da | vandnpd ymm3, ymm9, ymm10
+c5 75 55 64 be 10 | vandnpd ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ed 55 d2 | vandnpd ymm2, ymm2, ymm2
+c4 c1 65 55 d9 | vandnpd ymm3, ymm3, ymm9
+c5 b5 55 db | vandnpd ymm3, ymm9, ymm3
+c4 c1 34 56 da | vorps ymm3, ymm9, ymm10
+c5 74 56 64 be 10 | vorps ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ec 56 d2 | vorps ymm2, ymm2, ymm2
+c5 b4 56 db | vorps ymm3, ymm3, ymm9
+c5 b4 56 db | vorps ymm3, ymm9, ymm3
+c4 c1 35 56 da | vorpd ymm3, ymm9, ymm10
+c5 75 56 64 be 10 | vorpd ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ed 56 d2 | vorpd ymm2, ymm2, ymm2
+c5 b5 56 db | vorpd ymm3, ymm3, ymm9
+c5 b5 56 db | vorpd ymm3, ymm9, ymm3
+c4 c1 34 57 da | vxorps ymm3, ymm9, ymm10
+c5 74 57 64 be 10 | vxorps ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ec 57 d2 | vxorps ymm2, ymm2, ymm2
+c5 b4 57 db | vxorps ymm3, ymm3, ymm9
+c5 b4 57 db | vxorps ymm3, ymm9, ymm3
+c4 c1 35 57 da | vxorpd ymm3, ymm9, ymm10
+c5 75 57 64 be 10 | vxorpd ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c5 ed 57 d2 | vxorpd ymm2, ymm2, ymm2
+c5 b5 57 db | vxorpd ymm3, ymm3, ymm9
+c5 b5 57 db | vxorpd ymm3, ymm9, ymm3
+c4 c1 7e 12 d9 | vmovsldup ymm3, ymm9
+c5 7e 12 e1 | vmovsldup ymm12, ymm1
+c5 fe 12 d2 | vmovsldup ymm2, ymm2
+c4 c1 7e 16 d9 | vmovshdup ymm3, ymm9
+c5 7e 16 e1 | vmovshdup ymm12, ymm1
+c5 fe 16 d2 | vmovshdup ymm2, ymm2
+c4 c1 7f 12 d9 | vmovddup ymm3, ymm9
+c5 7f 12 e1 | vmovddup ymm12, ymm1
+c5 ff 12 d2 | vmovddup ymm2, ymm2
+c5 7e 12 64 be 10 | vmovsldup ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c5 7e 16 64 be 10 | vmovshdup ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c4 c1 7c 50 d9 | vmovmskps ebx, ymm9
+c5 7c 50 d3 | vmovmskps r10d, ymm3
+c4 c1 7d 50 d9 | vmovmskpd ebx, ymm9
+c5 7d 50 d3 | vmovmskpd r10d, ymm3
+c4 62 7d 18 64 be 10 | vbroadcastss ymm12, dword ptr [rsi + 4*rdi + 16]
+c4 c3 7d 04 d9 00 | vpermilps ymm3, ymm9, 0
+c4 c3 7d 04 d9 01 | vpermilps ymm3, ymm9, 1
+c4 c3 7d 04 d9 02 | vpermilps ymm3, ymm9, 2
+c4 c3 7d 04 d9 05 | vpermilps ymm3, ymm9, 5
+c4 c3 7d 04 d9 1b | vpermilps ymm3, ymm9, 27
+c4 c3 7d 04 d9 4e | vpermilps ymm3, ymm9, 78
+c4 c3 7d 04 d9 b1 | vpermilps ymm3, ymm9, 177
+c4 c3 7d 04 d9 e4 | vpermilps ymm3, ymm9, 228
+c4 c3 7d 04 d9 ff | vpermilps ymm3, ymm9, 255
+c4 63 7d 04 64 be 10 72 | vpermilps ymm12, ymmword ptr [rsi + 4*rdi + 16], 114
+c4 e3 7d 04 d2 39 | vpermilps ymm2, ymm2, 57
+c4 c2 35 0c da | vpermilps ymm3, ymm9, ymm10
+c4 62 75 0c 64 be 10 | vpermilps ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c4 e2 6d 0c d2 | vpermilps ymm2, ymm2, ymm2
+c4 e2 35 0c db | vpermilps ymm3, ymm9, ymm3
+c4 c3 7d 05 d9 00 | vpermilpd ymm3, ymm9, 0
+c4 c3 7d 05 d9 01 | vpermilpd ymm3, ymm9, 1
+c4 c3 7d 05 d9 02 | vpermilpd ymm3, ymm9, 2
+c4 c3 7d 05 d9 05 | vpermilpd ymm3, ymm9, 5
+c4 c3 7d 05 d9 1b | vpermilpd ymm3, ymm9, 27
+c4 c3 7d 05 d9 4e | vpermilpd ymm3, ymm9, 78
+c4 c3 7d 05 d9 b1 | vpermilpd ymm3, ymm9, 177
+c4 c3 7d 05 d9 e4 | vpermilpd ymm3, ymm9, 228
+c4 c3 7d 05 d9 ff | vpermilpd ymm3, ymm9, 255
+c4 63 7d 05 64 be 10 72 | vpermilpd ymm12, ymmword ptr [rsi + 4*rdi + 16], 114
+c4 e3 7d 05 d2 39 | vpermilpd ymm2, ymm2, 57
+c4 c2 35 0d da | vpermilpd ymm3, ymm9, ymm10
+c4 62 75 0d 64 be 10 | vpermilpd ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16]
+c4 e2 6d 0d d2 | vpermilpd ymm2, ymm2, ymm2
+c4 e2 35 0d db | vpermilpd ymm3, ymm9, ymm3
+c5 7b 12 64 be 10 | vmovddup xmm12, qword ptr [rsi + 4*rdi + 16]
+c5 7f 12 64 be 10 | vmovddup ymm12, ymmword ptr [rsi + 4*rdi + 16]
+c4 62 79 2a 64 be 10 | vmovntdqa xmm12, xmmword ptr [rsi + 4*rdi + 16]
+c4 c1 31 db da | vpand xmm3, xmm9, xmm10
+c5 71 db 64 be 10 | vpand xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 db d2 | vpand xmm2, xmm2, xmm2
+c5 b1 db db | vpand xmm3, xmm9, xmm3
+c4 c1 31 df da | vpandn xmm3, xmm9, xmm10
+c5 71 df 64 be 10 | vpandn xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 df d2 | vpandn xmm2, xmm2, xmm2
+c5 b1 df db | vpandn xmm3, xmm9, xmm3
+c4 c1 31 eb da | vpor xmm3, xmm9, xmm10
+c5 71 eb 64 be 10 | vpor xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 eb d2 | vpor xmm2, xmm2, xmm2
+c5 b1 eb db | vpor xmm3, xmm9, xmm3
+c4 c1 31 ef da | vpxor xmm3, xmm9, xmm10
+c5 71 ef 64 be 10 | vpxor xmm12, xmm1, xmmword ptr [rsi + 4*rdi + 16]
+c5 e9 ef d2 | vpxor xmm2, xmm2, xmm2
+c5 b1 ef db | vpxor xmm3, xmm9, xmm3
+c5 32 11 d3 | vmovss xmm3, xmm9, xmm10
+c5 72 10 e2 | vmovss xmm12, xmm1, xmm2
+c5 ea 10 d2 | vmovss xmm2, xmm2, xmm2
+c5 b2 10 db | vmovss xmm3, xmm9, xmm3
+c5 7a 10 64 be 10 | vmovss xmm12, dword ptr [rsi + 4*rdi + 16]
+c5 7a 11 5c be 10 | vmovss dword ptr [rsi + 4*rdi + 16], xmm11
+c5 33 11 d3 | vmovsd xmm3, xmm9, xmm10
+c5 73 10 e2 | vmovsd xmm12, xmm1, xmm2
+c5 eb 10 d2 | vmovsd xmm2, xmm2, xmm2
+c5 b3 10 db | vmovsd xmm3, xmm9, xmm3
+c5 7b 10 64 be 10 | vmovsd xmm12, qword ptr [rsi + 4*rdi + 16]
+c5 7b 11 5c be 10 | vmovsd qword ptr [rsi + 4*rdi + 16], xmm11
+c5 79 d6 cb | vmovq xmm3, xmm9
+c5 fa 7e d2 | vmovq xmm2, xmm2
+c5 7a 7e 64 be 10 | vmovq xmm12, qword ptr [rsi + 4*rdi + 16]
+c5 79 d6 5c be 10 | vmovq qword ptr [rsi + 4*rdi + 16], xmm11
+c4 c1 79 6e d9 | vmovd xmm3, r9d
+c5 79 6e e0 | vmovd xmm12, eax
+c4 c1 f9 6e d9 | vmovq xmm3, r9
+c4 c1 79 7e d9 | vmovd r9d, xmm3
+c5 79 7e e3 | vmovd ebx, xmm12
+c4 c1 f9 7e d9 | vmovq r9, xmm3
+c5 f9 6e 5c be 10 | vmovd xmm3, dword ptr [rsi + 4*rdi + 16]
+c5 79 7e 4c be 10 | vmovd dword ptr [rsi + 4*rdi + 16], xmm9
+c5 b0 12 5c be 10 | vmovlps xmm3, xmm9, qword ptr [rsi + 4*rdi + 16]
+c5 e8 12 54 be 10 | vmovlps xmm2, xmm2, qword ptr [rsi + 4*rdi + 16]
+c5 78 13 4c be 10 | vmovlps qword ptr [rsi + 4*rdi + 16], xmm9
+c5 b1 12 5c be 10 | vmovlpd xmm3, xmm9, qword ptr [rsi + 4*rdi + 16]
+c5 e9 12 54 be 10 | vmovlpd xmm2, xmm2, qword ptr [rsi + 4*rdi + 16]
+c5 79 13 4c be 10 | vmovlpd qword ptr [rsi + 4*rdi + 16], xmm9
+c5 b0 16 5c be 10 | vmovhps xmm3, xmm9, qword ptr [rsi + 4*rdi + 16]
+c5 e8 16 54 be 10 | vmovhps xmm2, xmm2, qword ptr [rsi + 4*rdi + 16]
+c5 78 17 4c be 10 | vmovhps qword ptr [rsi + 4*rdi + 16], xmm9
+c5 b1 16 5c be 10 | vmovhpd xmm3, xmm9, qword ptr [rsi + 4*rdi + 16]
+c5 e9 16 54 be 10 | vmovhpd xmm2, xmm2, qword ptr [rsi + 4*rdi + 16]
+c5 79 17 4c be 10 | vmovhpd qword ptr [rsi + 4*rdi + 16], xmm9
+c4 c1 30 12 da | vmovhlps xmm3, xmm9, xmm10
+c5 70 12 e2 | vmovhlps xmm12, xmm1, xmm2
+c5 e8 12 d2 | vmovhlps xmm2, xmm2, xmm2
+c5 b0 12 db | vmovhlps xmm3, xmm9, xmm3
+c4 c1 30 16 da | vmovlhps xmm3, xmm9, xmm10
+c5 70 16 e2 | vmovlhps xmm12, xmm1, xmm2
+c5 e8 16 d2 | vmovlhps xmm2, xmm2, xmm2
+c5 b0 16 db | vmovlhps xmm3, xmm9, xmm3
+c4 62 7d 19 64 be 10 | vbroadcastsd ymm12, qword ptr [rsi + 4*rdi + 16]
+c4 62 7d 1a 64 be 10 | vbroadcastf128 ymm12, xmmword ptr [rsi + 4*rdi + 16]
+c4 c3 35 18 da 00 | vinsertf128 ymm3, ymm9, xmm10, 0
+c4 63 75 18 64 be 10 00 | vinsertf128 ymm12, ymm1, xmmword ptr [rsi + 4*rdi + 16], 0
+c4 e3 6d 18 d2 00 | vinsertf128 ymm2, ymm2, xmm2, 0
+c4 63 7d 19 cb 00 | vextractf128 xmm3, ymm9, 0
+c4 e3 7d 19 d2 00 | vextractf128 xmm2, ymm2, 0
+c4 63 7d 19 5c be 10 00 | vextractf128 xmmword ptr [rsi + 4*rdi + 16], ymm11, 0
+c4 c3 35 18 da 01 | vinsertf128 ymm3, ymm9, xmm10, 1
+c4 63 75 18 64 be 10 01 | vinsertf128 ymm12, ymm1, xmmword ptr [rsi + 4*rdi + 16], 1
+c4 e3 6d 18 d2 01 | vinsertf128 ymm2, ymm2, xmm2, 1
+c4 63 7d 19 cb 01 | vextractf128 xmm3, ymm9, 1
+c4 e3 7d 19 d2 01 | vextractf128 xmm2, ymm2, 1
+c4 63 7d 19 5c be 10 01 | vextractf128 xmmword ptr [rsi + 4*rdi + 16], ymm11, 1
+c4 c3 35 18 da 02 | vinsertf128 ymm3, ymm9, xmm10, 2
+c4 63 75 18 64 be 10 02 | vinsertf128 ymm12, ymm1, xmmword ptr [rsi + 4*rdi + 16], 2
+c4 e3 6d 18 d2 02 | vinsertf128 ymm2, ymm2, xmm2, 2
+c4 63 7d 19 cb 02 | vextractf128 xmm3, ymm9, 2
+c4 e3 7d 19 d2 02 | vextractf128 xmm2, ymm2, 2
+c4 63 7d 19 5c be 10 02 | vextractf128 xmmword ptr [rsi + 4*rdi + 16], ymm11, 2
+c4 c3 35 18 da ff | vinsertf128 ymm3, ymm9, xmm10, 255
+c4 63 75 18 64 be 10 ff | vinsertf128 ymm12, ymm1, xmmword ptr [rsi + 4*rdi + 16], 255
+c4 e3 6d 18 d2 ff | vinsertf128 ymm2, ymm2, xmm2, 255
+c4 63 7d 19 cb ff | vextractf128 xmm3, ymm9, 255
+c4 e3 7d 19 d2 ff | vextractf128 xmm2, ymm2, 255
+c4 63 7d 19 5c be 10 ff | vextractf128 xmmword ptr [rsi + 4*rdi + 16], ymm11, 255
+c4 c3 35 06 da 00 | vperm2f128 ymm3, ymm9, ymm10, 0
+c4 c3 35 06 da 01 | vperm2f128 ymm3, ymm9, ymm10, 1
+c4 c3 35 06 da 02 | vperm2f128 ymm3, ymm9, ymm10, 2
+c4 c3 35 06 da 03 | vperm2f128 ymm3, ymm9, ymm10, 3
+c4 c3 35 06 da 04 | vperm2f128 ymm3, ymm9, ymm10, 4
+c4 c3 35 06 da 05 | vperm2f128 ymm3, ymm9, ymm10, 5
+c4 c3 35 06 da 06 | vperm2f128 ymm3, ymm9, ymm10, 6
+c4 c3 35 06 da 07 | vperm2f128 ymm3, ymm9, ymm10, 7
+c4 c3 35 06 da 08 | vperm2f128 ymm3, ymm9, ymm10, 8
+c4 c3 35 06 da 09 | vperm2f128 ymm3, ymm9, ymm10, 9
+c4 c3 35 06 da 0a | vperm2f128 ymm3, ymm9, ymm10, 10
+c4 c3 35 06 da 0b | vperm2f128 ymm3, ymm9, ymm10, 11
+c4 c3 35 06 da 0c | vperm2f128 ymm3, ymm9, ymm10, 12
+c4 c3 35 06 da 0d | vperm2f128 ymm3, ymm9, ymm10, 13
+c4 c3 35 06 da 0e | vperm2f128 ymm3, ymm9, ymm10, 14
+c4 c3 35 06 da 0f | vperm2f128 ymm3, ymm9, ymm10, 15
+c4 c3 35 06 da 10 | vperm2f128 ymm3, ymm9, ymm10, 16
+c4 c3 35 06 da 11 | vperm2f128 ymm3, ymm9, ymm10, 17
+c4 c3 35 06 da 12 | vperm2f128 ymm3, ymm9, ymm10, 18
+c4 c3 35 06 da 13 | vperm2f128 ymm3, ymm9, ymm10, 19
+c4 c3 35 06 da 14 | vperm2f128 ymm3, ymm9, ymm10, 20
+c4 c3 35 06 da 15 | vperm2f128 ymm3, ymm9, ymm10, 21
+c4 c3 35 06 da 16 | vperm2f128 ymm3, ymm9, ymm10, 22
+c4 c3 35 06 da 17 | vperm2f128 ymm3, ymm9, ymm10, 23
+c4 c3 35 06 da 18 | vperm2f128 ymm3, ymm9, ymm10, 24
+c4 c3 35 06 da 19 | vperm2f128 ymm3, ymm9, ymm10, 25
+c4 c3 35 06 da 1a | vperm2f128 ymm3, ymm9, ymm10, 26
+c4 c3 35 06 da 1b | vperm2f128 ymm3, ymm9, ymm10, 27
+c4 c3 35 06 da 1c | vperm2f128 ymm3, ymm9, ymm10, 28
+c4 c3 35 06 da 1d | vperm2f128 ymm3, ymm9, ymm10, 29
+c4 c3 35 06 da 1e | vperm2f128 ymm3, ymm9, ymm10, 30
+c4 c3 35 06 da 1f | vperm2f128 ymm3, ymm9, ymm10, 31
+c4 c3 35 06 da 20 | vperm2f128 ymm3, ymm9, ymm10, 32
+c4 c3 35 06 da 21 | vperm2f128 ymm3, ymm9, ymm10, 33
+c4 c3 35 06 da 22 | vperm2f128 ymm3, ymm9, ymm10, 34
+c4 c3 35 06 da 23 | vperm2f128 ymm3, ymm9, ymm10, 35
+c4 c3 35 06 da 24 | vperm2f128 ymm3, ymm9, ymm10, 36
+c4 c3 35 06 da 25 | vperm2f128 ymm3, ymm9, ymm10, 37
+c4 c3 35 06 da 26 | vperm2f128 ymm3, ymm9, ymm10, 38
+c4 c3 35 06 da 27 | vperm2f128 ymm3, ymm9, ymm10, 39
+c4 c3 35 06 da 28 | vperm2f128 ymm3, ymm9, ymm10, 40
+c4 c3 35 06 da 29 | vperm2f128 ymm3, ymm9, ymm10, 41
+c4 c3 35 06 da 2a | vperm2f128 ymm3, ymm9, ymm10, 42
+c4 c3 35 06 da 2b | vperm2f128 ymm3, ymm9, ymm10, 43
+c4 c3 35 06 da 2c | vperm2f128 ymm3, ymm9, ymm10, 44
+c4 c3 35 06 da 2d | vperm2f128 ymm3, ymm9, ymm10, 45
+c4 c3 35 06 da 2e | vperm2f128 ymm3, ymm9, ymm10, 46
+c4 c3 35 06 da 2f | vperm2f128 ymm3, ymm9, ymm10, 47
+c4 c3 35 06 da 30 | vperm2f128 ymm3, ymm9, ymm10, 48
+c4 c3 35 06 da 31 | vperm2f128 ymm3, ymm9, ymm10, 49
+c4 c3 35 06 da 32 | vperm2f128 ymm3, ymm9, ymm10, 50
+c4 c3 35 06 da 33 | vperm2f128 ymm3, ymm9, ymm10, 51
+c4 c3 35 06 da 34 | vperm2f128 ymm3, ymm9, ymm10, 52
+c4 c3 35 06 da 35 | vperm2f128 ymm3, ymm9, ymm10, 53
+c4 c3 35 06 da 36 | vperm2f128 ymm3, ymm9, ymm10, 54
+c4 c3 35 06 da 37 | vperm2f128 ymm3, ymm9, ymm10, 55
+c4 c3 35 06 da 38 | vperm2f128 ymm3, ymm9, ymm10, 56
+c4 c3 35 06 da 39 | vperm2f128 ymm3, ymm9, ymm10, 57
+c4 c3 35 06 da 3a | vperm2f128 ymm3, ymm9, ymm10, 58
+c4 c3 35 06 da 3b | vperm2f128 ymm3, ymm9, ymm10, 59
+c4 c3 35 06 da 3c | vperm2f128 ymm3, ymm9, ymm10, 60
+c4 c3 35 06 da 3d | vperm2f128 ymm3, ymm9, ymm10, 61
+c4 c3 35 06 da 3e | vperm2f128 ymm3, ymm9, ymm10, 62
+c4 c3 35 06 da 3f | vperm2f128 ymm3, ymm9, ymm10, 63
+c4 c3 35 06 da 80 | vperm2f128 ymm3, ymm9, ymm10, 128
+c4 c3 35 06 da 88 | vperm2f128 ymm3, ymm9, ymm10, 136
+c4 c3 35 06 da c8 | vperm2f128 ymm3, ymm9, ymm10, 200
+c4 c3 35 06 da ff | vperm2f128 ymm3, ymm9, ymm10, 255
+c4 63 75 06 64 be 10 00 | vperm2f128 ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16], 0
+c4 63 75 06 64 be 10 21 | vperm2f128 ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16], 33
+c4 63 75 06 64 be 10 31 | vperm2f128 ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16], 49
+c4 63 75 06 64 be 10 83 | vperm2f128 ymm12, ymm1, ymmword ptr [rsi + 4*rdi + 16], 131
+c4 e3 6d 06 d2 01 | vperm2f128 ymm2, ymm2, ymm2, 1
+c4 e3 35 06 db 30 | vperm2f128 ymm3, ymm9, ymm3, 48
+c5 f8 ae 54 be 10 | vldmxcsr dword ptr [rsi + 4*rdi + 16]
+c5 f8 ae 5c be 10 | vstmxcsr dword ptr [rsi + 4*rdi + 16]

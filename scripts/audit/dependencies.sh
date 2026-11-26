@@ -14,16 +14,19 @@ with open(sys.argv[1], encoding="utf-8") as metadata:
     graph = json.load(metadata)
 packages = {package["id"]: package["name"] for package in graph["packages"]}
 nodes = {node["id"]: node["dependencies"] for node in graph["resolve"]["nodes"]}
+workspace = graph["workspace_members"]
+loader_ids = {member for member in workspace if packages[member] == "xenora-loader"}
+texture_ids = {member for member in workspace if packages[member] == "xenora-texture"}
 graphics = {"isa", "decoder", "ref", "ir", "shader", "msl", "metal", "gpu", "memory"}
 reference_forbidden = graphics - {"ref"}
 forbidden_cpu = re.compile(r"(^|[-_])(x86(?:[-_]?64)?|iced|zydis|cpu)([-_]|$)")
 violations = []
 checked = 0
 
-for root in graph["workspace_members"]:
+for root in workspace:
     name = packages[root]
     component = name.removeprefix("xenora-")
-    if component not in graphics:
+    if component not in graphics and root not in texture_ids:
         continue
     checked += 1
     pending = list(nodes[root])
@@ -34,9 +37,9 @@ for root in graph["workspace_members"]:
             continue
         seen.add(dependency)
         target = packages[dependency]
-        if forbidden_cpu.search(target) or (
+        if dependency in loader_ids or forbidden_cpu.search(target) or (
             component == "ref"
-            and target.removeprefix("xenora-") in reference_forbidden
+            and (dependency in texture_ids or target.removeprefix("xenora-") in reference_forbidden)
         ):
             violations.append(f"{name} depends on {target}")
         pending.extend(nodes[dependency])

@@ -6,6 +6,7 @@
 |---|---|
 | MUBUF `BUFFER_LOAD_DWORD`, `BUFFER_STORE_DWORD` | Track a pending read and write. Each accesses one 32-bit word under the synthetic mapping. Only one output store is allowed. |
 | SOPP `S_WAITCNT`, SOPK `S_WAITCNT_VSCNT` | A zero vector-load or vector-store threshold completes the associated transfer. The model permits one pending operation per counter (CLAIM-RDNA2-TRANSFER-WAITS). |
+| SMEM `S_BUFFER_LOAD_DWORD`, `_X2`, `_X4`; SOPP `S_WAITCNT` LGKM_CNT 0 | Read dispatch input words at `(offset + SGPR) & ~3`, keeping the old SGPR for a word out of range; refuse reads and writes of the destination before the wait ([scalar buffer loads](scalar-memory.md)). |
 | VOP1 `V_MOV_B32` | Read a register, inline integer or literal. Copy all 32 bits. |
 | VOP3 `V_ADD_NC_U32` | Read two vector registers and add modulo 2^32. No implicit carry or flag update. |
 | SOP2 `S_MIN_{I32,U32}`, `S_MAX_{I32,U32}`, `S_CSELECT_B32`, `S_BFM_B32`, `S_MUL_I32`, `S_MUL_HI_{U32,I32}`, `S_BFE_{U32,I32}`, `S_ABSDIFF_I32`, `S_LSHL{1,2,3,4}_ADD_U32` | The guide's section 12.1 result, computed exactly and reduced modulo 2^32. Min and max compare strictly (a tie gives S1, SCC = 0); CSELECT reads SCC and refuses it unset; BFM, MUL, MUL_HI and CSELECT leave SCC unchanged; BFE uses offset S1[4:0] and width S1[22:16] (32 or more keeps every shifted bit); ABSDIFF negates the wrapped difference; LSHLn_ADD sets SCC to the carry of the exact sum. Descriptor SGPRs are reserved. |

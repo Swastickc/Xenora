@@ -8,5 +8,4 @@ export MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER:-0}
 export MTL_SHADER_VALIDATION=${MTL_SHADER_VALIDATION:-0}
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
 
-cargo build --locked --release -p xenora-benchmarks
-exec ./target/release/xenora-bench "$@"
+exec cargo run --locked --release -p xenora-benchmarks --bin xenora-bench -- "$@"

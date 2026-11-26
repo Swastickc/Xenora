@@ -8,7 +8,9 @@
 //! the same order, with the address tables at RVA 0x2050, 0x3000 and 0x3020.
 
 use std::collections::BTreeMap;
-use xenora_loader::import_table::{DelayField, ImportTableError, parse_delay_imports};
+use xenora_loader::import_table::{DelayField, ImportName, ImportTableError, parse_delay_imports};
+use xenora_loader::imports::{ImportError, ImportRegistry, ServiceStatus};
+use xenora_loader::pe::ParsedPe;
 use xenora_loader::probe::{
     ImportedSymbol, ProbeConfig, ProbeReport, probe_pe_bytes, run_probe_and_export,
 };
@@ -29,6 +31,8 @@ const DELAYED: [Row; 3] = [
 ];
 
 // File offsets in the fixture.
+const ORDINARY_DESCRIPTOR: usize = 0x600;
+const ORDINARY_TERMINATOR: usize = ORDINARY_DESCRIPTOR + 20;
 const NUMBER_OF_RVA_AND_SIZES: usize = 0x98 + 108;
 const DELAY_DIRECTORY_ENTRY: usize = 0x98 + 216;
 const DELAY_DIRECTORY_SIZE: usize = DELAY_DIRECTORY_ENTRY + 4;
@@ -36,6 +40,17 @@ const RDATA_RAW_SIZE: usize = 0x188 + 40 + 16;
 /// The delay-load directory is at RVA 0x2200; `.rdata` maps RVA 0x2000 to 0x600.
 const FIRST_DESCRIPTOR: usize = 0x800;
 const SECOND_DESCRIPTOR: usize = 0x820;
+
+fn import_strings_with_spaces() -> Vec<u8> {
+    // These offsets point to the fixture's module and hint/name strings.
+    // Equal-length replacements leave the terminators and tables intact.
+    let mut pe = FIXTURE.to_vec();
+    pe[0x670..0x684].copy_from_slice(b"fixture ordinary.dll");
+    pe[0x692..0x6A0].copy_from_slice(b"Ordinary  Name");
+    pe[0x730..0x743].copy_from_slice(b"fixture delay-a.dll");
+    pe[0x772..0x77E].copy_from_slice(b"Delayed Name");
+    pe
+}
 
 fn rows(imports: &[ImportedSymbol]) -> Vec<(&str, &str, u32)> {
     imports
@@ -141,6 +156,143 @@ fn ordinary_and_delayed_imports_are_reported_apart() {
     assert!(
         files["runtime_gap_matrix.md"]
             .contains("The delay-load import tables contain 3 more slots across 2 DLLs.")
+    );
+}
+
+#[test]
+fn printable_spaces_survive_ordinary_and_delayed_import_reports() {
+    let (report, files) = export(&import_strings_with_spaces(), "spaces");
+    assert_eq!(report.import_error, None);
+    assert_eq!(report.delay_import_error, None);
+    assert_eq!(
+        rows(&report.imports),
+        [
+            ("fixture ordinary.dll", "Ordinary  Name", 0x2050),
+            ("fixture ordinary.dll", "Ordinal#3", 0x2058),
+        ]
+    );
+    assert_eq!(
+        rows(&report.delayed_imports),
+        [
+            ("fixture delay-a.dll", "Delayed Name", 0x3000),
+            ("fixture delay-a.dll", "Ordinal#7", 0x3008),
+            DELAYED[2],
+        ]
+    );
+    assert!(files["imports.csv"].lines().any(|row| {
+        row.starts_with("\"fixture delay-a.dll\",\"Delayed Name\",0x00003000,delayed,")
+    }));
+    assert_eq!(
+        files["missing_imports.csv"]
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>(),
+        [
+            "\"fixture ordinary.dll\",\"Ordinary  Name\",0x00002050,name",
+            "\"fixture ordinary.dll\",\"Ordinal#3\",0x00002058,ordinal",
+        ]
+    );
+}
+
+#[test]
+fn an_import_with_spaces_and_no_service_is_unresolved() {
+    let bytes = import_strings_with_spaces();
+    let pe = ParsedPe::parse(&bytes).unwrap();
+    let mut memory = pe.load_into_memory(&bytes).unwrap().memory;
+    let base = pe.image_base;
+    let before = memory.read_u64(base + 0x2050).unwrap();
+    let error = ImportRegistry::new()
+        .bind_imports(&pe, &bytes, base, &mut memory)
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ImportError::UnresolvedImport { ref module, ref symbol }
+                if module == "fixture ordinary.dll" && symbol == "Ordinary  Name"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(memory.read_u64(base + 0x2050).unwrap(), before);
+}
+
+fn ordinary_registry() -> ImportRegistry {
+    let mut registry = ImportRegistry::new();
+    for name in [
+        ImportName::Name(ORDINARY[0].1.into()),
+        ImportName::Ordinal(3),
+    ] {
+        registry
+            .try_register(
+                ORDINARY[0].0,
+                name,
+                ServiceStatus::Implemented,
+                Box::new(|_, _, _| Ok(0)),
+            )
+            .unwrap();
+    }
+    registry
+}
+
+fn assert_incomplete_ordinary_descriptor(bytes: &[u8], rva: u32, prefix: &[Row]) {
+    let expected = ImportTableError::IncompleteImportDescriptor { rva };
+    let report = probe_pe_bytes(bytes, &ProbeConfig::default()).unwrap();
+    assert_eq!(report.import_error, Some(expected));
+    assert_eq!(rows(&report.imports), prefix);
+    assert_eq!(report.delay_import_error, None);
+    assert_eq!(rows(&report.delayed_imports), DELAYED);
+
+    let pe = ParsedPe::parse(bytes).unwrap();
+    let mut memory = pe.load_into_memory(bytes).unwrap().memory;
+    let slots = ORDINARY.map(|(_, _, rva)| pe.image_base + u64::from(rva));
+    let before = slots.map(|slot| memory.read_u64(slot).unwrap());
+    let error = ordinary_registry()
+        .bind_imports(&pe, bytes, pe.image_base, &mut memory)
+        .unwrap_err();
+    assert!(
+        matches!(error, ImportError::Table(error) if error == expected),
+        "{error:?}"
+    );
+    assert_eq!(slots.map(|slot| memory.read_u64(slot).unwrap()), before);
+}
+
+#[test]
+fn ordinary_terminator_must_have_zero_timestamp_and_forwarder_chain() {
+    for offset in [4, 8] {
+        let mut bytes = FIXTURE.to_vec();
+        put(&mut bytes, ORDINARY_TERMINATOR + offset, 1);
+        assert_incomplete_ordinary_descriptor(&bytes, 0x2014, &ORDINARY);
+    }
+}
+
+#[test]
+fn nonempty_ordinary_descriptor_requires_a_name_and_address_table() {
+    for offset in [12, 16] {
+        let mut bytes = FIXTURE.to_vec();
+        put(&mut bytes, ORDINARY_DESCRIPTOR + offset, 0);
+        assert_incomplete_ordinary_descriptor(&bytes, 0x2000, &[]);
+    }
+}
+
+#[test]
+fn ordinary_descriptor_without_lookup_table_still_uses_the_address_table() {
+    let mut bytes = FIXTURE.to_vec();
+    put(&mut bytes, ORDINARY_DESCRIPTOR, 0);
+    put(&mut bytes, ORDINARY_DESCRIPTOR + 4, 1);
+    put(&mut bytes, ORDINARY_DESCRIPTOR + 8, 1);
+
+    let report = probe_pe_bytes(&bytes, &ProbeConfig::default()).unwrap();
+    assert_eq!(report.import_error, None);
+    assert_eq!(rows(&report.imports), ORDINARY);
+    assert_eq!(report.delay_import_error, None);
+    assert_eq!(rows(&report.delayed_imports), DELAYED);
+
+    let pe = ParsedPe::parse(&bytes).unwrap();
+    let mut memory = pe.load_into_memory(&bytes).unwrap().memory;
+    assert_eq!(
+        ordinary_registry()
+            .bind_imports(&pe, &bytes, pe.image_base, &mut memory)
+            .unwrap(),
+        ORDINARY.len()
     );
 }
 

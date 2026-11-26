@@ -64,7 +64,7 @@ whose entry point returns its status gives the same result as `ExitProcess`.
 - It is one program. Local runs used Homebrew clang 23.1.6 and Apple clang 17.0.0, each with LLD 23.1.5. Another compiler or a larger program can need instructions and services this one does not.
 - Most services it calls are marked partial in the registry. They did what this program needs.
 - It runs in the DBT only. The interpreter has no import dispatch.
-- It reaches the guest through a test, not through `xenora run`, which accepts only two built-in fixtures.
+- The gate itself is a test. The same program can be run by hand with `xenora run`; see [Running a program from the command line](#running-a-program-from-the-command-line).
 - Nothing here concerns a commercial game or an Xbox launch environment.
 
 ## A2
@@ -119,9 +119,78 @@ Seven more tests guard against a runtime that reports success for everything:
 
 - It is one program and one C runtime: mingw-w64 14.0.0 with GCC 16.2.0 locally. A program built with Microsoft's compiler starts differently and imports other functions; none has been tried. A larger program can need instructions and services this one does not.
 - The same source built natively with Apple clang prints the same text once carriage returns are removed. That comparison was made by hand and is not part of the test. Nothing was compared with Windows or with x86 hardware.
-- No floating point is formatted and no input is read. `printf` refuses the floating-point and wide-character conversions, and `stdin` and the `scanf` family do not exist.
+- The program formats no floating point and reads no input. `printf` has since gained the floating-point conversions (#454); it still refuses the wide-character ones, and `stdin` and the `scanf` family do not exist.
 - Most services the program calls are marked partial in the registry. No locale exists, no signal handler or exception filter is ever called, the environment table is empty, and a C stream is unbuffered and has no seek. They did what this program needs.
 - `VirtualProtect`, `VirtualQuery` and `__C_specific_handler` are stubs that stop the guest if called. The program imports them and never calls them.
 - It runs in the DBT only, on one guest thread.
-- It reaches the guest through a test, not through `xenora run`.
+- The gate itself is a test. The same program can be run by hand with `xenora run`; see [Running a program from the command line](#running-a-program-from-the-command-line).
 - Nothing here concerns a commercial game or an Xbox launch environment.
+
+## Running a program from the command line
+
+`xenora run` runs any PE32+ executable through the loader, the standard
+services and the ARM64 DBT (#439; the maintainer's decision on #257 was to
+allow any executable):
+
+```sh
+sh tests/compat_fixtures/build-gate-a2.sh artifacts/gate-a2
+cargo run --locked -p xenora -- run --experimental \
+    --pe artifacts/gate-a2/gate-a2-O2.exe -- 2026 xenora
+```
+
+What follows `--` reaches the program after its own file name. The program's
+standard output and standard error are written to the host's, and the command
+exits with the program's exit status.
+
+- **Which path a file takes.** One of the two embedded fixtures, given as it
+  is, keeps its own path: its draw is verified and its result is checked, as
+  before. Every other file, and any file given a digest or program arguments,
+  runs as a program. A fixture with one byte changed is a program, gets no
+  draw service, and stops at its unresolved import.
+- **An optional digest.** With `--sha256 <64 hex digits>` the file runs only
+  if its SHA-256 is the one given. The file is read once and the bytes that
+  were hashed are the bytes that run.
+- **Limits.** The program runs in a separate worker process with a wall
+  deadline: 15 seconds, or `--wall-seconds <1..=3600>` (#448). It has no step
+  limit unless `--max-steps <n>` gives one; a limit that is reached is a
+  failure, never an exit. The embedded fixtures keep their own limits: 100
+  steps by default, 10,000 at most, and 15 seconds. The file's size is not
+  capped: it is read whole, and
+  the loader refuses an image that maps to more than 256 MiB. The fixture
+  draw service is not registered.
+- **Exit codes.** A host exit code has eight bits and a guest status has
+  thirty-two. The low eight bits are returned, except that a status other
+  than zero never becomes zero (it becomes 1); whenever the two differ the
+  full status is printed on standard error. 124 means the wall deadline, 125
+  any other failure: a file that is not a loadable executable, an import
+  nobody provides, a fault, or a step limit reached before the program
+  exited. A program that itself exits with 124 or 125 cannot be told apart
+  from those by the code alone. Usage errors are 2.
+- **Output.** It is shown when the program ends, standard output first and
+  then standard error, so the two are not interleaved as the program wrote
+  them. A program stopped by the wall deadline shows what it had written by
+  then, and the command exits with 124.
+- **What this is not.** Xenora is not a hardened runtime (see
+  [`SECURITY.md`](../../SECURITY.md)): the guest's code is translated to
+  native ARM64 and run in the worker process, and nothing confines that
+  process beyond the checks the translator and the services make. Do not run
+  a file you would not otherwise trust on this machine. Most programs will
+  not run: they stop at the first import or instruction Xenora lacks. Nothing
+  here concerns a commercial game or an Xbox launch environment.
+
+`crates/cli/tests/run_program.rs` runs the real `xenora` binary on the Gate A
+programs:
+
+```sh
+cargo test --locked -p xenora --test run_program
+```
+
+It checks the arguments the program echoes, its output and exit status at four
+optimization levels, the three controls (42, 3 and 22), a 32-bit status, the
+digest (wrong, one digit off, and a file changed after it was hashed), a step
+limit that is too small, the trace, a changed fixture, an import nobody
+provides, and files that are not executables. A further build of the Gate A2
+program, `GATE_SPIN`, counts to its first argument or for ever: it shows that a
+program needing more than 1,000,000 steps runs without `--max-steps`, that a
+step limit which is given holds, and that a program which never ends is
+stopped at `--wall-seconds` with what it had printed on standard output.

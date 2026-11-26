@@ -236,20 +236,19 @@ impl ParsedPe {
             });
         }
 
-        // Mapped section ranges must not overlap. Zero-sized sections map nothing.
-        let mut ranges: Vec<(u32, u32)> = sections
-            .iter()
-            .map(|s| {
-                (
-                    s.virtual_address,
-                    s.virtual_address + s.virtual_size.max(s.raw_data_size),
-                )
-            })
-            .filter(|(start, end)| start < end)
-            .collect();
-        ranges.sort_unstable();
-        if ranges.windows(2).any(|w| w[1].0 < w[0].1) {
-            return Err(PeError::InvalidSectionHeaders);
+        // Mapped section ranges must not overlap. An ascending, disjoint
+        // table needs neither a temporary allocation nor sorting. Preserve
+        // section-table order in the result, even for an unsorted table.
+        let ranges = sections.iter().filter_map(|section| {
+            let size = section.virtual_size.max(section.raw_data_size);
+            (size != 0).then_some((section.virtual_address, section.virtual_address + size))
+        });
+        if !ranges.clone().is_sorted_by(|left, right| left.1 <= right.0) {
+            let mut ranges: Vec<_> = ranges.collect();
+            ranges.sort_unstable();
+            if ranges.windows(2).any(|pair| pair[1].0 < pair[0].1) {
+                return Err(PeError::InvalidSectionHeaders);
+            }
         }
 
         // The entry point must lie inside an executable section.
@@ -338,10 +337,26 @@ impl ParsedPe {
     /// Load this parsed PE into a fresh `GuestMemory` instance, mapping the
     /// headers and all sections.
     pub fn load_into_memory(&self, bytes: &[u8]) -> Result<LoadedImage, PeError> {
-        self.load_at_base(bytes, self.image_base)
+        let (memory, entry_point, image_base_field) = self.map_at_base(bytes, self.image_base)?;
+        Ok(LoadedImage {
+            pe: self.clone(),
+            memory,
+            entry_point,
+            image_base_field,
+        })
     }
 
-    pub(crate) fn load_at_base(&self, bytes: &[u8], base: u64) -> Result<LoadedImage, PeError> {
+    pub(crate) fn load_at_base(self, bytes: &[u8], base: u64) -> Result<LoadedImage, PeError> {
+        let (memory, entry_point, image_base_field) = self.map_at_base(bytes, base)?;
+        Ok(LoadedImage {
+            pe: self,
+            memory,
+            entry_point,
+            image_base_field,
+        })
+    }
+
+    fn map_at_base(&self, bytes: &[u8], base: u64) -> Result<(GuestMemory, u64, u64), PeError> {
         let (headers_len, headers_mapped, image_base_field) = self.headers_for(bytes)?;
 
         // The headers and each section become zero-filled host allocations, so bound
@@ -405,11 +420,95 @@ impl ParsedPe {
             .checked_add(u64::from(self.entry_point_rva))
             .ok_or(PeError::InvalidEntryPoint)?;
 
-        Ok(LoadedImage {
-            pe: self.clone(),
-            memory,
-            entry_point,
-            image_base_field,
-        })
+        Ok((memory, entry_point, image_base_field))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &[u8] = include_bytes!("../../../fixtures/pe/runtime-services.exe");
+
+    fn section_table(bytes: &[u8]) -> usize {
+        let coff = read_u32(bytes, 0x3c) as usize + 4;
+        coff + 20 + usize::from(read_u16(bytes, coff + 16))
+    }
+
+    #[test]
+    fn unsorted_disjoint_sections_retain_table_order() {
+        let original = ParsedPe::parse(FIXTURE).unwrap();
+        let mut bytes = FIXTURE.to_vec();
+        let first = section_table(&bytes);
+        for offset in 0..SECTION_HEADER_SIZE {
+            bytes.swap(first + offset, first + SECTION_HEADER_SIZE + offset);
+        }
+
+        let parsed = ParsedPe::parse(&bytes).unwrap();
+        let mut expected = original.sections;
+        expected.swap(0, 1);
+        assert_eq!(parsed.sections, expected);
+        assert_eq!(parsed.entry_point_rva, original.entry_point_rva);
+    }
+
+    #[test]
+    fn entry_point_uses_the_half_open_mapped_section_range() {
+        let mut bytes = FIXTURE.to_vec();
+        let optional_header = read_u32(&bytes, 0x3c) as usize + 24;
+        let entry_field = optional_header + 16..optional_header + 20;
+        let text = section_table(&bytes);
+        let contents_end = read_u32(&bytes, text + 12) + read_u32(&bytes, text + 16);
+
+        // The mapped span includes the raw bytes beyond the declared virtual size.
+        bytes[text + 8..text + 12].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[entry_field.clone()].copy_from_slice(&(contents_end - 1).to_le_bytes());
+        assert!(ParsedPe::parse(&bytes).is_ok());
+
+        // Start a non-executable section immediately after the executable one.
+        let rdata = text + SECTION_HEADER_SIZE;
+        bytes[rdata + 12..rdata + 16].copy_from_slice(&contents_end.to_le_bytes());
+        bytes[entry_field.clone()].copy_from_slice(&contents_end.to_le_bytes());
+        assert_eq!(
+            ParsedPe::parse(&bytes).unwrap_err(),
+            PeError::InvalidEntryPoint
+        );
+
+        // A zero-length executable section at the entry cannot admit it or
+        // make the nonempty ranges overlap, even out of table order.
+        let empty_rva = contents_end + 1;
+        let empty = rdata + 2 * SECTION_HEADER_SIZE;
+        bytes[empty + 8..empty + 12].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[empty + 12..empty + 16].copy_from_slice(&empty_rva.to_le_bytes());
+        bytes[empty + 16..empty + 20].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[empty + 36..empty + 40].copy_from_slice(&IMAGE_SCN_MEM_EXECUTE.to_le_bytes());
+        bytes[entry_field.clone()].copy_from_slice(&empty_rva.to_le_bytes());
+        assert_eq!(
+            ParsedPe::parse(&bytes).unwrap_err(),
+            PeError::InvalidEntryPoint
+        );
+
+        bytes[entry_field].copy_from_slice(&(contents_end - 1).to_le_bytes());
+        assert!(ParsedPe::parse(&bytes).is_ok());
+    }
+
+    #[test]
+    fn overlapping_sections_are_rejected_regardless_of_table_order() {
+        let mut bytes = FIXTURE.to_vec();
+        let first = section_table(&bytes);
+        let second = first + SECTION_HEADER_SIZE;
+        // Extend .text's mapped range into .rdata without changing its raw data.
+        bytes[first + 8..first + 12].copy_from_slice(&0x1200_u32.to_le_bytes());
+        assert_eq!(
+            ParsedPe::parse(&bytes).unwrap_err(),
+            PeError::InvalidSectionHeaders
+        );
+
+        for offset in 0..SECTION_HEADER_SIZE {
+            bytes.swap(first + offset, second + offset);
+        }
+        assert_eq!(
+            ParsedPe::parse(&bytes).unwrap_err(),
+            PeError::InvalidSectionHeaders
+        );
     }
 }

@@ -7,15 +7,15 @@
 //! clock always interleave the same way. Guest threads never run concurrently,
 //! so nothing here relies on a guest memory-ordering model.
 //!
-//! A service that has to wait returns [`ExitReason::GuestBlocked`] without any
-//! effect and with RIP still on its trampoline. The scheduler runs that call
-//! again when something it may wait for has changed, oldest waiter first.
+//! A service that has to wait returns [`ExitReason::GuestBlocked`] with RIP
+//! still on its trampoline. The scheduler runs that call again when something it
+//! may wait for has changed, oldest waiter first, until it completes.
 
-use crate::cpu::{CpuState, ExitReason};
+use crate::cpu::{CpuState, ExitReason, Register};
 use crate::dbt::DbtEngine;
 use crate::memory::GuestMemory;
 use crate::services::ServicesState;
-use crate::services::threads::{RunState, THREAD_RETURN};
+use crate::services::threads::{RunState, THREAD_RETURN, prepare_worker_exit};
 use std::sync::Arc;
 
 /// Default instructions a thread runs before the next one gets a turn.
@@ -145,8 +145,7 @@ impl Scheduler {
             Stop::Ended => Turn::Continue,
             Stop::Blocked => {
                 let mut table = self.state.threads.lock().expect("guest thread table");
-                table.sequence += 1;
-                let sequence = table.sequence;
+                let sequence = table.ticket();
                 if let Some(thread) = table.threads.get_mut(&id) {
                     thread.run = RunState::Blocked(sequence);
                 }
@@ -297,22 +296,37 @@ impl Scheduler {
         );
         report.instructions += result.instructions_executed + usize::from(stopped);
         let rip = cpu.rip;
-        let returned = (rip == THREAD_RETURN && id != main_id)
-            .then(|| cpu.get(crate::cpu::Register::Rax) as u32);
+        let returned =
+            (rip == THREAD_RETURN && id != main_id).then(|| cpu.get(Register::Rax) as u32);
+        let run_fls_cleanup =
+            returned.is_some() && self.state.has_thread_fls_callbacks(cpu.gs_base);
         if id == main_id {
             report.main = cpu.clone();
         }
-        let exit = {
+        {
             let mut table = self.state.threads.lock().expect("guest thread table");
             let Some(thread) = table.threads.get_mut(&id) else {
                 return Stop::Ended;
             };
+            if let Some(code) = thread.exit.or(returned.filter(|_| !run_fls_cleanup)) {
+                drop(table);
+                self.state.end_thread(id, code, memory);
+                return Stop::Ended;
+            }
+            if let Some(code) = returned {
+                if let Err(reason) =
+                    prepare_worker_exit(engine.import_registry.as_ref(), &mut cpu, memory, code)
+                {
+                    return Stop::Outcome(Outcome::Fault {
+                        thread: id,
+                        reason,
+                        rip,
+                    });
+                }
+                thread.cpu = Some(cpu);
+                return Stop::Preempted { front: true };
+            }
             thread.cpu = Some(cpu);
-            thread.exit
-        };
-        if let Some(code) = exit.or(returned) {
-            self.state.end_thread(id, code, memory);
-            return Stop::Ended;
         }
         match result.exit_reason {
             ExitReason::StepLimitExceeded => Stop::Preempted { front: false },

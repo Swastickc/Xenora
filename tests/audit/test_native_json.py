@@ -80,12 +80,29 @@ class NativeJsonTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("UnicodeDecodeError", result.stderr)
 
+    def test_forbidden_dependency_in_linkage_rows_is_rejected(self):
+        binary = "/synthetic/xenora"
+        entry = json.dumps({"executable": binary}).encode("utf-8") + b"\n"
+        for dependency in ("libVuLkAn.dylib", "libMoltenVK.dylib"):
+            with self.subTest(dependency=dependency):
+                linkage = f"{binary}:\n\t@rpath/{dependency} (compatibility version 1.0.0)\n"
+                setup = (
+                    "import subprocess\n"
+                    "from unittest.mock import Mock\n"
+                    "subprocess.run = Mock()\n"
+                    f"subprocess.check_output = Mock(side_effect=['arm64\\n', {linkage!r}])\n"
+                )
+                result = self.run_audit([entry, b"{}\n"], code=setup + AUDIT)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(linkage, result.stdout)
+                self.assertIn(f"Unexpected graphics linkage: {binary}", result.stderr)
+
     @unittest.skipUnless(
         sys.platform == "darwin" and platform.machine() == "arm64",
         "requires native ARM64 macOS inspection tools",
     )
     def test_native_inspection_of_unicode_path_under_ascii_locale(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(prefix="xenora-vulkan-moltenvk-") as directory:
             root = Path(directory)
             source = root / "fixture.c"
             source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
@@ -104,7 +121,7 @@ class NativeJsonTests(unittest.TestCase):
                     streams[stream] = entry
                     result = self.run_audit(streams, code=AUDIT)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn(str(binary), result.stdout)
+                    self.assertIn(f"{binary}:\n", result.stdout)
                     self.assertIn("Checked 1 native executables", result.stdout)
 
 

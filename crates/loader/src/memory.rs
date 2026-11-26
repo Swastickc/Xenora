@@ -89,6 +89,11 @@ pub(crate) const PROCESS_HEAP: u64 = u64::MAX - 2;
 const MAX_DYNAMIC_BYTES: usize = 64 * 1024 * 1024;
 /// Host storage bound for each dynamic allocation kind.
 pub(crate) const DYNAMIC_BUDGET: u64 = MAX_DYNAMIC_BYTES as u64;
+/// How many regions at the front of the table a lookup checks in order before
+/// it searches: a program's image and the first mappings are usually there,
+/// and a short scan is faster than a search over a small table. Four was the
+/// fastest of 0, 4 and 8 in `region_lookup_timing` on an Apple M1 Max (#102).
+const FRONT_SCAN: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AllocationKind {
@@ -118,6 +123,14 @@ impl MappedRegion {
     }
 }
 
+/// Where the program's own image is: its handle, size and entry point.
+#[derive(Clone, Copy)]
+pub(crate) struct MainImage {
+    pub(crate) base: u64,
+    pub(crate) size: u32,
+    pub(crate) entry_point: u64,
+}
+
 /// Guest virtual memory address space.
 #[derive(Default, Clone)]
 pub struct GuestMemory {
@@ -128,6 +141,20 @@ pub struct GuestMemory {
     crt_errno: std::collections::BTreeMap<u64, u64>,
     pub(crate) callback_frames:
         std::collections::BTreeMap<(u64, u64), crate::imports::CallbackFrame>,
+    /// The program's image, for module services.
+    pub(crate) main_image: Option<MainImage>,
+    /// Function tables of the mapped images, for exception dispatch.
+    pub(crate) function_tables: Vec<crate::exceptions::FunctionTable>,
+    /// Exception dispatches waiting for a guest handler, by TEB and stack slot.
+    pub(crate) exception_frames:
+        std::collections::BTreeMap<(u64, u64), crate::exceptions::Dispatch>,
+    /// `__C_specific_handler` calls waiting for a guest filter or termination
+    /// handler, by TEB and stack slot.
+    pub(crate) scope_frames: std::collections::BTreeMap<(u64, u64), crate::exceptions::ScopeWalk>,
+    /// The unmapped address the last failed checked write stopped at. A data
+    /// fault at this address was a write, which an access-violation record
+    /// reports; [`MemoryError::UnmappedAddress`] does not say.
+    pub(crate) write_fault: Option<u64>,
 }
 
 impl GuestMemory {
@@ -424,6 +451,63 @@ impl GuestMemory {
         true
     }
 
+    /// The first region, in table order, that ends after `address`: where
+    /// every data access and the resolver start (#102). It is the region a
+    /// scan from the front would find. The first [`FRONT_SCAN`] regions are checked in order, as
+    /// that scan would; past them, the region is located by binary search.
+    ///
+    /// The table is sorted by base, and no region's base lies strictly
+    /// inside another region. Every way the table changes keeps that true:
+    /// `insert_region` refuses an overlap, which includes a base strictly
+    /// inside a non-empty region; a dynamic base is placed outside every
+    /// region, and only an empty allocation may share a base; a block grows
+    /// in place only up to the base of the next region in the table; and
+    /// removal keeps the order. Mappings may still overlap, but only when
+    /// they share a base, which is what an empty heap block grown in place
+    /// over the mapping at its base does.
+    ///
+    /// Let `b` be the largest base at or below `address`. A region with a
+    /// smaller base cannot reach past `address`: it would then contain `b`.
+    /// So the region found is the first of those based at `b` that ends
+    /// after `address`, if there is one, or else the next region in the
+    /// table, which starts above `address`.
+    #[inline]
+    fn first_ending_after(&self, address: u64) -> Option<(usize, &MappedRegion)> {
+        let regions = &self.regions;
+        let front = regions.len().min(FRONT_SCAN);
+        let found = regions[..front]
+            .iter()
+            .enumerate()
+            .find(|(_, region)| region.base + region.data.len() as u64 > address);
+        if found.is_some() || regions.len() <= FRONT_SCAN {
+            // Found, or the scan has seen every region.
+            return found;
+        }
+        let index = self.search_ending_after(address)?;
+        Some((index, &regions[index]))
+    }
+
+    /// [`Self::first_ending_after`] past the front of the table, kept out of
+    /// line so that the front scan inlines into every access.
+    #[inline(never)]
+    fn search_ending_after(&self, address: u64) -> Option<usize> {
+        let regions = &self.regions;
+        let ends_after = |region: &MappedRegion| region.base + region.data.len() as u64 > address;
+        let above = regions.partition_point(|region| region.base <= address);
+        if let Some(last) = above.checked_sub(1) {
+            // The regions based at `b` end at `above`; they are usually one.
+            let base = regions[last].base;
+            let mut group = last;
+            while group > 0 && regions[group - 1].base == base {
+                group -= 1;
+            }
+            if let Some(offset) = regions[group..above].iter().position(ends_after) {
+                return Some(group + offset);
+            }
+        }
+        (above < regions.len()).then_some(above)
+    }
+
     pub(crate) fn check_write(&self, address: u64, size: usize) -> Result<(), MemoryError> {
         self.resolve(address, size, Some("write")).map(|_| ())
     }
@@ -458,7 +542,12 @@ impl GuestMemory {
         }
         let mut pieces = Vec::new();
         let mut cursor = address;
-        for (index, region) in self.regions.iter().enumerate() {
+        // Every region before this one ends at or before `address`, so the
+        // loop below would skip it.
+        let start = self
+            .first_ending_after(address)
+            .map_or(self.regions.len(), |(index, _)| index);
+        for (index, region) in self.regions.iter().enumerate().skip(start) {
             let region_end = region.base + region.data.len() as u64;
             if region_end <= cursor {
                 continue;
@@ -526,7 +615,11 @@ impl GuestMemory {
             self.regions[index].data[range].copy_from_slice(src);
             return Ok(());
         }
-        self.write_checked(address, src, Some("write"))
+        let result = self.write_checked(address, src, Some("write"));
+        if let Err(MemoryError::UnmappedAddress(at)) = result {
+            self.write_fault = Some(at);
+        }
+        result
     }
 
     /// Read raw bytes from guest memory at the specified address, checking permissions.
@@ -543,11 +636,7 @@ impl GuestMemory {
     // Only the first eligible mapping may supply the whole span. Otherwise
     // the checked resolver must preserve split-access and overlap priority.
     fn contiguous_region(&self, address: u64, len: usize) -> Option<(usize, Range<usize>)> {
-        let (index, region) = self
-            .regions
-            .iter()
-            .enumerate()
-            .find(|(_, region)| region.base + region.data.len() as u64 > address)?;
+        let (index, region) = self.first_ending_after(address)?;
         let offset = usize::try_from(address.checked_sub(region.base)?).ok()?;
         let end = offset.checked_add(len)?;
         (end <= region.data.len()).then_some((index, offset..end))
@@ -556,6 +645,10 @@ impl GuestMemory {
     /// Read an instruction byte from guest memory, verifying execute permission.
     pub fn fetch_instruction_byte(&self, address: u64) -> Result<u8, MemoryError> {
         address.checked_add(1).ok_or(MemoryError::Overflow)?;
+        // Instruction fetch keeps the scan from the front (#102). Every form
+        // of the search tried here made the translator's decoding 7-10 %
+        // slower in `dbt_bench`, where the table has three regions; a
+        // program's code is usually in its image, near the front.
         let region = self
             .regions
             .iter()
@@ -1479,5 +1572,641 @@ mod mapping_search_contract_tests {
                 assert_eq!(failed, [0xee; 2]);
             }
         }
+    }
+}
+
+/// An opt-in timing run for the region lookup (#102). It times data reads,
+/// data writes and instruction fetches in tables of 1 to 4096 heap blocks,
+/// with code mapped below and above the heap. Run the same source on the
+/// baseline and the candidate, in a release build, on an otherwise idle host:
+///
+/// ```text
+/// cargo test --release -p xenora-loader --lib region_lookup_timing -- --ignored --nocapture
+/// ```
+///
+/// Every sample is checked: each block holds its own index, so a lookup that
+/// finds the wrong block, or a fetch from the wrong code, fails the run.
+#[cfg(test)]
+mod region_lookup_timing {
+    use super::{MemoryPermissions as P, *};
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    /// Below the heap, where a program's image is.
+    const LOW_CODE: u64 = 0x1_4000_0000;
+    /// Above every heap block: the region a front-to-back scan reaches last.
+    const HIGH_CODE: u64 = 0x7000_0000_0000;
+
+    fn setting(name: &str, default: usize, maximum: usize) -> usize {
+        let value = std::env::var(name).map_or(default, |s| s.parse().expect(name));
+        assert!((1..=maximum).contains(&value), "invalid {name}");
+        value
+    }
+
+    fn quantile(sorted: &[f64], fraction: f64) -> f64 {
+        let rank = (sorted.len() - 1) as f64 * fraction;
+        let lo = rank.floor() as usize;
+        sorted[lo] + (sorted[rank.ceil() as usize] - sorted[lo]) * rank.fract()
+    }
+
+    /// The order in which the blocks are visited: xorshift64 from a fixed
+    /// seed, so every run and both builds visit the same blocks.
+    fn order(blocks: usize, accesses: usize) -> Vec<usize> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        (0..accesses)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state % blocks as u64) as usize
+            })
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "manual region lookup timing run; release build on an otherwise idle host"]
+    fn region_lookup_timing() {
+        let samples = setting("XENORA_LOOKUP_SAMPLES", 31, 1001);
+        let accesses = setting("XENORA_LOOKUP_ACCESSES", 65_536, 1 << 22);
+        let warmups = 3;
+        for blocks in [1usize, 16, 256, 4096] {
+            let mut memory = GuestMemory::new();
+            memory
+                .map_region_with_data(LOW_CODE, 4096, P::READ_EXECUTE, &[0x90; 4096])
+                .unwrap();
+            let bases: Vec<u64> = (0..blocks)
+                .map(|_| memory.map_heap_allocation(PROCESS_HEAP, 64).unwrap())
+                .collect();
+            assert!(bases.iter().all(|&base| base < HIGH_CODE));
+            memory
+                .map_region_with_data(HIGH_CODE, 4096, P::READ_EXECUTE, &[0xc3; 4096])
+                .unwrap();
+            for (index, &base) in bases.iter().enumerate() {
+                memory.write_u32(base, index as u32).unwrap();
+            }
+            let order = order(blocks, accesses);
+            let expected_sum: u64 = order.iter().map(|&index| index as u64).sum();
+            for label in ["read", "write", "fetch-low", "fetch-high"] {
+                let mut timings = Vec::with_capacity(samples);
+                for sample in 0..samples + warmups {
+                    let started = Instant::now();
+                    let checked = match label {
+                        "read" => {
+                            let mut sum = 0u64;
+                            for &index in &order {
+                                sum += u64::from(memory.read_u32(black_box(bases[index])).unwrap());
+                            }
+                            sum
+                        }
+                        "write" => {
+                            for (step, &index) in order.iter().enumerate() {
+                                memory
+                                    .write_u32(black_box(bases[index] + 4), step as u32)
+                                    .unwrap();
+                            }
+                            0
+                        }
+                        _ => {
+                            let code = if label == "fetch-low" {
+                                LOW_CODE
+                            } else {
+                                HIGH_CODE
+                            };
+                            let mut sum = 0u64;
+                            for step in 0..accesses as u64 {
+                                let address = black_box(code + (step & 0xfff));
+                                sum += u64::from(memory.fetch_instruction_byte(address).unwrap());
+                            }
+                            sum
+                        }
+                    };
+                    let elapsed = started.elapsed();
+                    let expected = match label {
+                        "read" => expected_sum,
+                        "write" => 0,
+                        "fetch-low" => 0x90 * accesses as u64,
+                        _ => 0xc3 * accesses as u64,
+                    };
+                    assert_eq!(black_box(checked), expected, "{label} blocks={blocks}");
+                    if label == "write" {
+                        // The last write to each block holds the step it was made at.
+                        let mut last = vec![None; blocks];
+                        for (step, &index) in order.iter().enumerate() {
+                            last[index] = Some(step as u32);
+                        }
+                        for (index, step) in last.into_iter().enumerate() {
+                            if let Some(step) = step {
+                                assert_eq!(memory.read_u32(bases[index] + 4), Ok(step));
+                            }
+                        }
+                    }
+                    if sample >= warmups {
+                        timings.push(elapsed.as_nanos() as f64 / accesses as f64);
+                    }
+                }
+                timings.sort_by(f64::total_cmp);
+                println!(
+                    "region-lookup op={label} blocks={blocks} regions={} accesses={accesses} samples={samples} warmups={warmups} median_ns_per_access={:.3} p10={:.3} p90={:.3}",
+                    blocks + 2,
+                    quantile(&timings, 0.5),
+                    quantile(&timings, 0.1),
+                    quantile(&timings, 0.9)
+                );
+            }
+        }
+    }
+}
+
+/// What a lookup finds in large tables (#102). Expected values follow from
+/// the layouts built here and the contract the other tests pin: the earliest
+/// mapping that covers a byte supplies it, an access may continue into the
+/// next mapping, and a failure reports the lowest address it may not touch.
+#[cfg(test)]
+mod region_lookup_contract_tests {
+    use super::{MemoryPermissions as P, *};
+
+    /// Where a zero-size dynamic allocation is placed when a mapping starts
+    /// there: the first candidate base.
+    const SHARED: u64 = 0x0000_0003_0000_0000;
+    const LOW: u64 = 0x10_0000;
+    const HIGH: u64 = 0x5_0000_0000;
+    const STRIDE: u64 = 0x100;
+    const SIZE: usize = 0x40;
+
+    fn byte_of(index: usize) -> u8 {
+        (index % 251) as u8 + 1
+    }
+
+    fn permissions_of(index: usize) -> P {
+        if index % 3 == 2 {
+            P::READ_ONLY
+        } else {
+            P::READ_WRITE_EXECUTE
+        }
+    }
+
+    /// `count` mappings from `start`, each `SIZE` bytes of one value, with
+    /// empty mappings at the base and the end of every fifth one.
+    fn map_run(memory: &mut GuestMemory, start: u64, first: usize, count: usize) {
+        for index in first..first + count {
+            let base = start + (index - first) as u64 * STRIDE;
+            if index % 5 == 0 {
+                memory.map_region(base, 0, P::NO_ACCESS).unwrap();
+            }
+            memory
+                .map_region_with_data(base, SIZE, permissions_of(index), &[byte_of(index); SIZE])
+                .unwrap();
+            if index % 5 == 0 {
+                memory.map_region(base, 0, P::NO_ACCESS).unwrap();
+                memory
+                    .map_region(base + SIZE as u64, 0, P::READ_WRITE_EXECUTE)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// Check every mapping of a run and the gaps around it.
+    fn check_run(memory: &mut GuestMemory, start: u64, first: usize, count: usize) {
+        for index in first..first + count {
+            let base = start + (index - first) as u64 * STRIDE;
+            let end = base + SIZE as u64;
+            let byte = byte_of(index);
+            let permissions = permissions_of(index);
+            for at in [base, base + 1, end - 1] {
+                assert_eq!(memory.read_u8(at), Ok(byte), "{at:#x}");
+                assert_eq!(
+                    memory.fetch_instruction_byte(at),
+                    if permissions.execute {
+                        Ok(byte)
+                    } else {
+                        Err(MemoryError::PermissionViolation {
+                            address: at,
+                            required: "execute",
+                        })
+                    },
+                    "{at:#x}"
+                );
+            }
+            let mut out = [0u8; SIZE];
+            assert_eq!(memory.read_bytes(base, &mut out), Ok(()));
+            assert_eq!(out, [byte; SIZE]);
+            let written = if permissions.write {
+                Ok(())
+            } else {
+                Err(MemoryError::PermissionViolation {
+                    address: base + 2,
+                    required: "write",
+                })
+            };
+            assert_eq!(memory.write_u8(base + 2, byte), written, "{base:#x}");
+            for gap in [base - 1, end] {
+                assert_eq!(memory.read_u8(gap), Err(MemoryError::UnmappedAddress(gap)));
+                assert_eq!(
+                    memory.fetch_instruction_byte(gap),
+                    Err(MemoryError::UnmappedAddress(gap))
+                );
+            }
+            // Running off the end reports the first unmapped byte, and the
+            // output is untouched.
+            let mut failed = [0xee; 4];
+            assert_eq!(
+                memory.read_bytes(end - 2, &mut failed),
+                Err(MemoryError::UnmappedAddress(end))
+            );
+            assert_eq!(failed, [0xee; 4]);
+            assert_eq!(memory.read_bytes(end, &mut []), Ok(()), "{end:#x}");
+        }
+    }
+
+    #[test]
+    fn large_tables_keep_every_mapping_gap_and_permission() {
+        let mut memory = GuestMemory::new();
+        map_run(&mut memory, HIGH, 700, 700);
+        map_run(&mut memory, LOW, 0, 700);
+        check_run(&mut memory, LOW, 0, 700);
+        check_run(&mut memory, HIGH, 700, 700);
+        assert_eq!(memory.read_u8(0), Err(MemoryError::UnmappedAddress(0)));
+        let last = HIGH + 699 * STRIDE + SIZE as u64;
+        assert_eq!(
+            memory.fetch_instruction_byte(u64::MAX - 1),
+            Err(MemoryError::UnmappedAddress(u64::MAX - 1))
+        );
+        assert_eq!(
+            memory.read_u8(last + 0x1000),
+            Err(MemoryError::UnmappedAddress(last + 0x1000))
+        );
+    }
+
+    #[test]
+    fn overlapping_mappings_keep_first_mapping_priority_in_a_large_table() {
+        let mut memory = GuestMemory::new();
+        map_run(&mut memory, LOW, 0, 400);
+        map_run(&mut memory, HIGH, 400, 400);
+        // A mapping at the first candidate base, then two empty heap blocks,
+        // one per heap, that land on it and grow in place over it: three
+        // mappings at one base, in the order they were made.
+        memory
+            .map_region_with_data(SHARED, 4, P::READ_EXECUTE, &[1, 2, 3, 4])
+            .unwrap();
+        let first = memory.map_heap_allocation(PROCESS_HEAP, 0).unwrap();
+        assert_eq!(first, SHARED);
+        assert_eq!(
+            memory.resize_heap_allocation(PROCESS_HEAP, first, 8, true),
+            Ok(SHARED)
+        );
+        let heap = memory.create_private_heap(0).unwrap();
+        let second = memory.map_heap_allocation(heap, 0).unwrap();
+        assert_eq!(second, SHARED);
+        assert_eq!(
+            memory.resize_heap_allocation(heap, second, 12, true),
+            Ok(SHARED)
+        );
+        // Bytes 0-3 come from the mapping, 4-7 from the first block and 8-11
+        // from the second; both blocks start zeroed.
+        let mut out = [0xee; 12];
+        assert_eq!(memory.read_bytes(SHARED, &mut out), Ok(()));
+        assert_eq!(out, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0]);
+        // The mapping is not writable, so a write that starts in it fails at
+        // its first byte and writes nothing.
+        assert_eq!(
+            memory.write_u8(SHARED + 1, 9),
+            Err(MemoryError::PermissionViolation {
+                address: SHARED + 1,
+                required: "write",
+            })
+        );
+        // The blocks are writable and not executable.
+        assert_eq!(memory.write_u8(SHARED + 5, 0x55), Ok(()));
+        assert_eq!(memory.write_u8(SHARED + 9, 0x99), Ok(()));
+        assert_eq!(memory.read_u8(SHARED + 5), Ok(0x55));
+        assert_eq!(memory.read_u8(SHARED + 9), Ok(0x99));
+        assert_eq!(memory.fetch_instruction_byte(SHARED + 3), Ok(4));
+        for at in [SHARED + 4, SHARED + 11] {
+            assert_eq!(
+                memory.fetch_instruction_byte(at),
+                Err(MemoryError::PermissionViolation {
+                    address: at,
+                    required: "execute",
+                })
+            );
+        }
+        // A write across the mapping into the blocks fails at the mapping;
+        // one that starts in the first block runs on into the second.
+        assert_eq!(
+            memory.write_bytes(SHARED + 2, &[7; 4]),
+            Err(MemoryError::PermissionViolation {
+                address: SHARED + 2,
+                required: "write",
+            })
+        );
+        assert_eq!(memory.write_bytes(SHARED + 6, &[7; 6]), Ok(()));
+        let mut out = [0xee; 13];
+        assert_eq!(
+            memory.read_bytes(SHARED, &mut out),
+            Err(MemoryError::UnmappedAddress(SHARED + 12))
+        );
+        assert_eq!(out, [0xee; 13], "a failed read writes nothing");
+        let mut out = [0xee; 12];
+        memory.read_bytes(SHARED, &mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 0, 0x55, 7, 7, 7, 7, 7, 7]);
+        assert_eq!(
+            memory.read_u8(SHARED + 12),
+            Err(MemoryError::UnmappedAddress(SHARED + 12))
+        );
+        check_run(&mut memory, LOW, 0, 400);
+        check_run(&mut memory, HIGH, 400, 400);
+    }
+
+    #[test]
+    fn accesses_split_across_adjacent_mappings_in_a_large_table() {
+        let mut memory = GuestMemory::new();
+        map_run(&mut memory, LOW, 0, 500);
+        // Three adjacent mappings in the middle of the table, the last not
+        // readable.
+        const SPLIT: u64 = 0x2_0000_0000;
+        memory
+            .map_region_with_data(SPLIT, 8, P::READ_WRITE, &[0x11; 8])
+            .unwrap();
+        memory
+            .map_region_with_data(SPLIT + 8, 8, P::READ_EXECUTE, &[0x22; 8])
+            .unwrap();
+        memory
+            .map_region_with_data(SPLIT + 16, 8, P::NO_ACCESS, &[0x33; 8])
+            .unwrap();
+        map_run(&mut memory, HIGH, 500, 500);
+        // Twelve bytes from the middle of the first mapping run on through
+        // the second.
+        let mut out = [0u8; 12];
+        assert_eq!(memory.read_bytes(SPLIT + 4, &mut out), Ok(()));
+        assert_eq!(
+            out,
+            [
+                0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22
+            ]
+        );
+        // One byte further reaches the mapping that cannot be read.
+        let mut out = [0xee; 13];
+        assert_eq!(
+            memory.read_bytes(SPLIT + 4, &mut out),
+            Err(MemoryError::PermissionViolation {
+                address: SPLIT + 16,
+                required: "read",
+            })
+        );
+        assert_eq!(out, [0xee; 13]);
+        assert_eq!(
+            memory.write_bytes(SPLIT + 4, &[0x44; 8]),
+            Err(MemoryError::PermissionViolation {
+                address: SPLIT + 8,
+                required: "write",
+            })
+        );
+        assert_eq!(memory.read_u64(SPLIT), Ok(0x1111_1111_1111_1111));
+        assert_eq!(
+            memory.fetch_instruction_byte(SPLIT + 7),
+            Err(MemoryError::PermissionViolation {
+                address: SPLIT + 7,
+                required: "execute"
+            })
+        );
+        assert_eq!(memory.fetch_instruction_byte(SPLIT + 8), Ok(0x22));
+        assert_eq!(
+            memory.read_u8(SPLIT + 24),
+            Err(MemoryError::UnmappedAddress(SPLIT + 24))
+        );
+        check_run(&mut memory, LOW, 0, 500);
+        check_run(&mut memory, HIGH, 500, 500);
+    }
+}
+
+/// The indexed lookup against the front-to-back scan it replaced (#102),
+/// after random sequences of every operation that changes the table.
+#[cfg(test)]
+mod region_lookup_differential_tests {
+    use super::{MemoryPermissions as P, *};
+
+    /// Where fixed mappings and dynamic allocations meet: dynamic bases
+    /// start here, on 64 KiB boundaries.
+    const WINDOW: u64 = 0x0000_0003_0000_0000;
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next() % bound
+        }
+
+        fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+            items[self.below(items.len() as u64) as usize]
+        }
+    }
+
+    /// The lookup before #102: the first region, from the front, that ends
+    /// after `address`.
+    fn scanned(memory: &GuestMemory, address: u64) -> Option<usize> {
+        memory
+            .regions
+            .iter()
+            .position(|region| region.base + region.data.len() as u64 > address)
+    }
+
+    /// The resolver before #102, unchanged: the same loop from the front of
+    /// the table.
+    fn resolve_scanned(
+        memory: &GuestMemory,
+        address: u64,
+        len: usize,
+        required: Option<&'static str>,
+    ) -> Result<Vec<(usize, usize, usize)>, MemoryError> {
+        let end = address
+            .checked_add(len as u64)
+            .ok_or(MemoryError::Overflow)?;
+        if len == 0 {
+            return if memory.regions.iter().any(|r| r.contains(address, 0)) {
+                Ok(Vec::new())
+            } else {
+                Err(MemoryError::UnmappedAddress(address))
+            };
+        }
+        let mut pieces = Vec::new();
+        let mut cursor = address;
+        for (index, region) in memory.regions.iter().enumerate() {
+            let region_end = region.base + region.data.len() as u64;
+            if region_end <= cursor {
+                continue;
+            }
+            if region.base > cursor {
+                break;
+            }
+            let permitted = match required {
+                None => true,
+                Some("read") => region.permissions.read,
+                Some("write") => region.permissions.write,
+                Some(_) => region.permissions.execute,
+            };
+            if let (false, Some(required)) = (permitted, required) {
+                return Err(MemoryError::PermissionViolation {
+                    address: cursor,
+                    required,
+                });
+            }
+            let take = (end.min(region_end) - cursor) as usize;
+            pieces.push((index, (cursor - region.base) as usize, take));
+            cursor += take as u64;
+            if cursor == end {
+                return Ok(pieces);
+            }
+        }
+        Err(MemoryError::UnmappedAddress(cursor))
+    }
+
+    /// The order and the invariant `first_ending_after` relies on.
+    fn check_table(memory: &GuestMemory) {
+        let regions = &memory.regions;
+        assert!(regions.windows(2).all(|pair| pair[0].base <= pair[1].base));
+        for outer in regions {
+            let outer_end = outer.base + outer.data.len() as u64;
+            for inner in regions {
+                assert!(
+                    !(outer.base < inner.base && inner.base < outer_end),
+                    "base {:#x} inside [{:#x}, {outer_end:#x})",
+                    inner.base,
+                    outer.base
+                );
+            }
+        }
+    }
+
+    fn change(memory: &mut GuestMemory, rng: &mut Rng, heaps: &mut Vec<u64>) {
+        let permissions = rng.pick(&[
+            P::NO_ACCESS,
+            P::READ_ONLY,
+            P::READ_WRITE,
+            P::READ_EXECUTE,
+            P::READ_WRITE_EXECUTE,
+        ]);
+        let size = rng.pick(&[0usize, 0, 1, 8, 0x40, 0x4000, 0x1_0000, 0x1_8000]);
+        let heap_blocks: Vec<(u64, u64)> = memory
+            .regions
+            .iter()
+            .filter_map(|region| match region.allocation {
+                AllocationKind::Heap(heap) => Some((heap, region.base)),
+                _ => None,
+            })
+            .collect();
+        match rng.below(10) {
+            0 | 1 => {
+                let base = if rng.below(16) == 0 {
+                    u64::MAX - rng.below(0x100)
+                } else {
+                    WINDOW + rng.below(48) * 0x8000 + rng.pick(&[0, 0, 4, 0x40])
+                };
+                let size = size.min((u64::MAX - base) as usize);
+                let _ = memory.map_region(base, size, permissions);
+            }
+            2 => {
+                let fixed = WINDOW + rng.below(48) * 0x8000;
+                let base = rng.pick(&[0, fixed]);
+                let _ = memory.map_virtual_allocation(base, size, permissions);
+            }
+            3 | 4 => {
+                let heap = rng.pick(heaps);
+                let _ = memory.map_heap_allocation(heap, rng.pick(&[0, 0, 1, 8, 0x40]));
+            }
+            5 | 6 if !heap_blocks.is_empty() => {
+                let (heap, base) = rng.pick(&heap_blocks);
+                let _ = memory.resize_heap_allocation(heap, base, size, rng.below(2) == 0);
+            }
+            7 if !heap_blocks.is_empty() => {
+                let (heap, base) = rng.pick(&heap_blocks);
+                assert!(memory.release_heap_allocation(heap, base));
+            }
+            8 => {
+                let virtual_bases: Vec<u64> = memory
+                    .regions
+                    .iter()
+                    .filter(|region| region.allocation == AllocationKind::Virtual)
+                    .map(|region| region.base)
+                    .collect();
+                if virtual_bases.is_empty() {
+                    let _ = memory.map_thread_region(0, size, permissions);
+                } else {
+                    assert!(memory.release_virtual_allocation(rng.pick(&virtual_bases)));
+                }
+            }
+            _ => {
+                if heaps.len() > 1 && rng.below(3) == 0 {
+                    let heap = heaps.remove(1 + rng.below(heaps.len() as u64 - 1) as usize);
+                    assert!(memory.destroy_private_heap(heap));
+                } else if let Some(heap) = memory.create_private_heap(0) {
+                    heaps.push(heap);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_lookup_matches_a_front_to_back_scan_after_random_changes() {
+        let (mut shared_bases, mut overlaps) = (0usize, 0usize);
+        for seed in 1..=32u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut memory = GuestMemory::new();
+            let mut heaps = vec![PROCESS_HEAP];
+            for _ in 0..120 {
+                change(&mut memory, &mut rng, &mut heaps);
+                check_table(&memory);
+                let regions = &memory.regions;
+                shared_bases += regions
+                    .windows(2)
+                    .filter(|pair| pair[0].base == pair[1].base)
+                    .count();
+                overlaps += regions
+                    .windows(2)
+                    .filter(|pair| {
+                        pair[0].base == pair[1].base
+                            && !pair[0].data.is_empty()
+                            && !pair[1].data.is_empty()
+                    })
+                    .count();
+                let mut probes = vec![0, 1, WINDOW - 1, u64::MAX - 1, u64::MAX];
+                for region in regions {
+                    let end = region.base + region.data.len() as u64;
+                    for probe in [region.base, end] {
+                        probes.extend([probe.wrapping_sub(1), probe, probe.wrapping_add(1)]);
+                    }
+                }
+                for _ in 0..16 {
+                    probes.push(WINDOW + rng.below(48 * 0x8000 + 0x2_0000));
+                }
+                for &probe in &probes {
+                    assert_eq!(
+                        memory.first_ending_after(probe).map(|(index, _)| index),
+                        scanned(&memory, probe),
+                        "seed {seed} probe {probe:#x}"
+                    );
+                    for len in [0usize, 1, 2, 7, 0x41, 0x1_0001] {
+                        for required in [None, Some("read"), Some("write"), Some("execute")] {
+                            assert_eq!(
+                                memory.resolve(probe, len, required),
+                                resolve_scanned(&memory, probe, len, required),
+                                "seed {seed} probe {probe:#x} len {len} {required:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The runs must reach the layouts the invariant is about: mappings
+        // that share a base, and non-empty ones that overlap.
+        eprintln!("shared bases {shared_bases}, overlaps {overlaps}");
+        assert!(shared_bases > 0, "no two mappings ever shared a base");
+        assert!(overlaps > 0, "no two non-empty mappings ever overlapped");
     }
 }

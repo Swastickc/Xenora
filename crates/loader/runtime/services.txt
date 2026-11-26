@@ -118,8 +118,8 @@ service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
 
 # Standard streams and formatted output for a hosted C program. Output to
 # stdout and stderr is captured, and a stream from fopen is a file. A pointer
-# that is no stream, reading stdin, and floating-point and wide conversions
-# stop the guest with the runtime-limit fault.
+# that is no stream, reading stdin, and wide-character conversions stop the
+# guest with the runtime-limit fault.
 
 service ucrtbase.dll __acrt_iob_func(index: u32) -> ptr
     handler standard_stream
@@ -137,10 +137,76 @@ service ucrtbase.dll __stdio_common_vfprintf(options: u64, stream: ptr, format: 
     ref corecrt_stdio_config.h __stdio_common_vfprintf; Microsoft Learn, vfprintf and format specification syntax
     test formatted_output_reaches_the_captured_standard_streams
 
+# The buffer forms of printf (#466). The standard and legacy rules are from
+# Microsoft's snprintf and _snprintf pages; the secure ones from sprintf_s.
+# The formatted input of the scan family (#605). The floating conversions
+# stop the guest rather than misread; everything else the narrow family
+# documents is implemented.
+service ucrtbase.dll __stdio_common_vsscanf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vsscanf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale
+    ref corecrt_stdio_config.h __stdio_common_vsscanf; Microsoft Learn, scanf and the scanf type-field characters
+    test legacy_sscanf_follows_the_reference_vectors
+
+service ucrtbase.dll __stdio_common_vsprintf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vsprintf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null format or a null buffer with a nonzero count, or an invalid format; -1 without errno for a legacy truncation; stops the guest when both behaviour bits are set or for what is not modelled
+    ref corecrt_stdio_config.h __stdio_common_vsprintf; Microsoft Learn, snprintf and _snprintf
+    test snprintf_writes_inside_the_buffer_and_returns_the_would_be_length
+    test legacy_snprintf_truncates_without_a_terminator_and_returns_minus_one
+    test sprintf_faults_inside_the_buffer_stop_the_guest_and_nothing_leaves_it
+
+# The wide buffer forms (#459): same rules counted in wide characters.
+service ucrtbase.dll __stdio_common_vswprintf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vswprintf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null format or an invalid one; stops the guest for what is not modelled
+    ref corecrt_stdio_config.h __stdio_common_vswprintf; Microsoft Learn, swprintf and format specification syntax
+    test wide_buffer_formatting_counts_in_wide_units
+
+service ucrtbase.dll __stdio_common_vsprintf_s(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vsprintf_s
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null buffer, a zero count, a null or invalid format, or ERANGE when the text does not fit, and the buffer becomes empty; the invalid parameter handler is not modelled, so execution always continues
+    ref corecrt_stdio_config.h __stdio_common_vsprintf_s; Microsoft Learn, sprintf_s
+    test secure_sprintf_empties_the_buffer_and_reports_the_error
+
+service ucrtbase.dll __stdio_common_vfprintf_s(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vfprintf_s
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null stream or format or an invalid format; identical to the plain form here because %n is always invalid
+    ref corecrt_stdio_config.h __stdio_common_vfprintf_s; Microsoft Learn, vfprintf_s
+    test vfprintf_s_and_putchar_write_to_the_streams
+
+service ucrtbase.dll putchar(character: i32) -> i32
+    handler putchar
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails never: writing stdout cannot fail, as the output is captured
+    ref stdio.h putchar
+    test vfprintf_s_and_putchar_write_to_the_streams
+
+service ucrtbase.dll puts(text: ptr) -> i32
+    handler puts
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF with errno EINVAL for a null string; writing stdout cannot otherwise fail, as the output is captured
+    ref stdio.h puts
+    test puts_writes_the_line_to_the_captured_stdout
+
 service ucrtbase.dll fwrite(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64
     handler fwrite
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails 0 with errno EINVAL for a null buffer or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
     ref stdio.h fwrite
     test fwrite_and_fputs_write_to_the_captured_standard_streams
@@ -149,6 +215,7 @@ service ucrtbase.dll fputs(text: ptr, stream: ptr) -> i32
     handler fputs
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
     ref stdio.h fputs
     test fwrite_and_fputs_write_to_the_captured_standard_streams
@@ -157,6 +224,7 @@ service ucrtbase.dll fflush(stream: ptr) -> i32
     handler fflush
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails stops the guest for a pointer that is no stream
     ref stdio.h fflush
     test fflush_and_setvbuf_return_their_documented_results
@@ -165,6 +233,7 @@ service ucrtbase.dll setvbuf(stream: ptr, buffer: ptr, mode: i32, size: u64) -> 
     handler setvbuf
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream
     ref stdio.h setvbuf
     test fflush_and_setvbuf_return_their_documented_results
@@ -175,6 +244,7 @@ service ucrtbase.dll fopen(name: ptr, mode: ptr) -> ptr
     handler fopen
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM
     ref stdio.h fopen
     test a_file_written_through_a_stream_reads_back_line_by_line
@@ -183,6 +253,7 @@ service ucrtbase.dll fclose(stream: ptr) -> i32
     handler fclose
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
     fails EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream
     ref stdio.h fclose
     test a_file_written_through_a_stream_reads_back_line_by_line
@@ -191,9 +262,675 @@ service ucrtbase.dll fgets(buffer: ptr, count: i32, stream: ptr) -> ptr
     handler fgets
     status partial
     alias api-ms-win-crt-stdio-l1-1-0.dll
-    fails null at end of file; null with errno EINVAL or EBADF; stops the guest for stdin or a pointer that is no stream
+    alias msvcrt.dll
+    fails null at end of file; null with errno EINVAL or EBADF; stops the guest for a pointer that is no stream
     ref stdio.h fgets
     test fgets_reads_lines_within_its_count
+    test stdin_lines_follow_iso_c_at_the_edges
+
+# Wide stream io in the C locale: every byte is its wide character. Streams
+# carry the C orientation; the wrong kind of io on an oriented stream fails.
+service ucrtbase.dll fputws(text: ptr, stream: ptr) -> u32
+    handler fputws
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails WEOF for a wide character above 255 (C locale), on a byte-oriented stream, or with errno EINVAL or EBADF
+    ref wchar.h fputws
+    test wide_stream_io_writes_and_reads_in_the_c_locale
+
+service ucrtbase.dll fgetws(buffer: ptr, count: i32, stream: ptr) -> ptr
+    handler fgetws
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails null at end of file, on a byte-oriented stream, or with errno EINVAL or EBADF
+    ref wchar.h fgetws
+    test wide_stream_io_writes_and_reads_in_the_c_locale
+
+service ucrtbase.dll putwchar(unit: u32) -> u32
+    handler putwchar
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails WEOF for a wide character above 255 or once stdout is byte-oriented
+    ref wchar.h putwchar
+    test wide_stream_io_writes_and_reads_in_the_c_locale
+
+service ucrtbase.dll fputwc(unit: u32, stream: ptr) -> u32
+    handler fputwc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails WEOF for a wide character above 255 (C locale), on a byte-oriented stream, or with errno EINVAL or EBADF
+    ref wchar.h fputwc
+    test wide_stream_io_writes_and_reads_in_the_c_locale
+
+service ucrtbase.dll getwchar() -> u32
+    handler getwchar
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails WEOF at end of input or once stdin is byte-oriented
+    ref wchar.h getwchar
+    test wide_stream_io_writes_and_reads_in_the_c_locale
+
+# The standard input stream (#467): bytes supplied by the host before the
+# run, read with text-mode translation.
+service ucrtbase.dll getchar() -> i32
+    handler getchar
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF at end of input; the input is what the host supplied, never interactive
+    ref stdio.h getchar
+    test stdin_lines_follow_iso_c_at_the_edges
+
+service ucrtbase.dll ferror(stream: ptr) -> i32
+    handler ferror
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails the indicator of file streams, set when a write through the stream fails; the standard streams report 0 as their writes have no failure mode; -1 with errno EINVAL for a null stream
+    ref stdio.h ferror
+    test ferror_reports_the_failed_write_of_a_file_stream
+
+service ucrtbase.dll feof(stream: ptr) -> i32
+    handler feof
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails the indicator of the standard input and of file streams; the output streams report 0; -1 with errno EINVAL for a null stream
+    ref stdio.h feof
+    test stdin_lines_follow_iso_c_at_the_edges
+    test secure_fopen_and_stream_indicators_follow_iso_c
+
+
+# The secure open and the stream indicators (#493, second part of package 4 of #459).
+service ucrtbase.dll fopen_s(file: ptr, name: ptr, mode: ptr) -> i32
+    handler fopen_s
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails the error number as its result and in errno, with the output pointer null; EINVAL for a null or empty argument, or a name or mode it cannot read; stops the guest for an output pointer it cannot write; the invalid parameter handler is not modelled
+    ref stdio.h fopen_s
+    test secure_fopen_and_stream_indicators_follow_iso_c
+
+service ucrtbase.dll clearerr(stream: ptr) -> void
+    handler clearerr
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; errno EINVAL for a null stream; stops the guest for a pointer that is no stream
+    ref stdio.h clearerr
+    test secure_fopen_and_stream_indicators_follow_iso_c
+
+# File positioning and file operations (#493, package 4 of #459).
+service ucrtbase.dll _ftelli64(stream: ptr) -> u64
+    handler _ftelli64
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null stream, or EBADF after its file was deleted; stops the guest for a standard stream or a pointer that is no stream
+    ref stdio.h _ftelli64
+    test file_positions_round_trip_and_files_are_removed_and_renamed
+
+service ucrtbase.dll _fseeki64(stream: ptr, offset: u64, origin: i32) -> i32
+    handler _fseeki64
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null stream, an unknown origin or a position before the start, or EBADF after its file was deleted; stops the guest for a standard stream or a pointer that is no stream
+    ref stdio.h _fseeki64
+    test file_positions_round_trip_and_files_are_removed_and_renamed
+
+service ucrtbase.dll fgetpos(stream: ptr, position: ptr) -> i32
+    handler fgetpos
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null argument; stops the guest for a standard stream, a pointer that is no stream, or a position it cannot write
+    ref stdio.h fgetpos
+    test file_positions_round_trip_and_files_are_removed_and_renamed
+
+service ucrtbase.dll fsetpos(stream: ptr, position: ptr) -> i32
+    handler fsetpos
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails -1 with errno EINVAL for a null argument or a negative position; stops the guest for a standard stream, a pointer that is no stream, or a position it cannot read
+    ref stdio.h fsetpos
+    test file_positions_round_trip_and_files_are_removed_and_renamed
+
+service ucrtbase.dll remove(name: ptr) -> i32
+    handler remove
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno ENOENT for a missing or rejected name, EACCES for a directory, EINVAL for a null or empty name
+    ref stdio.h remove
+    test file_positions_round_trip_and_files_are_removed_and_renamed
+
+service ucrtbase.dll rename(from: ptr, to: ptr) -> i32
+    handler rename
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT when the old name holds nothing, EACCES when the new name exists or its directory does not, EINVAL for a null or rejected name; stops the guest for a directory
+    ref stdio.h rename
+    test file_positions_round_trip_and_files_are_removed_and_renamed
+
+# Temporary files (#493, last part of package 4 of #459).
+service ucrtbase.dll tmpfile() -> ptr
+    handler tmpfile
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails null with errno EMFILE at 64 streams, ENOSPC when the drive is full, ENOMEM when the FILE object cannot be allocated
+    ref stdio.h tmpfile
+    test temporary_files_are_uniquely_named_and_deleted_on_close
+
+service ucrtbase.dll tmpnam(buffer: ptr) -> ptr
+    handler tmpnam
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails never; a null buffer uses the static one; stops the guest for a buffer it cannot write
+    ref stdio.h tmpnam
+    test temporary_files_are_uniquely_named_and_deleted_on_close
+
+# The descriptor layer (#493, third part of package 4 of #459).
+service ucrtbase.dll _open(name: ptr, flags: i32, mode: i32) -> i32
+    handler _open
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT missing, EACCES for a directory, EEXIST with _O_CREAT|_O_EXCL, EINVAL for a null or rejected name or bad access bits, EMFILE at 8192 descriptors, ENOSPC when the drive is full; stops the guest for the wide text modes
+    ref io.h _open
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _close(fd: i32) -> i32
+    handler _close
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open; stops the guest for a standard descriptor
+    ref io.h _close
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _read(fd: i32, buffer: ptr, count: u32) -> i32
+    handler _read
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or not readable, EINVAL for a null buffer or a count over the transfer limit; stops the guest for a buffer it cannot write
+    ref io.h _read
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _write(fd: i32, buffer: ptr, count: u32) -> i32
+    handler _write
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or not writable, EINVAL for a null buffer or a count over the transfer limit, ENOSPC when the drive is full; stops the guest for a buffer it cannot read
+    ref io.h _write
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _lseek(fd: i32, offset: i32, origin: i32) -> i32
+    handler _lseek
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open, EINVAL for an unknown origin, a position before the start or one no 32-bit long holds
+    ref io.h _lseek
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _fileno(stream: ptr) -> i32
+    handler _fileno
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EINVAL for a null stream; stops the guest for a pointer that is no stream
+    ref io.h _fileno
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _isatty(fd: i32) -> i32
+    handler _isatty
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails 0 always, as nothing here is a character device; errno EBADF for a descriptor that is not open
+    ref io.h _isatty
+    test descriptors_share_files_with_streams
+service ucrtbase.dll _lseeki64(fd: i32, offset: u64, origin: i32) -> u64
+    handler _lseeki64
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start
+    ref io.h _lseeki64
+    test legacy_descriptor_seek_and_tell_positions
+
+service ucrtbase.dll _telli64(fd: i32) -> u64
+    handler _telli64
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or a standard one
+    ref io.h _telli64
+    test legacy_descriptor_seek_and_tell_positions
+
+service ucrtbase.dll _setmode(fd: i32, mode: i32) -> i32
+    handler _setmode
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented
+    ref io.h _setmode
+    test legacy_descriptor_seek_and_tell_positions
+service ucrtbase.dll _dup(fd: i32) -> i32
+    handler _dup
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open, EMFILE at 8192 descriptors
+    ref io.h _dup
+    test legacy_descriptor_duplication_shares_the_position
+
+service ucrtbase.dll _dup2(fd: i32, target: i32) -> i32
+    handler _dup2
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open or a target outside the table
+    ref io.h _dup2
+    test legacy_descriptor_duplication_shares_the_position
+service ucrtbase.dll _creat(name: ptr, mode: i32) -> i32
+    handler _creat
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails the permission argument does not act: the drive carries no permission bits
+    ref io.h _creat
+    test legacy_create_and_temporary_names_run
+
+service ucrtbase.dll _mktemp(template: ptr) -> ptr
+    handler _mktemp
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a template without trailing X characters, EEXIST when no candidate is free
+    ref io.h _mktemp
+    test legacy_create_and_temporary_names_run
+service ucrtbase.dll _fdopen(fd: i32, mode: ptr) -> ptr
+    handler _fdopen
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a descriptor of a standard stream or a mode string that does not parse; the mode is not matched against the descriptor's access
+    ref stdio.h _fdopen
+    test legacy_fdopen_wraps_a_descriptor
+service ucrtbase.dll _fstat64(fd: i32, buffer: ptr) -> i32
+    handler _fstat64
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EBADF for a descriptor that is not open, EINVAL for a null buffer; device, inode and the three times are zero — the drive carries none
+    ref sys/stat.h _fstat64
+    test legacy_fstat64_fills_the_legacy_structure
+service ucrtbase.dll _mkdir(name: ptr) -> i32
+    handler _mkdir
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT when the parent does not exist, EEXIST when the name is taken, ENOSPC at 256 directories
+    ref direct.h _mkdir
+    test legacy_directories_are_made_and_removed
+
+service ucrtbase.dll _rmdir(name: ptr) -> i32
+    handler _rmdir
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories
+    ref direct.h _rmdir
+    test legacy_directories_are_made_and_removed
+service ucrtbase.dll _pipe(fds: ptr, size: u32, mode: i32) -> i32
+    handler _pipe
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails a read of an empty pipe whose write end is open stops the guest — blocking is not modelled; the size and mode arguments do not act
+    ref io.h _pipe
+    test legacy_pipes_carry_bytes_between_ends
+
+
+
+
+
+
+
+
+service ucrtbase.dll _access(name: ptr, mode: i32) -> i32
+    handler _access
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT for a missing or rejected name, EINVAL for a null or empty name or mode bits other than 0, 2, 4 and 6
+    ref io.h _access
+    test descriptors_share_files_with_streams
+
+service ucrtbase.dll _unlink(name: ptr) -> i32
+    handler _unlink
+    status implemented
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno ENOENT missing, EACCES for a directory, EINVAL for a null or empty name; it is remove by another name
+    ref io.h _unlink
+    test descriptors_share_files_with_streams
+
+# The C time services of package 5 of #459. The clock is UTC throughout:
+# Xenora has no answer for what zone the machine stands in, and the docs
+# say so.
+service ucrtbase.dll _gmtime64(time: ptr) -> ptr
+    handler _gmtime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h _gmtime64
+    test c_time_breaks_down_and_composes_the_injected_clock
+
+service ucrtbase.dll _localtime64(time: ptr) -> ptr
+    handler _gmtime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h _localtime64
+    test c_time_breaks_down_and_composes_the_injected_clock
+
+service ucrtbase.dll _mktime64(tm: ptr) -> ptr
+    handler _mktime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h _mktime64
+    test c_time_breaks_down_and_composes_the_injected_clock
+
+service ucrtbase.dll asctime(tm: ptr) -> ptr
+    handler asctime
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails null with errno EINVAL for a null pointer or out-of-range fields
+    ref time.h asctime
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll _ctime64(time: ptr) -> ptr
+    handler _ctime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    alias msvcrt.dll
+    fails null with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h _ctime64
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll asctime_s(buffer: ptr, size: u64, tm: ptr) -> u32
+    handler asctime_s
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails EINVAL for null arguments or a buffer under 26 bytes, emptying the buffer
+    ref time.h asctime_s
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll _ctime64_s(buffer: ptr, size: u64, time: ptr) -> u32
+    handler _ctime64_s
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails EINVAL for null arguments or a buffer under 26 bytes, emptying the buffer
+    ref time.h _ctime64_s
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll clock() -> u64
+    handler clock
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref time.h clock
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll _difftime64(time1: u64, time2: u64) -> f64
+    handler _difftime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails never
+    ref time.h _difftime64
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll strftime(out: ptr, size: u64, format: ptr, tm: ptr) -> u64
+    handler strftime
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    alias msvcrt.dll
+    fails 0 when the result does not fit; EINVAL for null arguments or invalid fields
+    ref time.h strftime
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll gmtime(time: ptr) -> ptr
+    handler _gmtime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails null with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h gmtime
+    test c_time_breaks_down_and_composes_the_injected_clock
+
+service ucrtbase.dll localtime(time: ptr) -> ptr
+    handler _gmtime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails null with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h localtime
+    test c_time_breaks_down_and_composes_the_injected_clock
+
+service ucrtbase.dll mktime(tm: ptr) -> ptr
+    handler _mktime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails -1 with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h mktime
+    test c_time_breaks_down_and_composes_the_injected_clock
+
+service ucrtbase.dll ctime(time: ptr) -> ptr
+    handler _ctime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails null with errno EINVAL for a null pointer or a time outside 1970-to-3000
+    ref time.h ctime
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll ctime_s(buffer: ptr, size: u64, time: ptr) -> u32
+    handler _ctime64_s
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails EINVAL for null arguments or a buffer under 26 bytes, emptying the buffer
+    ref time.h ctime_s
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll difftime(time1: u64, time2: u64) -> f64
+    handler _difftime64
+    status implemented
+    alias api-ms-win-crt-time-l1-1-0.dll
+    fails never
+    ref time.h difftime
+    test c_time_formats_and_measures_as_the_crt_does
+
+service kernel32.dll FileTimeToLocalFileTime(input: ptr, output: ptr) -> u32
+    handler file_time_to_local_file_time
+    status partial
+    alias api-ms-win-core-file-l1-1-0.dll
+    fails never in range; the machine's local time is UTC, so the conversion is the identity; guest fault on an invalid pointer
+    ref fileapi.h FileTimeToLocalFileTime
+    test c_time_formats_and_measures_as_the_crt_does
+
+service ucrtbase.dll mbtowc(wide: ptr, text: ptr, count: u64) -> i32
+    handler mbtowc
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails -1 with errno EILSEQ when count is 0; stops the guest for memory it cannot read
+    ref stdlib.h mbtowc
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll wctomb(text: ptr, wide: u32) -> i32
+    handler wctomb
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails -1 with errno EILSEQ for a wide character above 255
+    ref stdlib.h wctomb
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll mblen(text: ptr, count: u64) -> i32
+    handler mblen
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails -1 when count is 0
+    ref stdlib.h mblen
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll mbstowcs(wide: ptr, text: ptr, count: u64) -> u64
+    handler mbstowcs
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails never in the C locale; a null destination is the length query
+    ref stdlib.h mbstowcs
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll wcstombs(text: ptr, wide: ptr, count: u64) -> u64
+    handler wcstombs
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails (size_t)-1 with errno EILSEQ for a wide character above 255
+    ref stdlib.h wcstombs
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll mbsrtowcs(wide: ptr, source: ptr, count: u64, state: ptr) -> u64
+    handler mbsrtowcs
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails never in the C locale; no shift state exists
+    ref wchar.h mbsrtowcs
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll wcsrtombs(text: ptr, source: ptr, count: u64, state: ptr) -> u64
+    handler wcsrtombs
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails (size_t)-1 with errno EILSEQ for a wide character above 255
+    ref wchar.h wcsrtombs
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswctype(wide: u32, mask: u32) -> i32
+    handler iswctype
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswctype
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswalpha(wide: u32) -> i32
+    handler iswalpha
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswalpha
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswdigit(wide: u32) -> i32
+    handler iswdigit
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswdigit
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswalnum(wide: u32) -> i32
+    handler iswalnum
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswalnum
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswlower(wide: u32) -> i32
+    handler iswlower
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswlower
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswupper(wide: u32) -> i32
+    handler iswupper
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswupper
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll iswspace(wide: u32) -> i32
+    handler iswspace
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h iswspace
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll towlower(wide: u32) -> u32
+    handler towlower
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h towlower
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll towupper(wide: u32) -> u32
+    handler towupper
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never
+    ref wctype.h towupper
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll wcsncat(start: ptr, end: ptr, count: u64) -> ptr
+    handler wcsncat
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails never; stops the guest for memory it cannot write
+    ref wchar.h wcsncat
+    test wide_characters_convert_in_the_c_locale
+
+service ucrtbase.dll wcscpy(start: ptr, end: ptr) -> ptr
+    handler wcscpy
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; nothing bounds the copy, as the CRT does not bound it
+    ref wchar.h wcscpy
+    test wcscpy_copies_and_wcsnicmp_compares_case_insensitively
+
+service ucrtbase.dll _wcsnicmp(first: ptr, second: ptr, count: u64) -> i32
+    handler _wcsnicmp
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; the folding is the ASCII one of the C locale, the only locale modelled, and the answer is -1, 0 or 1 as the sign-only contract permits
+    ref wchar.h _wcsnicmp; Microsoft Learn documents the sign-only contract
+    test wcscpy_copies_and_wcsnicmp_compares_case_insensitively
+
+service ucrtbase.dll _wcsdup(text: ptr) -> ptr
+    handler _wcsdup
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    fails null when the copy cannot be allocated
+    ref wchar.h _wcsdup
+    test wide_characters_convert_in_the_c_locale
+service ucrtbase.dll _strdup(text: ptr) -> ptr
+    handler _strdup
+    status partial
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails a string longer than 65536 bytes or an allocation failure answers null; errno is not set
+    ref string.h _strdup
+    test legacy_strdup_and_ldexp_run
+
 
 service ucrtbase.dll perror(message: ptr) -> void
     handler perror
@@ -202,6 +939,80 @@ service ucrtbase.dll perror(message: ptr) -> void
     fails never
     ref stdio.h perror
     test perror_writes_the_message_and_the_error_text_to_stderr
+
+# The Universal C runtime services that a C++ guest's runtime imports. Only
+# the C locale is modelled: its characters are the basic character set, its
+# decimal point is "." and its thousands separator and grouping are empty.
+
+# `putc` is `fputc` exactly, as Microsoft's documentation states; the
+# handler is the same one.
+service ucrtbase.dll putc(character: i32, stream: ptr) -> i32
+    handler fputc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h putc; Microsoft Learn documents putc as identical to fputc
+    test putc_writes_one_character_like_fputc
+
+service ucrtbase.dll fputc(character: i32, stream: ptr) -> i32
+    handler fputc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream
+    ref stdio.h fputc
+    test fputc_writes_one_character_to_a_stream
+
+service ucrtbase.dll strerror(code: i32) -> ptr
+    handler strerror
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; the message is valid until the next call
+    ref string.h strerror
+    test strerror_names_the_error_numbers_the_runtime_uses
+
+service ucrtbase.dll localeconv() -> ptr
+    handler localeconv
+    status partial
+    alias api-ms-win-crt-locale-l1-1-0.dll
+    alias msvcrt.dll
+    fails stops the guest when the block cannot be allocated
+    ref corecrt_locale.h localeconv and struct lconv
+    test localeconv_returns_the_c_locale
+
+service ucrtbase.dll mbrtowc(output: ptr, count: u64, character: i32, state: ptr) -> u64
+    handler mbrtowc
+    status partial
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails (size_t)-1 for a byte that is not a character of the C locale; errno is not set
+    ref Microsoft Learn, mbrtowc; the registry declares the multibyte character by value
+    test mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale
+
+service ucrtbase.dll wcrtomb(output: ptr, character: u32, state: ptr) -> u64
+    handler wcrtomb
+    status partial
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    fails (size_t)-1 for a wide character the C locale cannot represent; errno is not set
+    ref Microsoft Learn, wcrtomb
+    test mbrtowc_and_wcrtomb_convert_the_characters_of_the_c_locale
+
+service ucrtbase.dll _lock_file(stream: ptr, mode: i32) -> i32
+    handler _lock_file
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream
+    ref corecrt_file.h _lock_file
+    test locking_a_stream_succeeds_and_a_null_stream_fails
+
+service ucrtbase.dll _unlock_file(stream: ptr) -> i32
+    handler _unlock_file
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EBADF for a null stream; stops the guest for a pointer that is no stream
+    ref corecrt_file.h _unlock_file
+    test locking_a_stream_succeeds_and_a_null_stream_fails
 
 service kernel32.dll GetLastError() -> u32
     handler get_last_error
@@ -218,6 +1029,268 @@ service kernel32.dll SetLastError(code: u32) -> void
     fails never
     ref errhandlingapi.h SetLastError
     test last_error_is_set_by_failures_and_by_the_guest
+
+# The encoding conversions and their code pages: crates/loader/src/services/codepages.rs
+# says which pages Xenora serves and how each converts.
+
+service kernel32.dll MultiByteToWideChar(codepage: u32, flags: u32, input: ptr, input_count: i32, output: ptr, output_count: i32) -> i32
+    handler multibyte_to_wide_char
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER for an unknown page, a zero or out-of-range byte count or a null input, with ERROR_INVALID_FLAGS for flags past MB_ERR_INVALID_CHARS, with ERROR_NO_UNICODE_TRANSLATION for malformed input under MB_ERR_INVALID_CHARS, with ERROR_INSUFFICIENT_BUFFER for a small or null output; stops the guest for memory that faults
+    ref stringapiset.h MultiByteToWideChar
+    test multibyte_to_wide_converts_utf8_and_the_ansi_page
+
+service kernel32.dll WideCharToMultiByte(codepage: u32, flags: u32, input: ptr, input_count: i32, output: ptr, output_count: i32, default_char: ptr, used_default: ptr) -> i32
+    handler wide_char_to_multibyte
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER for an unknown page, a zero or out-of-range count, a null input or default-character arguments under UTF-8, with ERROR_INVALID_FLAGS for flags past WC_ERR_INVALID_CHARS, with ERROR_NO_UNICODE_TRANSLATION for unrepresentable input under WC_ERR_INVALID_CHARS, with ERROR_INSUFFICIENT_BUFFER for a small or null output; stops the guest for memory that faults
+    ref stringapiset.h WideCharToMultiByte
+    test wide_char_to_multibyte_converts_utf8_and_marks_defaults
+
+service kernel32.dll GetACP() -> u32
+    handler get_ansi_codepage
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails never
+    ref winnls.h GetACP
+    test the_codepages_answer_their_numbers
+
+service kernel32.dll GetOEMCP() -> u32
+    handler get_oem_codepage
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails never
+    ref winnls.h GetOEMCP
+    test the_codepages_answer_their_numbers
+
+service kernel32.dll IsValidCodePage(codepage: u32) -> bool32
+    handler is_valid_codepage
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails never; false for a page Xenora does not serve
+    ref winnls.h IsValidCodePage
+    test the_codepages_answer_their_numbers
+
+service kernel32.dll GetCPInfo(codepage: u32, info: out<18>) -> bool32
+    handler get_codepage_info
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails false with ERROR_INVALID_PARAMETER for a page Xenora does not serve or a null output; stops the guest for memory that faults
+    ref winnls.h GetCPInfo
+    test the_codepages_answer_their_numbers
+
+# The locale identity: crates/loader/src/services/locale.rs says why one
+# locale and what it answers.
+
+service kernel32.dll GetSystemDefaultLCID() -> u32
+    handler get_system_default_lcid
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails never
+    ref winnls.h GetSystemDefaultLCID
+    test the_locale_is_en_us_and_answers_its_strings
+
+service kernel32.dll GetUserDefaultLCID() -> u32
+    handler get_user_default_lcid
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails never
+    ref winnls.h GetUserDefaultLCID
+    test the_locale_is_en_us_and_answers_its_strings
+
+service kernel32.dll GetUserDefaultLangID() -> u32
+    handler get_user_default_langid
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails never
+    ref winnls.h GetUserDefaultLangID
+    test the_locale_is_en_us_and_answers_its_strings
+
+service kernel32.dll GetUserDefaultLocaleName(output: ptr, count: i32) -> i32
+    handler get_user_default_locale_name
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails 0 with ERROR_INSUFFICIENT_BUFFER for a small or null output; stops the guest for memory that faults
+    ref winnls.h GetUserDefaultLocaleName
+    test the_locale_is_en_us_and_answers_its_strings
+
+service kernel32.dll GetLocaleInfoW(lcid: u32, kind: u32, output: ptr, count: i32) -> i32
+    handler get_locale_info_w
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER for another locale, an unknown type or the number form, with ERROR_INSUFFICIENT_BUFFER for a small or null output; stops the guest for memory that faults
+    ref winnls.h GetLocaleInfoW
+    test the_locale_is_en_us_and_answers_its_strings
+
+service kernel32.dll GetLocaleInfoA(lcid: u32, kind: u32, output: ptr, count: i32) -> i32
+    handler get_locale_info_a
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER for another locale, an unknown type or the number form, with ERROR_INSUFFICIENT_BUFFER for a small or null output; stops the guest for memory that faults
+    ref winnls.h GetLocaleInfoA
+    test the_locale_is_en_us_and_answers_its_strings
+
+service kernel32.dll GetLocaleInfoEx(name: ptr, kind: u32, output: ptr, count: i32) -> i32
+    handler get_locale_info_ex
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails 0 with ERROR_INVALID_PARAMETER for another locale, an unknown type or the number form, with ERROR_INSUFFICIENT_BUFFER for a small or null output; stops the guest for memory that faults
+    ref winnls.h GetLocaleInfoEx
+    test the_locale_is_en_us_and_answers_its_strings
+
+# The byte-order string comparison, classification and case mapping of the one
+# locale, package 7 third part of #459. crates/loader/src/services/compare.rs
+# documents what is ordinal rather than linguistic, and which flags fail.
+
+service kernel32.dll lstrlenA(text: ptr) -> i32
+    handler lstrlen_a
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails never
+    ref winbase.h lstrlenA
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll lstrlenW(text: ptr) -> i32
+    handler lstrlen_w
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails never
+    ref winbase.h lstrlenW
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll lstrcpyA(destination: ptr, source: ptr) -> ptr
+    handler lstrcpy_a
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails never
+    ref winbase.h lstrcpyA
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll lstrcmpA(left: ptr, right: ptr) -> i32
+    handler lstrcmp_a
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails never
+    ref winbase.h lstrcmpA
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll lstrcmpiA(left: ptr, right: ptr) -> i32
+    handler lstrcmpi_a
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails never
+    ref winbase.h lstrcmpiA
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll CompareStringA(lcid: u32, flags: u32, left: ptr, left_count: i32, right: ptr, right_count: i32) -> i32
+    handler compare_string_a
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails sets ERROR_INVALID_PARAMETER for another locale or unsupported flags
+    ref winnls.h CompareStringA
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll CompareStringW(lcid: u32, flags: u32, left: ptr, left_count: i32, right: ptr, right_count: i32) -> i32
+    handler compare_string_w
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails sets ERROR_INVALID_PARAMETER for another locale or unsupported flags
+    ref winnls.h CompareStringW
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll GetStringTypeW(kind: u32, source: ptr, count: i32, output: ptr) -> bool32
+    handler get_string_type_w
+    status partial
+    alias api-ms-win-core-string-l1-1-0.dll
+    fails sets ERROR_INVALID_PARAMETER for CT_CTYPE2 and CT_CTYPE3
+    ref winnls.h GetStringTypeW
+    test the_string_comparison_services_answer_in_byte_order
+
+service kernel32.dll LCMapStringW(lcid: u32, flags: u32, source: ptr, count: i32, destination: ptr, destination_count: i32) -> i32
+    handler lcmap_string_w
+    status partial
+    alias api-ms-win-core-localization-l1-2-0.dll
+    fails sets ERROR_INVALID_PARAMETER for unsupported flags or another locale, ERROR_INSUFFICIENT_BUFFER for a small output
+    ref winnls.h LCMapStringW
+    test the_string_comparison_services_answer_in_byte_order
+
+# The console identity and the standard handles, package 8 first part of
+# #459. crates/loader/src/services/console.rs documents what the modes do
+# and do not change, and why redirection is limited.
+
+service kernel32.dll GetStdHandle(kind: u32) -> u64
+    handler get_std_handle
+    status partial
+    alias api-ms-win-core-processenvironment-l1-1-0.dll
+    fails sets ERROR_INVALID_PARAMETER for an unknown device
+    ref processenv.h GetStdHandle
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll SetStdHandle(kind: u32, handle: u64) -> bool32
+    handler set_std_handle
+    status partial
+    alias api-ms-win-core-processenvironment-l1-1-0.dll
+    fails sets ERROR_INVALID_PARAMETER for an unknown device
+    ref processenv.h SetStdHandle
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll GetConsoleCP() -> u32
+    handler get_console_cp
+    status partial
+    alias api-ms-win-core-console-l1-1-0.dll
+    fails never
+    ref consoleapi.h GetConsoleCP
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll GetConsoleOutputCP() -> u32
+    handler get_console_output_cp
+    status partial
+    alias api-ms-win-core-console-l1-1-0.dll
+    fails never
+    ref consoleapi.h GetConsoleOutputCP
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll GetConsoleMode(handle: u64, output: ptr) -> bool32
+    handler get_console_mode
+    status partial
+    alias api-ms-win-core-console-l1-1-0.dll
+    fails sets ERROR_INVALID_HANDLE for an unknown handle
+    ref consoleapi.h GetConsoleMode
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll SetConsoleMode(handle: u64, mode: u32) -> bool32
+    handler set_console_mode
+    status partial
+    alias api-ms-win-core-console-l1-1-0.dll
+    fails sets ERROR_INVALID_HANDLE for an unknown handle
+    ref consoleapi.h SetConsoleMode
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll WriteConsoleA(handle: u64, text: ptr, characters: u32, written: ptr, reserved: ptr) -> bool32
+    handler write_console_a
+    status partial
+    alias api-ms-win-core-console-l1-1-0.dll
+    fails sets ERROR_INVALID_HANDLE for an unknown handle, ERROR_INVALID_PARAMETER for reserved
+    ref consoleapi.h WriteConsoleA
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll WriteConsoleW(handle: u64, text: ptr, characters: u32, written: ptr, reserved: ptr) -> bool32
+    handler write_console_w
+    status partial
+    alias api-ms-win-core-console-l1-2-0.dll
+    fails sets ERROR_INVALID_HANDLE for an unknown handle, ERROR_INVALID_PARAMETER for reserved
+    ref consoleapi.h WriteConsoleW
+    test the_console_identity_and_standard_handles_round_trip
+
+service kernel32.dll ReadConsoleA(handle: u64, buffer: ptr, size: u32, read: ptr, control: ptr) -> bool32
+    handler read_console_a
+    status partial
+    alias api-ms-win-core-console-l1-1-0.dll
+    fails sets ERROR_INVALID_HANDLE for an unknown handle, ERROR_INVALID_PARAMETER for the control parameter
+    ref consoleapi.h ReadConsoleA
+    test the_console_identity_and_standard_handles_round_trip
 
 # What a hosted C program's startup code hands to `main`. The three pointer
 # functions and the two initialization functions are listed by Microsoft only
@@ -300,14 +1373,6 @@ service kernel32.dll VirtualQuery(address: ptr, information: out<48>, length: u6
     ref memoryapi.h VirtualQuery
     test memory_and_exception_stubs_stop_the_guest_and_change_nothing
 
-service ucrtbase.dll __C_specific_handler(record: ptr, frame: ptr, context: ptr, dispatcher: ptr) -> i32
-    handler c_specific_handler
-    status stub
-    alias api-ms-win-crt-private-l1-1-0.dll
-    fails always: stops the guest with the runtime-limit fault; no exception is dispatched
-    ref Microsoft Learn, x64 exception handling, language-specific handler
-    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
-
 service ucrtbase.dll sqrt(x: f64) -> f64
     handler sqrt
     status partial
@@ -340,6 +1405,457 @@ service ucrtbase.dll fabsf(x: f32) -> f32
     ref math.h fabsf (ISO C, IEC 60559 abs)
     test floating_arguments_and_results_use_xmm_registers
 
+# The rest of math.h (#468). Exact functions are computed in crt_math.rs on
+# exact operations; the others return the host math library's result.
+
+service ucrtbase.dll acos(x: f64) -> f64
+    handler acos
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h acos (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll asin(x: f64) -> f64
+    handler asin
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h asin (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll atan(x: f64) -> f64
+    handler atan
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h atan (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll atan2(x: f64, y: f64) -> f64
+    handler atan2
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h atan2 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll atan2f(x: f32, y: f32) -> f32
+    handler atan2f
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h atan2f (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cbrt(x: f64) -> f64
+    handler cbrt
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cbrt (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll ceil(x: f64) -> f64
+    handler ceil
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h ceil (ISO C, IEC 60559 roundToIntegralTowardPositive)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll ceilf(x: f32) -> f32
+    handler ceilf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h ceilf (ISO C, IEC 60559 roundToIntegralTowardPositive)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll copysign(x: f64, y: f64) -> f64
+    handler copysign
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h copysign (ISO C, IEC 60559 copySign)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cos(x: f64) -> f64
+    handler cos
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cos (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cosf(x: f32) -> f32
+    handler cosf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cosf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll cosh(x: f64) -> f64
+    handler cosh
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h cosh (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll erf(x: f64) -> f64
+    handler erf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h erf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll exp(x: f64) -> f64
+    handler exp
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h exp (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll expf(x: f32) -> f32
+    handler expf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h expf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll exp2(x: f64) -> f64
+    handler exp2
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h exp2 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll expm1(x: f64) -> f64
+    handler expm1
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h expm1 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fdim(x: f64, y: f64) -> f64
+    handler fdim
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h fdim (ISO C Annex F)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll floor(x: f64) -> f64
+    handler floor
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h floor (ISO C, IEC 60559 roundToIntegralTowardNegative)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll floorf(x: f32) -> f32
+    handler floorf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h floorf (ISO C, IEC 60559 roundToIntegralTowardNegative)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmax(x: f64, y: f64) -> f64
+    handler fmax
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h fmax (ISO C, IEC 60559 maxNum)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmin(x: f64, y: f64) -> f64
+    handler fmin
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h fmin (ISO C, IEC 60559 minNum)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmod(x: f64, y: f64) -> f64
+    handler fmod
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h fmod (ISO C Annex F)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll fmodf(x: f32, y: f32) -> f32
+    handler fmodf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h fmodf (ISO C Annex F)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll frexp(x: f64, exponent: out<4>) -> f64
+    handler frexp
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails stops the guest with a memory fault when exponent is not writable
+    ref math.h frexp (ISO C, IEC 60559 logB and scaleB)
+    test crt_math_frexp_and_modf_store_through_guest_pointers
+    test crt_math_special_values_follow_annex_f
+service ucrtbase.dll ldexp(x: f64, exponent: i32) -> f64
+    handler ldexp
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    alias msvcrt.dll
+    fails errno is not set; the host C library computes the exact IEC 60559 scaling
+    ref math.h ldexp (ISO C, IEC 60559 scalbn)
+    test legacy_strdup_and_ldexp_run
+
+
+service ucrtbase.dll hypot(x: f64, y: f64) -> f64
+    handler hypot
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h hypot (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll llround(x: f64) -> u64
+    handler llround
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails LLONG_MIN for a NaN or an out-of-range result; errno is not set
+    ref math.h llround (ISO C Annex F)
+    test crt_math_integer_rounding_covers_the_range_edges
+
+service ucrtbase.dll log(x: f64) -> f64
+    handler log
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll logf(x: f32) -> f32
+    handler logf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h logf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll log10(x: f64) -> f64
+    handler log10
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log10 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll log1p(x: f64) -> f64
+    handler log1p
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log1p (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll log2(x: f64) -> f64
+    handler log2
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h log2 (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll lround(x: f64) -> i32
+    handler lround
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails LONG_MIN for a NaN or an out-of-range result; errno is not set
+    ref math.h lround (ISO C Annex F)
+    test crt_math_integer_rounding_covers_the_range_edges
+
+service ucrtbase.dll modf(x: f64, integral: out<8>) -> f64
+    handler modf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails stops the guest with a memory fault when integral is not writable
+    ref math.h modf (ISO C Annex F)
+    test crt_math_frexp_and_modf_store_through_guest_pointers
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll nearbyint(x: f64) -> f64
+    handler nearbyint
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set
+    ref math.h nearbyint (ISO C, IEC 60559 roundToIntegralTiesToEven)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll pow(x: f64, y: f64) -> f64
+    handler pow
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h pow (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll powf(x: f32, y: f32) -> f32
+    handler powf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h powf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll remainder(x: f64, y: f64) -> f64
+    handler remainder
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails NaN for a domain error; errno is not set
+    ref math.h remainder (ISO C, IEC 60559 remainder)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll rint(x: f64) -> f64
+    handler rint
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set
+    ref math.h rint (ISO C, IEC 60559 roundToIntegralExact)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll round(x: f64) -> f64
+    handler round
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h round (ISO C, IEC 60559 roundToIntegralTiesToAway)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll roundf(x: f32) -> f32
+    handler roundf
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h roundf (ISO C, IEC 60559 roundToIntegralTiesToAway)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll sin(x: f64) -> f64
+    handler sin
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h sin (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll sinf(x: f32) -> f32
+    handler sinf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h sinf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll sinh(x: f64) -> f64
+    handler sinh
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h sinh (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tan(x: f64) -> f64
+    handler tan
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tan (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tanf(x: f32) -> f32
+    handler tanf
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tanf (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tanh(x: f64) -> f64
+    handler tanh
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tanh (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll tgamma(x: f64) -> f64
+    handler tgamma
+    status partial
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised
+    ref math.h tgamma (ISO C Annex F)
+    test crt_math_host_functions_are_within_one_ulp_of_reference
+    test crt_math_special_values_follow_annex_f
+
+service ucrtbase.dll trunc(x: f64) -> f64
+    handler trunc
+    status implemented
+    alias api-ms-win-crt-math-l1-1-0.dll
+    fails never
+    ref math.h trunc (ISO C, IEC 60559 roundToIntegralTowardZero)
+    test crt_math_exact_functions_match_hand_derived_values
+    test crt_math_special_values_follow_annex_f
+
 # What a C program's startup code configures before `main`. Each value is
 # recorded and returned as documented; nothing in the runtime acts on it.
 
@@ -371,6 +1887,7 @@ service ucrtbase.dll __setusermatherr(handler: ptr) -> void
     handler set_user_math_error
     status partial
     alias api-ms-win-crt-math-l1-1-0.dll
+    alias msvcrt.dll
     fails never
     ref corecrt_startup.h __setusermatherr
     test crt_app_type_and_math_error_handler_are_recorded
@@ -403,6 +1920,7 @@ service ucrtbase.dll signal(signal: i32, handler: ptr) -> ptr
     handler signal
     status partial
     alias api-ms-win-crt-runtime-l1-1-0.dll
+    alias msvcrt.dll
     fails SIG_ERR with errno EINVAL for a signal the documentation does not list
     ref signal.h signal
     test crt_startup_handlers_return_the_previous_handler
@@ -414,3 +1932,91 @@ service kernel32.dll SetUnhandledExceptionFilter(filter: ptr) -> ptr
     fails never
     ref errhandlingapi.h SetUnhandledExceptionFilter
     test crt_startup_handlers_return_the_previous_handler
+
+# The legacy CRT startup path of a msvcrt-linked program (#632). These are
+# not aliases of the ucrtbase entries because the legacy names differ; they
+# share the implementations and the state.
+
+service msvcrt.dll __set_app_type(kind: i32) -> void
+    handler set_app_type
+    status partial
+    fails never
+    ref corecrt_startup.h _set_app_type, the same value under its legacy name
+    test legacy_startup_records_the_app_type
+
+service msvcrt.dll __getmainargs(argc: ptr, argv: ptr, envp: ptr, dowildcard: i32, start_info: ptr) -> i32
+    handler getmainargs
+    status partial
+    fails -1 with errno EINVAL when any of the three output pointers is null; the start-up information is not written
+    ref msvcrt.dll export of the legacy CRT startup, as publicly documented for the legacy __getmainargs
+    test legacy_startup_builds_the_main_arguments
+
+service msvcrt.dll ___mb_cur_max_func() -> u32
+    handler mb_cur_max_legacy
+    status partial
+    fails never
+    ref legacy CRT MB_CUR_MAX; one byte, coherent with the C-locale conversions of crt_wide.rs
+    test legacy_mb_cur_max_is_one_byte
+
+service msvcrt.dll _amsg_exit(code: i32) -> void
+    handler amsg_exit
+    status partial
+    fails never returns; the runtime-error message of the CRT is not written
+    ref msvcrt.dll export of the legacy CRT runtime error exit
+    test legacy_amsg_exit_ends_the_process
+
+# Queries about the hosted process environment and the console identity.
+# The process environment is empty: no host variable passes through, so a
+# query never finds its variable, which is the exact behavior of an empty
+# environment rather than a stub.
+
+service kernel32.dll GetEnvironmentVariableA(name: ptr, buffer: ptr, size: u32) -> u32
+    handler environment_variable
+    status implemented
+    alias api-ms-win-core-processenvironment-l1-1-0.dll
+    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    ref Microsoft Learn, GetEnvironmentVariable
+    test environment_variables_are_never_found_in_the_empty_environment
+
+service kernel32.dll GetEnvironmentVariableW(name: ptr, buffer: ptr, size: u32) -> u32
+    handler environment_variable
+    status implemented
+    alias api-ms-win-core-processenvironment-l1-1-0.dll
+    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    ref Microsoft Learn, GetEnvironmentVariable
+    test environment_variables_are_never_found_in_the_empty_environment
+
+service kernel32.dll GetConsoleWindow() -> handle
+    handler console_window
+    status implemented
+    fails never; the answer is null, the hosted runtime has no console window
+    ref Microsoft Learn, GetConsoleWindow
+    test the_hosted_console_has_no_window_and_its_title_round_trips
+
+service kernel32.dll SetConsoleTitleW(title: ptr) -> bool32
+    handler set_console_title_wide
+    status partial
+    fails FALSE with ERROR_INVALID_PARAMETER for a null title
+    ref Microsoft Learn, SetConsoleTitleW
+    test the_hosted_console_has_no_window_and_its_title_round_trips
+
+service kernel32.dll GetConsoleTitleW(buffer: ptr, size: u32) -> u32
+    handler console_title_wide
+    status partial
+    fails 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size; the answer is the title length even when the buffer holds less, Xenora's documented choice
+    ref Microsoft Learn, GetConsoleTitleW
+    test the_hosted_console_has_no_window_and_its_title_round_trips
+
+service kernel32.dll SetConsoleTitleA(title: ptr) -> bool32
+    handler set_console_title_narrow
+    status partial
+    fails FALSE with ERROR_INVALID_PARAMETER for a null title
+    ref Microsoft Learn, SetConsoleTitleA
+    test the_hosted_console_has_no_window_and_its_title_round_trips
+
+service kernel32.dll GetConsoleTitleA(buffer: ptr, size: u32) -> u32
+    handler console_title_narrow
+    status partial
+    fails 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size, the same documented length answer as the wide form
+    ref Microsoft Learn, GetConsoleTitleA
+    test the_hosted_console_has_no_window_and_its_title_round_trips

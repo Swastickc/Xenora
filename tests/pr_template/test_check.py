@@ -64,6 +64,92 @@ class Check(unittest.TestCase):
         body = GOOD.replace("## Compatibility and limitations\n\nNone known.\n", "")
         self.assertEqual(c.check(body), ['Missing section "## Compatibility and limitations".'])
 
+    def test_comment_marker_inside_fence_does_not_hide_following_sections(self):
+        body = GOOD.replace(
+            "## Compatibility and limitations",
+            "```\nliteral <!-- inside fence\n```\n<!-- template note -->\n## Compatibility and limitations",
+        )
+        self.assertEqual(c.check(body), [])
+        text, found = c.sections(body)
+        self.assertIn("literal <!-- inside fence", found["verification"])
+        for name in ("compatibility and limitations", "checklist", "ai assistance"):
+            self.assertIn(name, found)
+
+    def test_comment_around_fence_marker_does_not_hide_section(self):
+        body = GOOD.replace(
+            "## Compatibility and limitations",
+            "<!--\n```\n-->\n## Compatibility and limitations",
+        )
+        self.assertEqual(c.check(body), [])
+
+    def test_comment_inside_fence_is_preserved(self):
+        body = GOOD.replace(
+            "## Compatibility and limitations",
+            "```\n<!-- evidence -->\n```\n## Compatibility and limitations",
+        )
+        self.assertEqual(c.check(body), [])
+        self.assertIn("<!-- evidence -->", c.sections(body)[1]["verification"])
+
+    def test_inline_code_comment_marker_does_not_hide_sections(self):
+        body = GOOD.replace(
+            "Touches crates/texture only.",
+            "Touches crates/texture only. A literal `<!--` in inline code.",
+        )
+        self.assertEqual(c.check(body), [])
+
+    def test_inline_code_comment_marker_keeps_real_comment_removed(self):
+        body = GOOD.replace(
+            "Touches crates/texture only.",
+            "Touches crates/texture only. A literal `<!--` in inline code.\n<!-- template note -->",
+        )
+        self.assertEqual(c.check(body), [])
+        self.assertNotIn("template note", c.sections(body)[0])
+
+    def test_checklist_boxes_only_inside_fence_fail(self):
+        body = GOOD.replace(
+            "- [x] I claimed the linked issue before starting, and the claim was still mine when I opened this pull request.\n"
+            "- [x] I reviewed the changes and disclosed material AI assistance below, if applicable.\n"
+            "- [x] My commits are signed off under the DCO.",
+            "```\n"
+            "- [x] I claimed the linked issue before starting, and the claim was still mine when I opened this pull request.\n"
+            "- [x] My commits are signed off under the DCO.\n"
+            "```",
+        )
+        problems = c.check(body)
+        self.assertIn('Section "## Checklist" is empty.', problems)
+        self.assertIn("Checklist is missing the claimed-first checkbox.", problems)
+        self.assertIn("Checklist is missing the DCO sign-off checkbox.", problems)
+
+    def test_fenced_report_heading_does_not_replace_checklist(self):
+        for fence in ("```", "~~~"):
+            with self.subTest(fence=fence):
+                body = GOOD + f"\n{fence}text\n## Checklist\nAll tests passed.\n{fence}\n"
+                self.assertEqual(c.check(body), [])
+
+    def test_fenced_heading_does_not_supply_missing_section(self):
+        body = GOOD.replace(
+            "## Compatibility and limitations\n\nNone known.",
+            "```markdown\n## Compatibility and limitations\nNone known.\n```",
+        )
+        self.assertEqual(c.check(body), ['Missing section "## Compatibility and limitations".'])
+
+    def test_real_heading_after_fence_and_code_only_verification(self):
+        end = GOOD.index("## Compatibility and limitations")
+        start = GOOD.index("| Check |")
+        report = (
+            "   ````text\n"
+            "~~~\n"
+            "```\n"
+            "```` not a closing fence\n"
+            "## Checklist\n"
+            "All tests passed.\n"
+            "  ````` \t\n\n"
+        )
+        body = GOOD[:start] + report + GOOD[end:]
+        self.assertEqual(c.check(body), [])
+        self.assertEqual(c.sections(body)[1]["verification"], report.strip())
+        self.assertEqual(c.check(GOOD[:start] + GOOD[end:]), ['Section "## Verification" is empty.'])
+
     def test_unticked_boxes_fail(self):
         body = GOOD.replace("- [x] I claimed", "- [ ] I claimed").replace("- [x] My commits", "- [ ] My commits")
         problems = c.check(body)

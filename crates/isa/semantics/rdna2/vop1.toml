@@ -125,6 +125,9 @@ verify = ["reference", "independent", "metal", "llvm_encoding"]
 # Binary32 rounding to an integral value (AMD RDNA 2 ISA guide 12.8, page 140).
 # The guide does not define how these read an integer inline constant, so
 # SRC0 is a VGPR, normal SGPR, vcc_lo or literal (docs/shaders/vector-unary.md).
+# A NaN source value (src_nan) is unsupported: its result depends on MODE.IEEE
+# and MODE.DX10_CLAMP (guide 3.5), and the MSL passes its bits through, so a
+# signalling NaN is not quieted.
 [operand_rules.vop1_f32]
 family = "VOP1"
 dst = { field = "VDST", class = "vgpr", min = 0, max = 255 }
@@ -132,7 +135,7 @@ src = [{ field = "SRC0", class = "vector_source" }]
 max_literals = 1
 unsupported = [
   "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline", "src_float_inline",
-  "src_special",
+  "src_special", "src_nan",
 ]
 
 [[form]]

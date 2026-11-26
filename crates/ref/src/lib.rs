@@ -535,10 +535,10 @@ impl VectorUnary {
 /// integer part and the discarded remainder are compared with half a unit, and
 /// the rounded magnitude is encoded again. Subnormal inputs are read as their
 /// exact values (MODE.FP_DENORM single-precision input denormals allowed, the
-/// pinned ABI mode). Refused (`None`): every NaN, whose result the guide leaves
-/// to MODE.IEEE and MODE.DX10_CLAMP; and for RNDNE a negative input of
-/// magnitude at most 0.5, where the pseudocode's floor(S0 + 0.5) yields +0 but
-/// round-to-nearest-even semantics keep the sign.
+/// pinned ABI mode). RNDNE follows the guide's "round-to-nearest-even
+/// semantics" (IEEE 754 roundTiesToEven), so a zero result keeps the sign of
+/// S0. Refused (`None`): every NaN, whose result the guide leaves to MODE.IEEE
+/// and MODE.DX10_CLAMP.
 fn round_f32(kind: VectorUnary, s0: u32) -> Option<u32> {
     let negative = s0 >> 31 == 1;
     let biased = (s0 >> 23) & 0xff;
@@ -546,9 +546,6 @@ fn round_f32(kind: VectorUnary, s0: u32) -> Option<u32> {
     if biased == 0xff {
         // Infinity is integral; NaN is refused.
         return (fraction == 0).then_some(s0);
-    }
-    if kind == VectorUnary::RoundNearestEven && negative && (s0 & 0x7fff_ffff) <= 0x3f00_0000 {
-        return None;
     }
     // |S0| = significand * 2^(power), exactly.
     let (significand, power) = if biased == 0 {

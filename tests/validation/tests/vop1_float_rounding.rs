@@ -22,11 +22,12 @@
 //! - The pseudocode is evaluated exactly: RNDNE's floor(S0 + 0.5) does not
 //!   round S0 + 0.5 first, which matches the "round-to-nearest-even semantics"
 //!   description for every input except the zero sign below.
+//! - RNDNE follows the description "Round-to-nearest-even semantics" (IEEE
+//!   754 roundTiesToEven), so a negative input of magnitude at most 0.5 gives
+//!   -0. The pseudocode's floor(S0 + 0.5) read literally would give +0.
 //! - Refused: every NaN input (quiet or signalling). The pseudocode has no NaN
 //!   case and the result depends on MODE.IEEE and MODE.DX10_CLAMP (section
-//!   3.5), so no value is expected. For RNDNE, a negative input of magnitude at
-//!   most 0.5 (including -0 and negative subnormals): the pseudocode gives
-//!   floor(+x) = +0, while round-to-nearest-even semantics keep the sign.
+//!   3.5), so no value is expected. These run on the CPU interpreters only.
 //! - Refused: integer inline constants (selectors 128-208) as SRC0. The guide
 //!   does not say whether a float operation reads them as integer bits or as
 //!   converted values. Float inline constants stay outside the VOP1 subset.
@@ -71,7 +72,7 @@ const fn y(bits: u32) -> Option<u32> {
 #[rustfmt::skip]
 const KNOWN: [(u32, [Option<u32>; 4]); 43] = [
     (0x0000_0000, [y(0x0000_0000), y(0x0000_0000), y(0x0000_0000), y(0x0000_0000)]), // +0
-    (0x8000_0000, [y(0x8000_0000), y(0x8000_0000), NO, y(0x8000_0000)]),             // -0
+    (0x8000_0000, [y(0x8000_0000), y(0x8000_0000), y(0x8000_0000), y(0x8000_0000)]),             // -0
     (0x7f80_0000, [y(0x7f80_0000), y(0x7f80_0000), y(0x7f80_0000), y(0x7f80_0000)]), // +inf
     (0xff80_0000, [y(0xff80_0000), y(0xff80_0000), y(0xff80_0000), y(0xff80_0000)]), // -inf
     (0x7fc0_0000, [NO, NO, NO, NO]),                                                 // quiet NaN
@@ -80,15 +81,15 @@ const KNOWN: [(u32, [Option<u32>; 4]); 43] = [
     (0xffbf_ffff, [NO, NO, NO, NO]),                                                 // -signalling NaN
     (0x0000_0001, [y(0x0000_0000), y(0x3f80_0000), y(0x0000_0000), y(0x0000_0000)]), // min subnormal
     (0x007f_ffff, [y(0x0000_0000), y(0x3f80_0000), y(0x0000_0000), y(0x0000_0000)]), // max subnormal
-    (0x8000_0001, [y(0x8000_0000), y(0x8000_0000), NO, y(0xbf80_0000)]),             // -min subnormal
-    (0x807f_ffff, [y(0x8000_0000), y(0x8000_0000), NO, y(0xbf80_0000)]),             // -max subnormal
+    (0x8000_0001, [y(0x8000_0000), y(0x8000_0000), y(0x8000_0000), y(0xbf80_0000)]),             // -min subnormal
+    (0x807f_ffff, [y(0x8000_0000), y(0x8000_0000), y(0x8000_0000), y(0xbf80_0000)]),             // -max subnormal
     (0x0080_0000, [y(0x0000_0000), y(0x3f80_0000), y(0x0000_0000), y(0x0000_0000)]), // min normal
     (0x3e80_0000, [y(0x0000_0000), y(0x3f80_0000), y(0x0000_0000), y(0x0000_0000)]), // 0.25
-    (0xbe80_0000, [y(0x8000_0000), y(0x8000_0000), NO, y(0xbf80_0000)]),             // -0.25
+    (0xbe80_0000, [y(0x8000_0000), y(0x8000_0000), y(0x8000_0000), y(0xbf80_0000)]),             // -0.25
     (0x3eff_ffff, [y(0x0000_0000), y(0x3f80_0000), y(0x0000_0000), y(0x0000_0000)]), // 0.5 - ulp
     (0x3f00_0000, [y(0x0000_0000), y(0x3f80_0000), y(0x0000_0000), y(0x0000_0000)]), // 0.5
     (0x3f00_0001, [y(0x0000_0000), y(0x3f80_0000), y(0x3f80_0000), y(0x0000_0000)]), // 0.5 + ulp
-    (0xbf00_0000, [y(0x8000_0000), y(0x8000_0000), NO, y(0xbf80_0000)]),             // -0.5
+    (0xbf00_0000, [y(0x8000_0000), y(0x8000_0000), y(0x8000_0000), y(0xbf80_0000)]),             // -0.5
     (0xbf00_0001, [y(0x8000_0000), y(0x8000_0000), y(0xbf80_0000), y(0xbf80_0000)]), // -0.5 - ulp
     (0x3f40_0000, [y(0x0000_0000), y(0x3f80_0000), y(0x3f80_0000), y(0x0000_0000)]), // 0.75
     (0xbf40_0000, [y(0x8000_0000), y(0x8000_0000), y(0xbf80_0000), y(0xbf80_0000)]), // -0.75
@@ -139,7 +140,9 @@ fn expect(form: Form, bits: u32) -> Option<u32> {
         Form::Ceil if s > 0.0 && s != trunc => trunc + 1.0,
         Form::Ceil => trunc,
         Form::Floor => floor(s),
-        Form::Rndne if s.is_sign_negative() && s >= -0.5 => return None,
+        // "Round-to-nearest-even semantics": a zero result keeps the sign of S0
+        // (IEEE 754 roundTiesToEven); the pseudocode's floor(S0 + 0.5) gives +0.
+        Form::Rndne if s.is_sign_negative() && s >= -0.5 => -0.0,
         // From 2^23 every binary32 value is an integer (no fraction bits).
         Form::Rndne if s.abs() >= 8_388_608.0 => s,
         // D = floor(S0 + 0.5); if floor(S0) is even and fract(S0) == 0.5 then D -= 1.
@@ -374,7 +377,7 @@ fn cases() -> Vec<Case> {
     cases
 }
 
-/// Per form: one VGPR, five uniform sources of which RNDNE refuses one, five
+/// Per form: one VGPR, six uniform sources, five
 /// EXEC masks and four flag seeds, plus the two lane counts and three
 /// register cases.
 const COUNTS: [(&str, usize); 5] = [
@@ -382,7 +385,7 @@ const COUNTS: [(&str, usize); 5] = [
     ("f32 lanes", 4 * 2),
     ("f32 no vcc or scc write", 4 * 4),
     ("f32 registers", 4 * 3),
-    ("f32 uniform source", 4 * 4 * 6 - 4),
+    ("f32 uniform source", 4 * 4 * 6),
 ];
 
 /// Programs the decoders refuse at the ALU word: a missing literal, the
@@ -447,9 +450,8 @@ fn refused_inputs() -> Vec<(String, Vec<u8>, Vec<u32>, usize)> {
     all
 }
 
-/// Four NaNs per form and five negative RNDNE inputs of magnitude at most 0.5
-/// (-0, two negative subnormals, -0.25 and -0.5), each as a lane and as a literal.
-const REFUSED: usize = 2 * (4 * 4 + 5);
+/// Four NaNs per form, each as a lane and as a literal (CPU interpreters only).
+const REFUSED: usize = 2 * 4 * 4;
 
 fn assert_rejected_at(label: &str, code: &[u8], offset: usize, input: &[u32]) {
     match xenora_ref::execute(code, input) {

@@ -19,8 +19,7 @@
 //! FFBL_B32 and FFBH_I32 (any SRC0 a VOPC compare takes; bit scans as the
 //! guide's loops over bits from integer division), the binary32 rounding
 //! forms TRUNC, CEIL, RNDNE and FLOOR (host binary64 rounding of the exactly
-//! widened input; NaN, integer inline constants and the RNDNE inputs whose
-//! zero sign the guide leaves open are refused) and SWAP_B32 (VGPR SRC0),
+//! widened input; NaN inputs and integer inline constants are refused) and SWAP_B32 (VGPR SRC0),
 //! VOP2 bitwise, shift, arithmetic-shift and float, the VOP2 integer forms
 //! MUL_I32_I24, MUL_HI_I32_I24, MUL_U32_U24, MUL_HI_U32_U24, MIN/MAX (I32,
 //! U32), XNOR and ADD/SUB/SUBREV_NC_U32 (any SRC0 a VOPC compare takes; a
@@ -1077,11 +1076,6 @@ fn vector_round(opcode: u32, bits: u32, offset: usize) -> Result<u32, String> {
     if x.is_nan() {
         return Err(format!(
             "{offset:#x}: NaN rounding input is outside the domain"
-        ));
-    }
-    if opcode == 35 && x.is_sign_negative() && x >= -0.5 {
-        return Err(format!(
-            "{offset:#x}: RNDNE zero sign is not defined by the guide"
         ));
     }
     let rounded = match opcode {

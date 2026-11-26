@@ -199,6 +199,7 @@ remains unsupported.
 
 ### Changed
 
+- The agent checks gather every open pull request's head commit date and changed files in one batched GraphQL request instead of three `gh` calls per pull request, and a focused pull request reuses the row already gathered. At 54 open pull requests the gather costs 3 calls instead of 163; a pull request whose file list the API truncates still falls back to the paginated call so the file sets stay complete.
 - Queued PCM applies the current gain and mute when frames are read or rendered, so controls affect audio already in the session queue. Oversized submissions keep the newest 256 KiB, and the C header documents the timing and reinitialization rules (#575).
 - The research and testing notes no longer name or link emulator projects and asset tools that are tied to one specific commercial game. The clean-room statements stay, worded for other emulator projects in general, and the rule in `AGENTS.md` against copying emulator source still names KyTx and AnyPS5.
 - Git now ignores the whole local `diagnostics/` folder instead of three named subfolders, so no local report or check output under it can be committed by accident.

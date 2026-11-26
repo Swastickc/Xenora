@@ -1,0 +1,18 @@
+{
+  "run_id": "run-1795652171",
+  "timestamp": "unix:1795652171",
+  "device": "Apple M5 Pro",
+  "host_arch": "aarch64",
+  "os_version": "27.0",
+  "os_build": "26A428",
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "xcode": "Xcode 27.2",
+  "commit": "5aeeb50064800b9b79144a8d956dc7891c202f9f",
+  "profile": "release",
+  "api_validation": "0",
+  "shader_validation": "0",
+  "power": "AC Power",
+  "thermal": "no warnings recorded",
+  "reps": 7,
+  "warmup": 2
+}

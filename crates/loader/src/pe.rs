@@ -7,6 +7,7 @@
 //! permissions.
 
 use crate::memory::{GuestMemory, MemoryError, MemoryPermissions};
+use std::borrow::Cow;
 use std::fmt;
 
 /// Errors that can occur during PE32+ parsing and loading.
@@ -129,74 +130,91 @@ fn read_u32(bytes: &[u8], at: usize) -> u32 {
 impl ParsedPe {
     /// Parse PE32+ headers from an in-memory byte slice.
     pub fn parse(bytes: &[u8]) -> Result<Self, PeError> {
-        if bytes.len() < 0x40 {
-            return Err(PeError::TooSmall);
+        Self::parse_headers(bytes.len() as u64, |offset, len| {
+            let start = offset as usize;
+            Ok(Cow::Borrowed(&bytes[start..start + len]))
+        })
+    }
+
+    /// Read only the fields needed for PE metadata. The reader receives
+    /// in-range requests and returns exactly the requested bytes.
+    pub(crate) fn parse_headers<'data, E: From<PeError>>(
+        file_len: u64,
+        mut read: impl FnMut(u64, usize) -> Result<Cow<'data, [u8]>, E>,
+    ) -> Result<Self, E> {
+        const DOS_HEADER_SIZE: usize = 0x40;
+        const PE_AND_COFF_SIZE: usize = 24;
+        if file_len < DOS_HEADER_SIZE as u64 {
+            return Err(PeError::TooSmall.into());
         }
 
-        // 1. DOS Header
-        if &bytes[0..2] != b"MZ" {
-            return Err(PeError::InvalidDosSignature);
+        let dos = read(0, DOS_HEADER_SIZE)?;
+        if &dos[..2] != b"MZ" {
+            return Err(PeError::InvalidDosSignature.into());
         }
 
-        let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
-        let coff_offset = e_lfanew.checked_add(4).ok_or(PeError::TooSmall)?;
-        if bytes.len() < coff_offset.checked_add(20).ok_or(PeError::TooSmall)? {
-            return Err(PeError::TooSmall);
+        let pe_offset = u64::from(read_u32(&dos, 0x3c));
+        let opt_offset = pe_offset + PE_AND_COFF_SIZE as u64;
+        if file_len < opt_offset {
+            return Err(PeError::TooSmall.into());
         }
 
-        // 2. PE Signature
-        if &bytes[e_lfanew..coff_offset] != b"PE\0\0" {
-            return Err(PeError::InvalidPeSignature);
+        let coff = read(pe_offset, PE_AND_COFF_SIZE)?;
+        if &coff[..4] != b"PE\0\0" {
+            return Err(PeError::InvalidPeSignature.into());
         }
 
-        // 3. COFF File Header
-        let machine = read_u16(bytes, coff_offset);
+        let machine = read_u16(&coff, 4);
         if machine != IMAGE_FILE_MACHINE_AMD64 {
-            return Err(PeError::UnsupportedMachine(machine));
+            return Err(PeError::UnsupportedMachine(machine).into());
         }
-        let number_of_sections = read_u16(bytes, coff_offset + 2);
-        let time_date_stamp = read_u32(bytes, coff_offset + 4);
-        let size_of_optional_header = usize::from(read_u16(bytes, coff_offset + 16));
+        let number_of_sections = read_u16(&coff, 6);
+        let time_date_stamp = read_u32(&coff, 8);
+        let size_of_optional_header = usize::from(read_u16(&coff, 20));
 
-        // 4. Optional Header (PE32+ is required). The fixed PE32+ fields end at
-        // NumberOfRvaAndSizes (offset 108, 4 bytes); a shorter header is malformed.
-        let opt_offset = coff_offset + 20;
-        let section_table_offset = opt_offset + size_of_optional_header;
-        if bytes.len() < opt_offset + 2 {
-            return Err(PeError::TooSmall);
+        let section_table_offset = opt_offset + size_of_optional_header as u64;
+        if file_len < opt_offset + 2 {
+            return Err(PeError::TooSmall.into());
         }
-        let magic = read_u16(bytes, opt_offset);
+        let full_optional_header = size_of_optional_header >= PE32_PLUS_MIN_OPTIONAL_HEADER
+            && file_len >= section_table_offset;
+        // Diagnose the magic first even if the advertised header is incomplete.
+        let optional = read(
+            opt_offset,
+            if full_optional_header {
+                PE32_PLUS_MIN_OPTIONAL_HEADER
+            } else {
+                2
+            },
+        )?;
+        let magic = read_u16(&optional, 0);
         if magic != PE32_PLUS_MAGIC {
-            return Err(PeError::InvalidMagic(magic));
+            return Err(PeError::InvalidMagic(magic).into());
         }
-        if size_of_optional_header < PE32_PLUS_MIN_OPTIONAL_HEADER
-            || bytes.len() < section_table_offset
-        {
-            return Err(PeError::TooSmall);
+        if !full_optional_header {
+            return Err(PeError::TooSmall.into());
         }
 
-        let entry_point_rva = read_u32(bytes, opt_offset + 16);
-        let image_base =
-            u64::from_le_bytes(bytes[opt_offset + 24..opt_offset + 32].try_into().unwrap());
-        let section_alignment = read_u32(bytes, opt_offset + 32);
-        let file_alignment = read_u32(bytes, opt_offset + 36);
-        let size_of_image = read_u32(bytes, opt_offset + 56);
-        let size_of_headers = read_u32(bytes, opt_offset + 60);
+        let entry_point_rva = read_u32(&optional, 16);
+        let image_base = u64::from_le_bytes(
+            optional[OPTIONAL_IMAGE_BASE..OPTIONAL_IMAGE_BASE + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let section_alignment = read_u32(&optional, 32);
+        let file_alignment = read_u32(&optional, 36);
+        let size_of_image = read_u32(&optional, 56);
+        let size_of_headers = read_u32(&optional, OPTIONAL_SIZE_OF_HEADERS);
 
-        // 5. Section Headers
-        let table_end = usize::from(number_of_sections)
-            .checked_mul(SECTION_HEADER_SIZE)
-            .and_then(|len| section_table_offset.checked_add(len))
-            .ok_or(PeError::InvalidSectionHeaders)?;
-        if bytes.len() < table_end {
-            return Err(PeError::InvalidSectionHeaders);
+        // A 32-bit PE offset and 16-bit optional size and section count all
+        // fit in these file coordinates. Read only the table itself.
+        let table_size = usize::from(number_of_sections) * SECTION_HEADER_SIZE;
+        if file_len < section_table_offset + table_size as u64 {
+            return Err(PeError::InvalidSectionHeaders.into());
         }
-
+        let table = read(section_table_offset, table_size)?;
         let mut sections = Vec::with_capacity(usize::from(number_of_sections));
-        for sec_bytes in bytes[section_table_offset..table_end]
-            .as_chunks::<SECTION_HEADER_SIZE>()
-            .0
-        {
+        for sec_bytes in table.as_chunks::<SECTION_HEADER_SIZE>().0 {
             // Section name (up to 8 bytes UTF-8 or null-padded ASCII)
             let name_raw = &sec_bytes[0..8];
             let name_len = name_raw.iter().position(|&b| b == 0).unwrap_or(8);
@@ -214,8 +232,8 @@ impl ParsedPe {
                 .ok_or(PeError::InvalidSectionHeaders)?;
             if raw_data_size > 0 {
                 let raw_end = u64::from(raw_data_ptr) + u64::from(raw_data_size);
-                if raw_end > bytes.len() as u64 {
-                    return Err(PeError::InvalidSectionHeaders);
+                if raw_end > file_len {
+                    return Err(PeError::InvalidSectionHeaders.into());
                 }
             }
 
@@ -247,7 +265,7 @@ impl ParsedPe {
             let mut ranges: Vec<_> = ranges.collect();
             ranges.sort_unstable();
             if ranges.windows(2).any(|pair| pair[1].0 < pair[0].1) {
-                return Err(PeError::InvalidSectionHeaders);
+                return Err(PeError::InvalidSectionHeaders.into());
             }
         }
 
@@ -258,7 +276,7 @@ impl ParsedPe {
                 && entry_point_rva - s.virtual_address < s.virtual_size.max(s.raw_data_size)
         });
         if !entry_ok {
-            return Err(PeError::InvalidEntryPoint);
+            return Err(PeError::InvalidEntryPoint.into());
         }
 
         Ok(ParsedPe {
@@ -433,6 +451,96 @@ mod tests {
     fn section_table(bytes: &[u8]) -> usize {
         let coff = read_u32(bytes, 0x3c) as usize + 4;
         coff + 20 + usize::from(read_u16(bytes, coff + 16))
+    }
+
+    #[test]
+    fn header_reads_skip_the_stub_optional_padding_and_raw_sections() {
+        const PE_AT: u64 = 0x8000_0000;
+        const OPTIONAL_SIZE: u16 = u16::MAX;
+        const RAW_AT: u32 = 0xffff_f000;
+        const RAW_SIZE: u32 = 0x2000;
+        let original = ParsedPe::parse(FIXTURE).unwrap();
+        let file_len = u64::from(RAW_AT) + u64::from(RAW_SIZE);
+        let old_pe_at = read_u32(FIXTURE, 0x3c) as usize;
+        let mut dos = FIXTURE[..64].to_vec();
+        dos[0x3c..0x40].copy_from_slice(&(PE_AT as u32).to_le_bytes());
+        let mut coff = FIXTURE[old_pe_at..old_pe_at + 24].to_vec();
+        coff[20..22].copy_from_slice(&OPTIONAL_SIZE.to_le_bytes());
+        let optional = &FIXTURE[old_pe_at + 24..old_pe_at + 24 + 112];
+        let table_len = usize::from(original.number_of_sections) * SECTION_HEADER_SIZE;
+        let table_at = section_table(FIXTURE);
+        let mut table = FIXTURE[table_at..table_at + table_len].to_vec();
+        let last = table_len - SECTION_HEADER_SIZE;
+        table[last + 16..last + 20].copy_from_slice(&RAW_SIZE.to_le_bytes());
+        table[last + 20..last + 24].copy_from_slice(&RAW_AT.to_le_bytes());
+        let ranges: [(u64, &[u8]); 4] = [
+            (0, &dos),
+            (PE_AT, &coff),
+            (PE_AT + 24, optional),
+            (PE_AT + 24 + u64::from(OPTIONAL_SIZE), &table),
+        ];
+
+        for physical_len in [file_len, file_len - 1] {
+            let mut expected = ranges.into_iter();
+            let result = ParsedPe::parse_headers(physical_len, |offset, size| {
+                let (expected_offset, data) = expected.next().expect("unexpected header read");
+                assert_eq!((offset, size), (expected_offset, data.len()));
+                Ok::<_, PeError>(std::borrow::Cow::Borrowed(data))
+            });
+            assert!(expected.next().is_none());
+            if physical_len == file_len {
+                let parsed = result.unwrap();
+                let mut sections = original.sections.clone();
+                sections.last_mut().unwrap().raw_data_ptr = RAW_AT;
+                sections.last_mut().unwrap().raw_data_size = RAW_SIZE;
+                assert_eq!(parsed.sections, sections);
+                assert_eq!(parsed.entry_point_rva, original.entry_point_rva);
+            } else {
+                assert_eq!(result.unwrap_err(), PeError::InvalidSectionHeaders);
+            }
+        }
+    }
+
+    #[test]
+    fn header_read_errors_keep_slice_parser_precedence() {
+        let pe_at = read_u32(FIXTURE, 0x3c) as usize;
+        let optional = pe_at + 24;
+        let coff_reads = [(0, 64), (pe_at as u64, 24)];
+        let magic_reads = [(0, 64), (pe_at as u64, 24), (optional as u64, 2)];
+        let mut bytes = FIXTURE.to_vec();
+        bytes[pe_at..pe_at + 4].fill(0);
+        for (len, error, reads) in [
+            (optional - 1, PeError::TooSmall, &coff_reads[..1]),
+            (optional, PeError::InvalidPeSignature, &coff_reads[..]),
+        ] {
+            check_header_error(&bytes[..len], error, reads);
+        }
+
+        bytes[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+        bytes[optional..optional + 2].copy_from_slice(&0x010bu16.to_le_bytes());
+        check_header_error(&bytes[..optional + 1], PeError::TooSmall, &coff_reads);
+        check_header_error(
+            &bytes[..optional + 2],
+            PeError::InvalidMagic(0x010b),
+            &magic_reads,
+        );
+        // The magic check also precedes a too-short *declared* optional header.
+        bytes[pe_at + 20..pe_at + 22].copy_from_slice(&1u16.to_le_bytes());
+        check_header_error(&bytes, PeError::InvalidMagic(0x010b), &magic_reads);
+        bytes[optional..optional + 2].copy_from_slice(&PE32_PLUS_MAGIC.to_le_bytes());
+        check_header_error(&bytes, PeError::TooSmall, &magic_reads);
+    }
+
+    fn check_header_error(bytes: &[u8], error: PeError, reads: &[(u64, usize)]) {
+        let mut expected = reads.iter().copied();
+        let positional = ParsedPe::parse_headers(bytes.len() as u64, |offset, size| {
+            assert_eq!(Some((offset, size)), expected.next());
+            let start = offset as usize;
+            Ok::<_, PeError>(std::borrow::Cow::Borrowed(&bytes[start..start + size]))
+        });
+        assert!(expected.next().is_none());
+        assert_eq!(positional.unwrap_err(), error);
+        assert_eq!(ParsedPe::parse(bytes).unwrap_err(), error);
     }
 
     #[test]

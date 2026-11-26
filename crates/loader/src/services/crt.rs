@@ -1468,10 +1468,12 @@ pub(crate) fn resolve_directory(cwd: &str, input: &str) -> String {
 }
 
 fn windows_form(vfs_path: &str) -> String {
+    // The drive is case-folded and the merged `_fullpath` evidence answers
+    // the lowercase form, so the working directory displays the same way.
     if vfs_path.is_empty() {
-        "C:\\".to_owned()
+        "c:\\".to_owned()
     } else {
-        format!("C:\\{vfs_path}")
+        format!("c:\\{vfs_path}")
     }
 }
 

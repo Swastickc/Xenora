@@ -1697,8 +1697,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let Some(resolved) = full_name(&cwd, &name) else {
             return fail(memory, super::crt_files::EINVAL);
         };
-        // The CRT display form uses the uppercase drive letter.
-        let full_path = format!("C:{}", &resolved[2..]);
+        // `full_name` already answers the machine's display form - the
+        // lowercase drive letter the case-folded drive uses everywhere.
+        let full_path = resolved;
         let bytes = full_path.as_bytes();
         let needed = bytes.len() + 1;
         let buffer = if args.rcx == 0 {

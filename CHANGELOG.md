@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Fixed
+- `xenora shaders inspect` checks the opened file before decoding and enforces a 1 MiB read limit. It rejects special files and oversized streams before printing rows (#743).
 - The PR template check ignores HTML-comment markers inside inline code and does not count checklist boxes that appear only inside fences (#725).
 - The pull request template check ignores headings inside fenced code blocks, accepts fenced test output as verification evidence, and removes HTML comments only outside those fences (#522).
 - The native CI semantics test now distinguishes an unknown signedness from a valid category used on the wrong operation. This restores the check after binary32 rounding added the float category (#728).

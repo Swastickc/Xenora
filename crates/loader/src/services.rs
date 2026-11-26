@@ -19,6 +19,7 @@ mod crt_callbacks;
 mod crt_clock;
 mod crt_files;
 mod crt_format;
+mod crt_jump;
 mod crt_legacy;
 mod crt_math;
 mod crt_scan;
@@ -588,6 +589,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     threads::register(registry, &state);
     static_cxx::register(registry);
     crate::exceptions::register(registry);
+    crt_jump::register(registry);
 
     // The legacy CRT variables a msvcrt.dll-linked image imports as data
     // (#643). Each cell is the one the modern accessors maintain, so the

@@ -811,6 +811,15 @@ system resolver. A request may connect to whatever address the resolver
 returns; loopback tests are evidence of the transport mechanics only, not of
 general Internet reachability.
 
+`WinHttpQueryOption` supports only the four DWORD timeout options matching
+those stored values: resolve, connect, send and receive on session or request
+handles. Infinite values are returned as unsigned `0xffffffff` DWORD bits. It
+implements the documented required-size contract by writing four to
+`lpdwBufferLength` when the output buffer is null or too small and failing
+with `ERROR_INSUFFICIENT_BUFFER`; success writes exactly four bytes. Connection
+handles fail with the incorrect-handle-type error, unknown options fail with
+`ERROR_WINHTTP_INVALID_OPTION`, and arbitrary other options remain unsupported.
+
 `WinHttpReceiveResponse` parses HTTP/1.0 and HTTP/1.1 status lines and a
 bounded response header block. It preserves the status line and headers for
 the supported `WinHttpQueryHeaders` forms: `WINHTTP_QUERY_STATUS_CODE` as a

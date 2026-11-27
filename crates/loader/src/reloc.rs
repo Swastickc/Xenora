@@ -531,7 +531,7 @@ mod tests {
                 PeSection {
                     name: ".data".into(),
                     virtual_address: DATA_RVA,
-                    virtual_size: 4096,
+                    virtual_size: data.len() as u32,
                     raw_data_ptr: 0,
                     raw_data_size: 0,
                     characteristics: 0xC0000040,

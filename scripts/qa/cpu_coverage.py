@@ -104,6 +104,182 @@ def scan_opcodes(text: str, *, source: str) -> list[OpcodeEntry]:
     return [found[k] for k in sorted(found)]
 
 
+
+def _blank_comments_and_strings(text: str) -> str:
+    """A same-length copy of the Rust source with the insides of comments,
+    strings, raw strings and char literals replaced by spaces (newlines
+    preserved). Structure scanning over the copy is safe from punctuation
+    inside them; block comments nest in Rust and lifetimes are not char
+    literals, so this small lexer is required rather than a regex.
+    """
+    out = list(text)
+    pos = 0
+    size = len(text)
+
+    def blank(start: int, end: int) -> None:
+        for index in range(start, end):
+            if out[index] != "\n":
+                out[index] = " "
+
+    while pos < size:
+        char = text[pos]
+        rest = text[pos:]
+        if rest.startswith("//"):
+            end = text.find("\n", pos)
+            end = size if end < 0 else end
+            blank(pos, end)
+            pos = end
+        elif rest.startswith("/*"):
+            depth = 0
+            end = pos
+            while end < size:
+                if text.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif text.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                    if depth == 0:
+                        break
+                else:
+                    end += 1
+            blank(pos, end)
+            pos = end
+        elif char == 'r' or (char == 'b' and rest[1:2] == 'r'):
+            raw = re.match(r"(?:br|r)(#*)\"", rest)
+            if raw:
+                hashes = raw.group(1)
+                close = '"' + hashes
+                start = pos + len(raw.group(0))
+                end = text.find(close, start)
+                end = size if end < 0 else end + len(close)
+                blank(pos, end)
+                pos = end
+            elif char == 'b' and rest[1:2] == '"':
+                end = pos + 2
+                while end < size:
+                    if text[end] == "\\":
+                        end += 2
+                    elif text[end] == '"':
+                        end += 1
+                        break
+                    else:
+                        end += 1
+                blank(pos, end)
+                pos = end
+            else:
+                pos += 1
+        elif char == '"':
+            end = pos + 1
+            while end < size:
+                if text[end] == "\\":
+                    end += 2
+                elif text[end] == '"':
+                    end += 1
+                    break
+                else:
+                    end += 1
+            blank(pos, end)
+            pos = end
+        elif char == "'":
+            literal = re.match(r"'(?:\\(?:[^u]|u\{[0-9a-fA-F]+\})|[^\\'])'", rest)
+            if literal:
+                blank(pos, pos + len(literal.group(0)))
+                pos += len(literal.group(0))
+            else:
+                pos += 1
+        else:
+            pos += 1
+    return "".join(out)
+
+
+_TEST_ATTRIBUTE = re.compile(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]")
+
+
+def strip_test_gated_items(text: str) -> str:
+    """Production Rust source: the items a `#[cfg(test)]` attribute gates are
+    removed - and nothing else. Splitting the file at the first attribute
+    discards every production registration after a test module or a single
+    test-only function, so the item each attribute annotates is found by its
+    own shape: a brace body matched over the comment- and string-blanked
+    copy, or a semicolon declaration.
+    """
+    structure = _blank_comments_and_strings(text)
+    spans: list[tuple[int, int]] = []
+    for attribute in _TEST_ATTRIBUTE.finditer(structure):
+        pos = attribute.end()
+        while True:
+            while pos < len(structure) and structure[pos].isspace():
+                pos += 1
+            chained = re.match(r"#\s*\[", structure[pos:])
+            if chained:
+                close = structure.find("]", pos)
+                if close < 0:
+                    break
+                pos = close + 1
+            else:
+                break
+        # The item boundary is the first semicolon or opening brace at
+        # delimiter depth zero: a semicolon inside a type such as `[u8; 1]`
+        # or a parameter list does not end the item, and a brace inside
+        # parentheses is not the body.
+        depth_paren = 0
+        depth_bracket = 0
+        brace = -1
+        semicolon = -1
+        cursor = pos
+        while cursor < len(structure):
+            character = structure[cursor]
+            if character == "(":
+                depth_paren += 1
+            elif character == ")":
+                depth_paren -= 1
+            elif character == "[":
+                depth_bracket += 1
+            elif character == "]":
+                depth_bracket -= 1
+            elif depth_paren == 0 and depth_bracket == 0:
+                if character == ";":
+                    semicolon = cursor
+                    break
+                if character == "{":
+                    brace = cursor
+                    break
+            cursor += 1
+        if semicolon >= 0:
+            spans.append((attribute.start(), semicolon + 1))
+            continue
+        if brace < 0:
+            spans.append((attribute.start(), len(structure)))
+            continue
+        depth = 0
+        end = brace
+        while end < len(structure):
+            if structure[end] == "{":
+                depth += 1
+            elif structure[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    end += 1
+                    break
+            end += 1
+        spans.append((attribute.start(), end))
+
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    pieces: list[str] = []
+    pos = 0
+    for start, end in merged:
+        pieces.append(text[pos:start])
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces)
+
+
 def scan_imports(text: str, *, source: str, default_dll: str = "unknown") -> list[ImportEntry]:
     """Extract explicit service registrations, not every quoted Rust string.
 
@@ -111,7 +287,7 @@ def scan_imports(text: str, *, source: str, default_dll: str = "unknown") -> lis
     registration-shaped construct. Unit-test modules are ignored because their
     synthetic services are not runtime surface area.
     """
-    production = text.split("#[cfg(test)]", 1)[0]
+    production = strip_test_gated_items(text)
     constants = dict(re.findall(
         r'\bconst\s+([A-Z][A-Z0-9_]*)\s*:\s*&str\s*=\s*"([^"]+\.dll)"',
         production,
@@ -192,7 +368,7 @@ def scan_imports(text: str, *, source: str, default_dll: str = "unknown") -> lis
 
 def _rust_production(text: str) -> str:
     """Production Rust source with comments removed enough for token scanning."""
-    text = text.split("#[cfg(test)]", 1)[0]
+    text = strip_test_gated_items(text)
     text = re.sub(r"/\*[\s\S]*?\*/", " ", text)
     return re.sub(r"//[^\n]*", " ", text)
 

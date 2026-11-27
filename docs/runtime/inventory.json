@@ -13226,7 +13226,27 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "_ZdaPv"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "_ZdlPvy"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "_Znay"
     },
     {
       "data_import": false,
@@ -16796,16 +16816,6 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
-      "symbol": "WinHttpAddRequestHeaders"
-    },
-    {
-      "data_import": false,
-      "family": "other",
-      "kind": "name",
-      "library": "winhttp.dll",
-      "source": "manual",
-      "status": "partial",
-      "status_explicit": true,
       "symbol": "WinHttpCloseHandle"
     },
     {
@@ -16897,16 +16907,6 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WinHttpSendRequest"
-    },
-    {
-      "data_import": false,
-      "family": "other",
-      "kind": "name",
-      "library": "winhttp.dll",
-      "source": "manual",
-      "status": "partial",
-      "status_explicit": true,
-      "symbol": "WinHttpSetOption"
     },
     {
       "data_import": false,
@@ -18285,12 +18285,12 @@
     "canonical_services": 867,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 235,
+    "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
     "manual_services": 571,
     "ordinal_aliases": 0,
-    "partial": 630,
+    "partial": 628,
     "structural_consistency_findings": 0,
     "stub": 2,
     "typed_registry_entries": 296,

@@ -381,7 +381,7 @@ pub(super) fn register(registry: &mut ImportRegistry, crt_state: &Arc<ServicesSt
             let (size_at, buffer, buffer_size, name) = (args.rcx, args.rdx, args.r8, args.r9);
             if size_at == 0 || name == 0 {
                 set_errno(memory, cpu.gs_base, EINVAL as u32)?;
-                return Ok(u64::from(EINVAL));
+                return Ok(EINVAL);
             }
             let found = if memory.read_u8(name).map_err(fault)? == 0 {
                 None

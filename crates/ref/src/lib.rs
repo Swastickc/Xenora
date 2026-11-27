@@ -947,8 +947,22 @@ fn descriptor_detail(detail: texture_sampling::SamplingError) -> &'static str {
         texture_sampling::SamplingError::InvalidResourceLevelRange => {
             "resource last level is below base level"
         }
-        texture_sampling::SamplingError::InvalidSampler => {
-            "sampler is not point filtering with clamp addressing and an explicit mip level"
+        texture_sampling::SamplingError::ResourceExtensionNonzero => {
+            "nonzero 256-bit resource extension words"
+        }
+        texture_sampling::SamplingError::ResourceUnsupportedBits { .. } => {
+            "resource descriptor sets bits the validator does not support"
+        }
+        texture_sampling::SamplingError::SamplerAddressing => {
+            "sampler addressing is not clamp-to-last-texel with normalized coordinates"
+        }
+        texture_sampling::SamplingError::SamplerFilter => "sampler filtering is not point",
+        texture_sampling::SamplingError::SamplerMipFilter => "sampler mip filtering is not point",
+        texture_sampling::SamplingError::SamplerLodRange => {
+            "sampler LOD range does not cover the resource mip levels"
+        }
+        texture_sampling::SamplingError::SamplerUnsupportedBits { .. } => {
+            "sampler sets bits the validator does not support"
         }
         texture_sampling::SamplingError::InvalidLod => {
             "explicit LOD is not a representable integer mip level"
@@ -2235,7 +2249,7 @@ fn execute_wave(
                 let resource_words = read_descriptor_words(&scalars, resource, 8, offset)?;
                 let sampler_words = read_descriptor_words(&scalars, sampler, 4, offset)?;
                 let (desc, base) = texture_sampling::parse_resource_descriptor(
-                    resource_words[..4].try_into().unwrap(),
+                    resource_words[..8].try_into().unwrap(),
                 )
                 .map_err(|detail| error(offset, descriptor_detail(detail)))?;
                 texture_sampling::validate_sampler_descriptor(
@@ -2243,11 +2257,6 @@ fn execute_wave(
                     desc.mips - 1,
                 )
                 .map_err(|detail| error(offset, descriptor_detail(detail)))?;
-                // The 256-bit extension words of T# must be zero for a plain 2D
-                // texture (guide Table 45, printed page 75).
-                if resource_words[4..].iter().any(|&word| word != 0) {
-                    return Err(error(offset, "nonzero 256-bit resource extension words"));
-                }
                 let bytes = buffer
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
@@ -2759,7 +2768,7 @@ mod tests {
         input[8] = 0; // clamp_x = Wrap (0), not ClampLastTexel (2)
         rejects(
             input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
+            "sampler addressing is not clamp-to-last-texel with normalized coordinates",
         );
         // A resource of the wrong type is refused.
         let mut input = image_sample_input();
@@ -2784,41 +2793,32 @@ mod tests {
         // A mip filter of none is refused.
         let mut input = image_sample_input();
         input[10] = 0;
-        rejects(
-            input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
-        );
+        rejects(input, "sampler mip filtering is not point");
         // A nonzero z filter, a mismatched clamp z, a LOD bias, a nonzero
         // minimum LOD and a maximum LOD below the last level are all refused.
         let mut input = image_sample_input();
         input[10] |= 1 << 24;
-        rejects(
-            input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
-        );
+        rejects(input, "sampler filtering is not point");
         let mut input = image_sample_input();
         input[8] = 0x12;
         rejects(
             input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
+            "sampler addressing is not clamp-to-last-texel with normalized coordinates",
         );
         let mut input = image_sample_input();
         input[10] |= 1;
-        rejects(
-            input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
-        );
+        rejects(input, "sampler sets bits the validator does not support");
         let mut input = image_sample_input();
         input[9] = 1;
         rejects(
             input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
+            "sampler LOD range does not cover the resource mip levels",
         );
         let mut input = image_sample_input();
         input[9] = 0;
         rejects(
             input,
-            "sampler is not point filtering with clamp addressing and an explicit mip level",
+            "sampler LOD range does not cover the resource mip levels",
         );
     }
 }

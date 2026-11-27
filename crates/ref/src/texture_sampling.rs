@@ -54,8 +54,25 @@ pub enum SamplingError {
     InvalidResourceMinLod,
     /// Resource descriptor last level is below its base level.
     InvalidResourceLevelRange,
-    /// Sampler descriptor does not select point filtering and clamp addressing.
-    InvalidSampler,
+    /// Resource descriptor extension words (the four SGPRs past the low four)
+    /// are not all zero.
+    ResourceExtensionNonzero,
+    /// Resource descriptor sets bits outside the supported set. The mask holds
+    /// exactly the set bits that are not supported.
+    ResourceUnsupportedBits { mask: u128 },
+    /// Sampler addressing is not clamp-to-last-texel on x, y and z with
+    /// normalized coordinates.
+    SamplerAddressing,
+    /// Sampler xy or z filtering is not point filtering.
+    SamplerFilter,
+    /// Sampler mip filtering is not point filtering.
+    SamplerMipFilter,
+    /// Sampler minimum LOD is nonzero or its maximum LOD is below the last
+    /// level of the resource.
+    SamplerLodRange,
+    /// Sampler descriptor sets bits outside the supported set. The mask holds
+    /// exactly the set bits that are not supported.
+    SamplerUnsupportedBits { mask: u128 },
     /// Explicit level of detail is not a representable integer mip level.
     InvalidLod,
 }
@@ -82,10 +99,27 @@ impl fmt::Display for SamplingError {
             Self::UnsupportedSwizzleMode => write!(f, "resource swizzle mode is not linear"),
             Self::InvalidResourceMinLod => write!(f, "resource minimum LOD is nonzero"),
             Self::InvalidResourceLevelRange => write!(f, "resource last level is below base level"),
-            Self::InvalidSampler => write!(
+            Self::ResourceExtensionNonzero => {
+                write!(f, "nonzero 256-bit resource extension words")
+            }
+            Self::ResourceUnsupportedBits { mask } => {
+                write!(f, "resource descriptor sets unsupported bits 0x{mask:x}")
+            }
+            Self::SamplerAddressing => write!(
                 f,
-                "sampler is not point filtering with clamp addressing and an explicit mip level"
+                "sampler addressing is not clamp-to-last-texel with normalized coordinates"
             ),
+            Self::SamplerFilter => write!(f, "sampler filtering is not point filtering"),
+            Self::SamplerMipFilter => write!(f, "sampler mip filtering is not point filtering"),
+            Self::SamplerLodRange => {
+                write!(
+                    f,
+                    "sampler LOD range does not cover the resource mip levels"
+                )
+            }
+            Self::SamplerUnsupportedBits { mask } => {
+                write!(f, "sampler sets unsupported bits 0x{mask:x}")
+            }
             Self::InvalidLod => write!(f, "explicit LOD is not a representable integer mip level"),
         }
     }
@@ -283,6 +317,33 @@ fn field(packed: u128, lo: u32, hi: u32) -> u32 {
     ((packed >> lo) & ((1u128 << (hi - lo + 1)) - 1)) as u32
 }
 
+/// The same extraction as `field` for a field wider than 32 bits.
+fn wide_field(packed: u128, lo: u32, hi: u32) -> u128 {
+    (packed >> lo) & ((1u128 << (hi - lo + 1)) - 1)
+}
+
+/// The resource descriptor bits the bounded scope does not interpret: the
+/// reserved bit 61, the reserved bit 94 and the BC swizzle field 123:121.
+/// The result holds exactly the set bits among those positions.
+fn resource_unsupported_bits(packed: u128) -> u128 {
+    let mut unsupported = 0u128;
+    for (lo, hi) in [(61u32, 61u32), (94, 94), (121, 123)] {
+        unsupported |= u128::from(field(packed, lo, hi)) << lo;
+    }
+    unsupported
+}
+
+/// The sampler descriptor bits the bounded scope interprets: the three clamp
+/// modes 8:0, the unnormalized-coordinate flag 15, the LOD range 55:32 and
+/// the filter fields 91:84. Every other bit must be zero.
+fn sampler_supported_mask() -> u128 {
+    let clamp = (1u128 << 9) - 1; // 8:0
+    let unnormalized = 1u128 << 15; // 15
+    let lod_range = ((1u128 << 24) - 1) << 32; // 55:32
+    let filters = ((1u128 << 8) - 1) << 84; // 91:84
+    clamp | unnormalized | lod_range | filters
+}
+
 /// Parse and validate a 128-bit image resource descriptor (T#, guide Table 45,
 /// printed page 75) held in four consecutive SGPRs, low word first.
 ///
@@ -292,11 +353,26 @@ fn field(packed: u128, lo: u32, hi: u32) -> u32 {
 /// therefore always 256-byte aligned. The bounded scope accepts only a linear
 /// (unswizzled) 2D RGBA8 unorm resource with an identity RGBA channel select,
 /// a zero minimum LOD and base level zero; the 256-bit extension words (a
-/// further four SGPRs) are not read.
+/// further four SGPRs) must be zero.
+///
+/// # Refused bits
+///
+/// Every bit of the descriptor is either checked by this function or required
+/// to be zero. The bits that carry no meaning for the bounded scope are the
+/// reserved bit 61, the reserved bit 94 and the BC swizzle bits 123:121; any
+/// of them set is refused with [`SamplingError::ResourceUnsupportedBits`] and
+/// a mask of exactly the set bits. A nonzero extension word is refused with
+/// [`SamplingError::ResourceExtensionNonzero`].
 pub fn parse_resource_descriptor(
-    words: [u32; 4],
+    words: [u32; 8],
 ) -> Result<(Rgba8TextureDesc, usize), SamplingError> {
-    let packed = pack_words(words);
+    // The four extension SGPRs (words 4..8) hold no information for a plain
+    // 2D texture, so every one of their bits must be zero (guide Table 45,
+    // printed page 75).
+    if words[4..].iter().any(|&word| word != 0) {
+        return Err(SamplingError::ResourceExtensionNonzero);
+    }
+    let packed = pack_words([words[0], words[1], words[2], words[3]]);
     // 127:124 type, 120:116 swizzle mode, 60:52 format, 51:40 minimum LOD,
     // 95 resource level, 96-107 channel select, 108-111 base level,
     // 112-115 last level, 62-77 width-1, 78-93 height-1, 39:0 base address
@@ -336,10 +412,18 @@ pub fn parse_resource_descriptor(
     if !levels_ok {
         return Err(SamplingError::InvalidResourceLevel);
     }
+    // The bits the bounded scope does not interpret must be zero: the reserved
+    // bit 61, the reserved bit 94 and the BC swizzle field 123:121.
+    let unsupported = resource_unsupported_bits(packed);
+    if unsupported != 0 {
+        return Err(SamplingError::ResourceUnsupportedBits { mask: unsupported });
+    }
     let width = usize::try_from(width1 + 1).map_err(|_| SamplingError::InvalidDimensions)?;
     let height = usize::try_from(height1 + 1).map_err(|_| SamplingError::InvalidDimensions)?;
     let mips = last_level - base_level + 1;
-    let base = usize::try_from(field(packed, 0, 39))
+    // The base-address field is 40 bits wide, so it is read with a wide
+    // extraction: a narrow one would drop the eight high address bits.
+    let base = usize::try_from(wide_field(packed, 0, 39))
         .ok()
         .and_then(|address| address.checked_mul(256))
         .ok_or(SamplingError::InvalidOffset)?;
@@ -355,28 +439,51 @@ pub fn parse_resource_descriptor(
 /// `last_level` is the resource descriptor's last level, used to check the
 /// sampler's 4.8 fixed-point maximum LOD. A mip filter of none (0) is refused
 /// because it disables mipmapping and could not select the explicit level.
+///
+/// # Refused bits
+///
+/// Every bit of the descriptor is either checked by this function or required
+/// to be zero. The bits the bounded scope does not interpret are the LOD bias
+/// 75:64, the LOD bias high bits 77:76 and the LOD bias sec 83:78; the force
+/// degamma bit 20; the trunc coord bit 27; bit 19; the anisotropy, depth
+/// compare, filter mode, performance and border colour fields; and the
+/// reserved bits. Any of them set is refused with
+/// [`SamplingError::SamplerUnsupportedBits`] and a mask of exactly the set
+/// bits. The remaining refusals are separate variants: the clamp modes and
+/// the unnormalized-coordinate flag give [`SamplingError::SamplerAddressing`],
+/// the xy and z filters give [`SamplingError::SamplerFilter`], the mip filter
+/// gives [`SamplingError::SamplerMipFilter`] and the LOD range gives
+/// [`SamplingError::SamplerLodRange`].
 pub fn validate_sampler_descriptor(words: [u32; 4], last_level: u32) -> Result<(), SamplingError> {
     let packed = pack_words(words);
     // 2:0 / 5:3 / 8:6 clamp x/y/z are ClampLastTexel (2) and z matches x;
-    // bit 15 forces unnormalized coordinates (0); 85:84 and 87:86 select point
-    // xy filtering and 89:88 point z filtering; 91:90 must be point mip
-    // filtering (1) so an explicit LOD selects a level; 77:64 LOD bias is
-    // zero; 43:32 minimum LOD is zero; 55:44 maximum LOD is at least the last
-    // level in 4.8 fixed point.
-    let addressing = field(packed, 0, 2) == S_CLAMP_LAST_TEXEL
+    // bit 15 forces unnormalized coordinates (0).
+    if !(field(packed, 0, 2) == S_CLAMP_LAST_TEXEL
         && field(packed, 3, 5) == S_CLAMP_LAST_TEXEL
         && field(packed, 6, 8) == field(packed, 0, 2)
-        && field(packed, 15, 15) == 0;
-    let filtering =
-        field(packed, 84, 85) == 0 && field(packed, 86, 87) == 0 && field(packed, 88, 89) == 0;
-    let mip = field(packed, 90, 91) == 1;
-    let bias = field(packed, 64, 75) == 0 && field(packed, 76, 77) == 0;
-    let lod = field(packed, 32, 43) == 0 && field(packed, 44, 55) >= last_level << 8;
-    if addressing && filtering && mip && bias && lod {
-        Ok(())
-    } else {
-        Err(SamplingError::InvalidSampler)
+        && field(packed, 15, 15) == 0)
+    {
+        return Err(SamplingError::SamplerAddressing);
     }
+    // 85:84 and 87:86 select point xy filtering and 89:88 point z filtering.
+    if !(field(packed, 84, 85) == 0 && field(packed, 86, 87) == 0 && field(packed, 88, 89) == 0) {
+        return Err(SamplingError::SamplerFilter);
+    }
+    // 91:90 must be point mip filtering (1) so an explicit LOD selects a level.
+    if field(packed, 90, 91) != 1 {
+        return Err(SamplingError::SamplerMipFilter);
+    }
+    // 43:32 minimum LOD is zero; 55:44 maximum LOD is at least the last level
+    // in 4.8 fixed point.
+    if !(field(packed, 32, 43) == 0 && field(packed, 44, 55) >= last_level << 8) {
+        return Err(SamplingError::SamplerLodRange);
+    }
+    // Every bit the checks above do not interpret must be zero.
+    let unsupported = packed & !sampler_supported_mask();
+    if unsupported != 0 {
+        return Err(SamplingError::SamplerUnsupportedBits { mask: unsupported });
+    }
+    Ok(())
 }
 
 /// Convert an explicit level of detail to the integer mip level it names.
@@ -645,7 +752,7 @@ mod tests {
 
     /// Build a valid T#: linear 2D RGBA8 unorm, identity channel select, base
     /// level zero, `mips` levels and a 40-bit base-address field `base`.
-    fn resource_words(width: u32, height: u32, mips: u32, base: u32) -> [u32; 4] {
+    fn resource_words(width: u32, height: u32, mips: u32, base: u32) -> [u32; 8] {
         let width1 = width - 1;
         let height1 = height - 1;
         [
@@ -653,6 +760,10 @@ mod tests {
             (T_FORMAT_RGBA8_UNORM << 20) | ((width1 & 3) << 30),
             ((width1 >> 2) & 0x3fff) | (height1 << 14) | (1 << 31),
             0x0fac | ((mips - 1) << 16) | (T_TYPE_2D << 28),
+            0,
+            0,
+            0,
+            0,
         ]
     }
 
@@ -829,6 +940,34 @@ mod tests {
     }
 
     #[test]
+    fn resource_descriptor_refuses_nonzero_extension_words() {
+        for word in 4..8 {
+            let mut words = resource_words(4, 4, 2, 1);
+            words[word] = 1;
+            assert_eq!(
+                parse_resource_descriptor(words).unwrap_err(),
+                SamplingError::ResourceExtensionNonzero,
+                "word {word}"
+            );
+        }
+    }
+
+    #[test]
+    fn resource_descriptor_refuses_the_bits_the_scope_does_not_interpret() {
+        // The reserved bit 61, the reserved bit 94 and the BC swizzle field
+        // 123:121 carry no meaning for the bounded scope.
+        for bit in [61u32, 94, 121, 122, 123] {
+            let mut words = resource_words(4, 4, 2, 1);
+            words[(bit / 32) as usize] |= 1 << (bit % 32);
+            assert_eq!(
+                parse_resource_descriptor(words).unwrap_err(),
+                SamplingError::ResourceUnsupportedBits { mask: 1u128 << bit },
+                "bit {bit}"
+            );
+        }
+    }
+
+    #[test]
     fn sampler_descriptor_accepts_valid_point_clamp_state() {
         // 2 mips: the last level is 1, so the maximum LOD must be at least
         // 1.0 in 4.8 fixed point (0x100).
@@ -839,7 +978,7 @@ mod tests {
     fn sampler_descriptor_refuses_mip_filter_none() {
         assert_eq!(
             validate_sampler_descriptor(sampler_words(2, 2, 2, 0, 0, 0x100, 0), 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerMipFilter
         );
     }
 
@@ -849,7 +988,7 @@ mod tests {
         words[2] |= 1 << 24; // z filter 89:88 = point (0) only.
         assert_eq!(
             validate_sampler_descriptor(words, 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerFilter
         );
     }
 
@@ -857,7 +996,7 @@ mod tests {
     fn sampler_descriptor_refuses_clamp_z_different_from_clamp_x() {
         assert_eq!(
             validate_sampler_descriptor(sampler_words(2, 2, 0, 1, 0, 0x100, 0), 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerAddressing
         );
     }
 
@@ -865,13 +1004,13 @@ mod tests {
     fn sampler_descriptor_refuses_nonzero_lod_bias() {
         assert_eq!(
             validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x100, 1), 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerUnsupportedBits { mask: 1u128 << 64 }
         );
         let mut words = sampler_words(2, 2, 2, 1, 0, 0x100, 0);
         words[2] |= 1 << 12; // LOD bias high bit (76:77).
         assert_eq!(
             validate_sampler_descriptor(words, 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerUnsupportedBits { mask: 1u128 << 76 }
         );
     }
 
@@ -879,7 +1018,7 @@ mod tests {
     fn sampler_descriptor_refuses_nonzero_min_lod() {
         assert_eq!(
             validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 1, 0x100, 0), 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerLodRange
         );
     }
 
@@ -888,8 +1027,30 @@ mod tests {
         // Last level 1 needs a maximum LOD of at least 0x100 (1.0).
         assert_eq!(
             validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x0ff, 0), 1).unwrap_err(),
-            SamplingError::InvalidSampler
+            SamplingError::SamplerLodRange
         );
         validate_sampler_descriptor(sampler_words(2, 2, 2, 1, 0, 0x100, 0), 1).unwrap();
+    }
+
+    #[test]
+    fn sampler_descriptor_refuses_the_bits_the_scope_does_not_interpret() {
+        // Force degamma (20), trunc coord (27) and bit 19 change what the
+        // hardware samples, so they must be refused rather than ignored.
+        for bit in [19u32, 20, 27] {
+            let mut words = sampler_words(2, 2, 2, 1, 0, 0x100, 0);
+            words[(bit / 32) as usize] |= 1 << (bit % 32);
+            assert_eq!(
+                validate_sampler_descriptor(words, 1).unwrap_err(),
+                SamplingError::SamplerUnsupportedBits { mask: 1u128 << bit },
+                "bit {bit}"
+            );
+        }
+        // The LOD bias sec field 83:78 is refused as well.
+        let mut words = sampler_words(2, 2, 2, 1, 0, 0x100, 0);
+        words[2] |= 1 << 14; // LOD bias sec 83:78.
+        assert_eq!(
+            validate_sampler_descriptor(words, 1).unwrap_err(),
+            SamplingError::SamplerUnsupportedBits { mask: 1u128 << 78 }
+        );
     }
 }

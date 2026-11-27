@@ -30,9 +30,15 @@ The bounded scope accepts only:
 - last level at or above the base level.
 
 The base-address field is address bits 47:8, so the byte offset is
-`field << 8` and is always 256-byte aligned. The 256-bit extension words
-(the further four SGPRs) must be zero. Each malformed field is a distinct
-`SamplingError` in the reference.
+`field << 8` and is always 256-byte aligned; the field is 40 bits wide and
+all of it is read. The 256-bit extension words (the further four SGPRs) must
+be zero. Each malformed field is a distinct `SamplingError` in the
+reference.
+
+Every bit of the descriptor is either checked or required to be zero. The
+bits that carry no meaning for the bounded scope are the reserved bit 61, the
+reserved bit 94 and the BC swizzle field 123:121; a nonzero extension word is
+refused separately. The reference reports the offending bits as a mask.
 
 ## Sampler descriptor (S#)
 
@@ -41,6 +47,14 @@ to x), normalized coordinates, point xy and z filtering, a point mip filter,
 zero LOD bias, minimum LOD 0, and a maximum LOD at or above the last level in
 4.8 fixed point. A mip filter of none (0) is refused because it disables
 mipmapping and could not select the explicit level.
+
+Every bit of the descriptor is either checked or required to be zero. The
+fields the bounded scope does not interpret are the LOD bias 75:64, the LOD
+bias high bits 77:76, the LOD bias sec 83:78, force degamma (20), trunc
+coord (27), bit 19, the anisotropy, depth compare, filter mode, performance
+and border colour fields, and the reserved bits. A set bit among them changes
+what real hardware samples, so the reference refuses the descriptor and
+reports the offending bits as a mask instead of ignoring them.
 
 ## Mapping
 
@@ -55,6 +69,24 @@ y = min(floor(clamp(v, 0, 1) * height), height - 1)
 A texel byte converts to binary32 as `byte / 255.0`; a selected component is
 written to its destination VGPR as those f32 bits. `IMAGE_SAMPLE_LZ` uses mip
 0, and `IMAGE_SAMPLE_L` requires an integral LOD in `[0, last level]`.
+
+## Known limits
+
+The CPU reference refuses an explicit LOD that is not an exact integer mip
+level, and answers `SamplingError::InvalidLod` for a fractional, negative or
+out-of-range LOD. The GPU path cannot refuse a runtime value: the generated
+MSL calls `tex0.sample(samp0, float2(u, v), level(lod))` and the bound Metal
+sampler state sets `MTLSamplerMipFilter::Nearest`, so Metal rounds the LOD
+to the nearest mip level instead of failing. The sampler's LOD clamps
+(`LodMinClamp` and `LodMaxClamp`) also pull a negative or too large LOD
+into the sampler's range rather than refusing it.
+
+The two paths therefore differ for a non-integer explicit LOD: the reference
+reports `InvalidLod` and the GPU samples the nearest mip level. The bounded
+contract assumes an integral explicit LOD, and a program that depends on the
+refusal must not be run on the GPU path. Nothing here is claimed for Xbox
+hardware; Metal's rounding rule is Metal's own and not a guide-derived
+expectation.
 
 ## Translation and Metal
 

@@ -1476,12 +1476,6 @@ fn validate_image_binding(
         })?
         .try_into()
         .expect("a slice of length eight");
-    if input[4..8].iter().any(|&word| word != 0) {
-        return Err(MetalError::new(
-            "image resource descriptor",
-            "nonzero 256-bit extension words",
-        ));
-    }
     let sampler_words: [u32; 4] = input
         .get(8..12)
         .ok_or_else(|| {
@@ -1492,9 +1486,8 @@ fn validate_image_binding(
         })?
         .try_into()
         .expect("a slice of length four");
-    let (desc, _base) =
-        texture_sampling::parse_resource_descriptor(resource[..4].try_into().unwrap())
-            .map_err(|error| MetalError::new("image resource descriptor", error.to_string()))?;
+    let (desc, _base) = texture_sampling::parse_resource_descriptor(resource)
+        .map_err(|error| MetalError::new("image resource descriptor", error.to_string()))?;
     let last_level = desc.mips - 1;
     texture_sampling::validate_sampler_descriptor(sampler_words, last_level)
         .map_err(|error| MetalError::new("image sampler descriptor", error.to_string()))?;

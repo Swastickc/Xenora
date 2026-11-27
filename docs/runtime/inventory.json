@@ -16536,6 +16536,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "MsgWaitForMultipleObjects"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "PeekMessageA"
     },
     {
@@ -18030,21 +18040,21 @@
     }
   ],
   "summary": {
-    "aliases": 870,
-    "api_set_aliases": 723,
-    "canonical_services": 834,
+    "aliases": 900,
+    "api_set_aliases": 737,
+    "canonical_services": 849,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 235,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 568,
+    "manual_services": 567,
     "ordinal_aliases": 0,
-    "partial": 613,
+    "partial": 612,
     "structural_consistency_findings": 0,
     "stub": 2,
-    "typed_registry_entries": 266,
-    "typed_services": 266,
+    "typed_registry_entries": 282,
+    "typed_services": 282,
     "wanted_imports": null,
     "wanted_missing": null
   },

@@ -20,12 +20,14 @@ use xenora_loader::{
     ExitReason, ImportRegistry, Register, ServicesState, SystemClock, register_standard_services,
 };
 use xenora_metal::NativeCompute;
-use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile_graphics};
+use xenora_shader::{PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT};
 
 #[path = "runner_diagnostics.rs"]
 mod diagnostics;
 #[path = "runner_export.rs"]
 mod export;
+#[path = "runner_graphics.rs"]
+mod graphics;
 use diagnostics::{Collector, FailurePhase, Reporter, Stage, Termination};
 use export::SupervisorExport;
 
@@ -53,9 +55,10 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--package <module>]... [--module <name>=<path>]... [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--package <module>]... [--module <name>=<path>]... [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--graphics-backend <reference|metal>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
        --package names another explicit image to load beside the entry executable; it may be repeated and is never searched for on the host
        --module admits a bounded logical name for a regular-file image held in the closed-world provisioned store; it is not loaded until a later runtime-load step
+       --graphics-backend selects hosted graphics; reference is the default, and metal enables flat draws and native fences
        a hosted export copies up to 16 MiB from the synthetic C: drive to a new UTF-8 filename in an existing directory
        an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
 
@@ -110,6 +113,7 @@ struct Options {
     startup_report: bool,
     report_fd: Option<RawFd>,
     export: Option<GuestExport>,
+    graphics_backend: Option<graphics::Backend>,
     hud: bool,
     /// If given, the file runs only when its SHA-256 is this.
     digest: Option<[u8; 32]>,
@@ -156,6 +160,7 @@ impl Options {
         let mut startup_report = false;
         let mut report_fd = None;
         let mut export = None;
+        let mut graphics_backend = None;
         let mut wall_seconds = None;
         let mut executable_budget = None;
         let mut mapped_image_budget = None;
@@ -218,6 +223,13 @@ impl Options {
                         guest_path: export_guest_path(args.next())?,
                         destination: PathBuf::from(args.next().ok_or("missing host export path")?),
                     });
+                }
+                Some("--graphics-backend") if graphics_backend.is_none() => {
+                    graphics_backend = Some(
+                        args.next()
+                            .and_then(|arg| graphics::Backend::parse(arg.to_str()?))
+                            .ok_or("--graphics-backend needs reference or metal")?,
+                    );
                 }
                 Some("--guest-file-export-worker") if export.is_none() => {
                     export = Some(GuestExport::Worker {
@@ -292,6 +304,7 @@ impl Options {
             startup_report,
             report_fd,
             export,
+            graphics_backend,
             hud,
             digest,
             arguments,
@@ -312,6 +325,9 @@ impl Options {
             }
             if self.export.is_some() {
                 return Err("--export-guest-file applies to a hosted program".into());
+            }
+            if self.graphics_backend.is_some() {
+                return Err("--graphics-backend applies to a hosted program".into());
             }
             return Ok((steps, WALL_LIMIT));
         }
@@ -432,6 +448,9 @@ fn launch_worker(
         }
         if let Some(digest) = options.digest {
             command.arg("--sha256").arg(hex(digest));
+        }
+        if let Some(backend) = options.graphics_backend {
+            command.arg("--graphics-backend").arg(backend.name());
         }
     } else {
         command.args(["--trace", "--metal-hud"]);
@@ -803,6 +822,18 @@ fn run_program(
         );
     }
 
+    let mut module_bytes = Vec::with_capacity(options.package.len());
+    for module in &options.package {
+        module_bytes.push(
+            read_program(module, None, options.executable_budget)
+                .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?,
+        );
+    }
+    if let Some(graphics::Backend::Metal) = options.graphics_backend {
+        graphics::install_metal(&state)
+            .inspect_err(|error| reporter.failed(FailurePhase::Startup, error))?;
+    }
+
     let mut entered = false;
     let execution = if options.package.is_empty() {
         // The entry point runs under the deterministic cooperative scheduler,
@@ -831,13 +862,6 @@ fn run_program(
         )
         .map(|startup| startup.execution)
     } else {
-        let mut module_bytes = Vec::with_capacity(options.package.len());
-        for module in &options.package {
-            module_bytes.push(
-                read_program(module, None, options.executable_budget)
-                    .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?,
-            );
-        }
         let mut package = Vec::with_capacity(1 + module_bytes.len());
         package.push(xenora_loader::module_graph::PackageModule {
             file_name: name,
@@ -911,6 +935,9 @@ fn run_program(
     stdout.write_all(&state.standard_output())?;
     stdout.flush()?;
     std::io::stderr().write_all(&state.standard_error())?;
+    if options.trace && options.graphics_backend.is_some() {
+        graphics::trace(&state);
+    }
     let execution = execution?;
     if options.trace {
         eprintln!(
@@ -1135,15 +1162,11 @@ struct Frame {
 }
 
 fn draw() -> Result<Frame, Box<dyn Error>> {
-    let shader = compile_graphics(
-        Architecture::Gfx1030,
-        include_bytes!("../../../fixtures/rdna2/x9-constant-vs.bin"),
-        include_bytes!("../../../fixtures/rdna2/x9-constant-ps.bin"),
-    )?;
+    let msl = graphics::compile_rgba_shader()?;
     let gpu = NativeCompute::new()?;
     let started = Instant::now();
     let (pixels, gpu_seconds) = gpu.render_rgba8_profiled(
-        &shader.msl,
+        &msl,
         [VERTEX_ENTRY_POINT, PIXEL_ENTRY_POINT],
         &[
             [-1.0, -1.0, 0.5, 1.0],

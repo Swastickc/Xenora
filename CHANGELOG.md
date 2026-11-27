@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Hosted PE programs and explicit packages can opt into offscreen Metal flat draws and native timeline fences with `xenora run --graphics-backend metal` (#1034). The worker uses the existing translated shader pair. Explicit backend selection with `--trace` reports the last presentation and its completed frame count.
 - `xenora-session --workload reopen` runs the second bundled program under the same worker, frame and journal checks. That guest reopens its file each frame and checks an auto-reset event (#958).
 - `xenora-session --workload threaded` runs the bundled scheduled guest with one persistent Win32 worker (#961). Positional and replay inputs drive checked frames, journal columns and cleanup through the same launcher and PPM export path.
 - Original dynamic-load fixture evidence (#932): `fixtures/pe/loadlib` now contains a reproducible no-CRT consumer/provider set built by the native ARM64 LLVM toolchain. The consumer imports only kernel32 loader services, loads logical module `xenora_loadlib.dll`, resolves function and evidence exports indirectly and exits 70 on exact success; the provider records TLS and `DllMain` evidence, while two same-logical-name controls omit the function export or refuse process attach. Static tests cover PE shape, imports/exports, negative controls and TLS preparation without callback execution. This is fixture evidence only: `LoadLibrary`, initializer execution, unloading, game execution and independent acceptance remain unsupported.

@@ -58,10 +58,12 @@
 //! The crate has no dependencies, uses no unsafe code and is covered by unit
 //! tests only. It has not been tested against a physical controller.
 
+pub mod controller;
 mod error;
 pub mod keyboard;
 pub mod mouse;
 mod pad;
+pub mod profile;
 pub mod router;
 
 pub use error::ConfigError;

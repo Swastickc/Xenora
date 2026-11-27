@@ -6847,7 +6847,7 @@
       "canonical_symbol": "rand_s",
       "kind": "name",
       "library": "api-ms-win-crt-utility-l1-1-0.dll",
-      "status": "stub",
+      "status": "partial",
       "symbol": "rand_s"
     },
     {
@@ -14954,7 +14954,7 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "manual",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "rand_s"
     },
@@ -17120,9 +17120,9 @@
     "libraries": 20,
     "manual_services": 568,
     "ordinal_aliases": 0,
-    "partial": 598,
+    "partial": 599,
     "structural_consistency_findings": 0,
-    "stub": 3,
+    "stub": 2,
     "typed_registry_entries": 252,
     "typed_services": 252,
     "wanted_imports": null,

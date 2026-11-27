@@ -70,6 +70,7 @@ exact revision and known limitations.
 - Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
 
 ### Fixed
+- Refreshed the generated runtime inventory to match the registered services, restoring the inventory check on the current tree (#794).
 - CPU coverage intelligence now derives interpreter and DBT operation coverage from semantic execution modules and native-eligibility logic instead of misleading helper-function names such as `emit_fault_guard` (#855). The comparison remains a heuristic operation summary rather than per-encoding semantic proof.
 - The CPU coverage report derives opcode coverage from the declarative x86 registry rather than hexadecimal literals in implementation and fixture code (#850). Opcode identities retain encoding space, map and mandatory-prefix context, so internal error payloads are no longer reported as unsupported instructions.
 - The CPU coverage report no longer treats arbitrary Rust string literals or unit-test registrations as guest runtime imports (#845). It extracts explicit registration and generated service-metadata forms, keeps identical symbols distinct across modules and records partial registrations honestly, and the blocker manifest no longer omits those incomplete services.

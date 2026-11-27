@@ -563,10 +563,10 @@ pub(crate) fn validate_file_name(file_name: &str) -> Result<(), FileNameError> {
     Ok(())
 }
 
-/// Normalize a Windows module reference for this explicit package. Only ASCII
-/// case is folded. Extension handling is part of the reference, not evidence
-/// that a host file exists.
-fn normalize_module_reference(reference: &str) -> String {
+/// Normalize a Windows module reference for explicit packages and the module
+/// catalog. Only ASCII case is folded. Extension handling is part of the
+/// reference, not evidence that a host file exists.
+pub(crate) fn normalize_module_reference(reference: &str) -> String {
     let mut normalized = reference.to_ascii_lowercase();
     if normalized.ends_with('.') {
         normalized.pop();
@@ -911,7 +911,7 @@ fn export_position(
     }
 }
 
-fn parse_forwarder(target: &str) -> Result<(String, ExportKey), ForwarderParseError> {
+pub(crate) fn parse_forwarder(target: &str) -> Result<(String, ExportKey), ForwarderParseError> {
     let Some((module, symbol)) = target.rsplit_once('.') else {
         return Err(ForwarderParseError::MissingSeparator);
     };

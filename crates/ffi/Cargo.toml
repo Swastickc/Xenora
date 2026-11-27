@@ -17,6 +17,7 @@ workspace = true
 gpu-tests = []
 
 [dependencies]
+xenora-input = { path = "../input" }
 xenora-loader = { path = "../loader" }
 xenora-metal = { path = "../metal" }
 xenora-shader = { path = "../shader" }

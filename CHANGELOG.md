@@ -80,6 +80,7 @@ exact revision and known limitations.
 - An original hosted C record and compression fixture, with O0–O3 guest builds, independently specified output and file-byte checks, and malformed-input controls (#796).
 
 ### Fixed
+- `_dup2` over a standard descriptor now rewires it for real: the CRT descriptor table is authoritative for fds 0-2, so writes through a rewired stdout reach the file or pipe the duplication names, reads through a rewired stdin consume it, seeks and closes operate on it, and closing the duplication leaves the slot dead instead of resurrecting the console stream. The unduplicated standard streams behave exactly as before.
 
 - QA benchmark statistics now reject NaN and infinite samples instead of producing meaningless ordering statistics or non-standard JSON evidence (#827).
 - QA verification evidence is now bound to the selected checkout: profile suites run with that repository as their working directory, `qa verify` rejects a revision other than the checkout HEAD, and `--check-stale` requires matching profile and revision metadata and passing suites while reporting staleness separately (#277).

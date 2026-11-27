@@ -12,13 +12,13 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 867 |
+| Canonical services | 873 |
 | Typed registry services | 296 |
-| Manual code registrations | 571 |
+| Manual code registrations | 577 |
 | Canonical libraries | 21 |
 | Implemented | 237 |
-| Partial | 628 |
-| Stub | 2 |
+| Partial | 636 |
+| Stub | 0 |
 | Data-import services | 7 |
 | Aliases of every kind | 906 |
 | API-set aliases | 740 |
@@ -32,17 +32,17 @@ independent acceptance or compatibility claims.
 | Library | Family | Total | Typed | Manual | Data | Implemented | Partial | Stub | Implicit status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
-| <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
+| <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 276 | 0 | 26 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
 | <code>libstdc++-6.dll</code> | <code>c++-support</code> | 14 | 3 | 11 | 0 | 11 | 3 | 0 | 0 |
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
-| <code>msvcrt.dll</code> | <code>c-runtime</code> | 39 | 13 | 26 | 7 | 14 | 25 | 0 | 14 |
+| <code>msvcrt.dll</code> | <code>c-runtime</code> | 41 | 13 | 28 | 7 | 14 | 27 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 297 | 207 | 90 | 0 | 103 | 194 | 0 | 10 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 298 | 207 | 91 | 0 | 103 | 195 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
-| <code>winhttp.dll</code> | <code>other</code> | 11 | 0 | 11 | 0 | 0 | 11 | 0 | 0 |
+| <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |

@@ -9826,6 +9826,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "api-ms-win-crt-process-l1-1-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "_spawnve"
     },
     {
@@ -13479,6 +13489,16 @@
       "symbol": "_commode"
     },
     {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
       "data_import": true,
       "family": "c-runtime",
       "kind": "name",
@@ -13757,6 +13777,16 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "vfprintf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "waitpid"
     },
     {
       "data_import": false,
@@ -14057,6 +14087,16 @@
       "status": "implemented",
       "status_explicit": true,
       "symbol": "_ctime64_s"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
     },
     {
       "data_import": false,
@@ -16816,6 +16856,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpAddRequestHeaders"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpCloseHandle"
     },
     {
@@ -16907,6 +16957,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WinHttpSendRequest"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpSetOption"
     },
     {
       "data_import": false,
@@ -18282,15 +18342,15 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 867,
+    "canonical_services": 873,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 571,
+    "manual_services": 577,
     "ordinal_aliases": 0,
-    "partial": 630,
+    "partial": 636,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

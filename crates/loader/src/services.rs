@@ -264,7 +264,10 @@ pub struct ServicesState {
     /// Characteristics the guest is told it runs on. These are simulated and
     /// independent of the host; see [`sysinfo::HostCapabilities`] for the host.
     pub guest_profile: sysinfo::GuestSystemProfile,
-    objects: Mutex<ObjectState>,
+    /// Kernel objects and the synthetic drive. Behind an Arc so a spawned
+    /// child process shares the one machine-wide filesystem with its parent
+    /// while every other piece of process state is its own.
+    objects: Arc<Mutex<ObjectState>>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     error_mode: Mutex<u32>,
     /// The mode reported by AreFileApisANSI. The synthetic drive keeps its
@@ -296,6 +299,14 @@ pub struct ServicesState {
     /// reads it. Each entry is the variable's original name casing and the
     /// guest address of the CRT-owned `NAME=VALUE` string copy.
     pub(crate) crt_environment: Mutex<Vec<(String, u64)>>,
+    /// The entry executable's image bytes, kept so a `_spawnve` of the
+    /// program itself can load the child without the host file. Set once by
+    /// the runner before the run; empty in tests that never spawn.
+    spawn_image: Mutex<Option<(String, Arc<Vec<u8>>)>>,
+    /// Finished `_P_NOWAIT` children by synthetic process handle: the child
+    /// ran to completion inside the spawn, so the handle only ever waits on
+    /// a status already known.
+    spawn_children: Mutex<BTreeMap<u64, u32>>,
     /// Emulated thread-local storage: the block each guest thread owns for
     /// each thread-local variable, keyed by the guest thread and then by the
     /// address of the variable's descriptor.
@@ -367,7 +378,7 @@ impl ServicesState {
             process_id: 0x4100, // Synthetic process ID
             thread_id: 0x4104,  // Synthetic main thread ID
             guest_profile: sysinfo::GuestSystemProfile::default(),
-            objects: Mutex::new(ObjectState::default()),
+            objects: Arc::new(Mutex::new(ObjectState::default())),
             last_errors: Mutex::default(),
             error_mode: Mutex::new(0),
             file_apis_ansi: AtomicBool::new(true),
@@ -385,6 +396,8 @@ impl ServicesState {
             atexit: Mutex::default(),
             environment: Mutex::default(),
             crt_environment: Mutex::default(),
+            spawn_image: Mutex::new(None),
+            spawn_children: Mutex::default(),
             emutls: Mutex::default(),
             cxx_guards: Mutex::default(),
             exit_status: Mutex::default(),
@@ -424,6 +437,90 @@ impl ServicesState {
 
     fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
         self.crt_arguments.lock().expect("program arguments")
+    }
+
+    /// Keep the entry executable's image bytes for a later `_spawnve` of the
+    /// program itself. The runner calls this once before the run.
+    pub fn set_spawn_image(&self, name: &str, bytes: &[u8]) {
+        *self.spawn_image.lock().expect("spawn image") =
+            Some((name.to_owned(), Arc::new(bytes.to_vec())));
+    }
+
+    /// The kept entry image, when the runner stored one.
+    pub(crate) fn spawn_image(&self) -> Option<Arc<Vec<u8>>> {
+        self.spawn_image
+            .lock()
+            .expect("spawn image")
+            .as_ref()
+            .map(|(_, bytes)| Arc::clone(bytes))
+    }
+
+    /// Register a finished `_P_NOWAIT` child, returning its synthetic
+    /// process handle.
+    pub(crate) fn finish_spawn_child(&self, status: u32) -> u64 {
+        let mut children = self.spawn_children.lock().expect("spawn children");
+        let mut handle = 0x5100u64;
+        while children.contains_key(&handle) {
+            handle += 4;
+        }
+        children.insert(handle, status);
+        handle
+    }
+
+    /// Collect a finished child, as `waitpid`/`_cwait` do: the status, once,
+    /// or nothing when the handle is not a child of this process.
+    pub(crate) fn collect_spawn_child(&self, handle: u64) -> Option<u32> {
+        self.spawn_children
+            .lock()
+            .expect("spawn children")
+            .remove(&handle)
+    }
+
+    /// The file name the kept image was loaded as, for the spawn match.
+    pub(crate) fn spawn_image_name(&self) -> String {
+        self.spawn_image
+            .lock()
+            .expect("spawn image")
+            .as_ref()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Append a finished child's captured output to this process's own
+    /// capture, as inherited standard handles would have produced it. The
+    /// parent was suspended for the whole `_P_WAIT`, so nothing interleaves;
+    /// stderr follows stdout here only because the two captures are separate.
+    pub(crate) fn forward_child_output(&self, stdout: &[u8], stderr: &[u8]) {
+        let mut streams = self.crt_streams();
+        streams.console_write(false, stdout);
+        streams.console_write(true, stderr);
+    }
+
+    /// The process state of a spawned child: everything a process owns is
+    /// fresh, except the machine-wide filesystem and kernel object table,
+    /// which the child shares with its parent, and the clock, which is the
+    /// one machine clock. The environment and the current directory copy at
+    /// spawn time, as they do on Windows; either process changing its own
+    /// afterwards does not move the other's.
+    pub(crate) fn child_for_spawn(self: &Arc<Self>) -> Arc<Self> {
+        // The machine-wide filesystem and object table is the parent's own:
+        // files the parent wrote are visible to the child and vice versa.
+        Arc::new(ServicesState {
+            objects: Arc::clone(&self.objects),
+            crt_directory: Mutex::new(
+                self.crt_directory
+                    .lock()
+                    .expect("current directory")
+                    .clone(),
+            ),
+            environment: Mutex::new(
+                self.environment
+                    .lock()
+                    .expect("process environment")
+                    .clone(),
+            ),
+            ..ServicesState::new(Arc::clone(&self.clock))
+        })
     }
 
     pub(crate) fn xinput_input_enabled(&self) -> bool {
@@ -858,7 +955,8 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_errno(registry);
     crt::register_conversions(registry);
     crt::register_conio(registry);
-    crt::register_spawn_refusal(registry);
+    crt::register_spawn(registry, &state);
+    crt::register_spawn_wait(registry, &state);
     crt::register_utilities(registry);
     crt::register_directories(registry, &state);
     crt_callbacks::register(registry, &state);

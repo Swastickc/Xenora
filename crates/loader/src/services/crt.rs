@@ -15,6 +15,10 @@ use super::crt_files;
 use super::crt_streams::{Failed, Outcome};
 
 const SCAN_BUDGET: u64 = 1_048_576;
+
+/// The honest refusal for a runtime service the machine cannot perform:
+/// the guest stops explicitly rather than running on invented behaviour.
+const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
 pub(super) const UCRT: &str = "ucrtbase.dll";
 const CRT_STRING_API: &str = "api-ms-win-crt-string-l1-1-0.dll";
 /// The legacy CRT module that pre-UCRT mingw binaries import directly.
@@ -372,18 +376,251 @@ pub(super) fn register_conversions(registry: &mut ImportRegistry) {
 /// not a pretend success nothing ever runs behind. busybox imports
 /// `_spawnve` for its applet spawning; programs that never spawn bind the
 /// import undisturbed.
-pub(super) fn register_spawn_refusal(registry: &mut ImportRegistry) {
-    const ENOSYS: u32 = 40;
-    for (module, symbol) in [
-        (UCRT, "_spawnve"),
-        (UCRT, "_wspawnve"),
-        (MSVCRT, "_spawnve"),
-        ("api-ms-win-crt-process-l1-1-0.dll", "_spawnve"),
-        ("api-ms-win-crt-process-l1-1-0.dll", "_wspawnve"),
+pub(super) fn register_spawn(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    for (module, symbol, wide) in [
+        (UCRT, "_spawnve", false),
+        (UCRT, "_wspawnve", true),
+        (MSVCRT, "_spawnve", false),
+        ("api-ms-win-crt-process-l1-1-0.dll", "_spawnve", false),
+        ("api-ms-win-crt-process-l1-1-0.dll", "_wspawnve", true),
     ] {
-        registry.register(module, symbol, move |_, cpu, memory| {
-            set_errno(memory, cpu.gs_base, ENOSYS)?;
+        let s = Arc::clone(state);
+        registry.register(module, symbol, move |args, cpu, memory| {
+            spawnve(&s, args, cpu, memory, wide)
+        });
+        registry.set_status(module, symbol, ServiceStatus::Partial);
+    }
+}
+
+/// `_P_WAIT`: the parent suspends until the child exits, and the spawn
+/// returns the child's exit status. The other modes - nowait, overlay,
+/// detach - are process topologies the machine does not have, so they keep
+/// the honest ENOSYS refusal.
+const P_WAIT: u64 = 0;
+
+/// `_P_NOWAIT`: the spawn answers a process handle instead of the exit
+/// status, and `_cwait`/`waitpid` collect the child later. The machine runs
+/// the child to completion inside the spawn either way - process
+/// concurrency does not exist - which is exact for the spawn-then-wait
+/// pattern shells use, and documented in the PR as the limit for programs
+/// that truly overlap parent and child.
+const P_NOWAIT: u64 = 1;
+
+/// The child runs with a generous but finite step budget: enough for real
+/// applet work, bounded so a runaway child cannot hang the suspended parent
+/// forever. Measured busybox applets take millions of steps, not billions.
+const CHILD_STEP_BUDGET: usize = 1 << 28;
+
+/// Read one NUL-terminated string, narrow or wide, with the scan budget the
+/// other CRT string services use.
+fn spawn_string(memory: &GuestMemory, address: u64, wide: bool) -> Result<Vec<u8>, ExitReason> {
+    if address == 0 {
+        return Err(RUNTIME_LIMIT);
+    }
+    let unit = if wide {
+        StringUnit::Wide
+    } else {
+        StringUnit::Byte
+    };
+    let len = string_length(memory, address, 4096, unit)?;
+    if len >= 4096 {
+        return Err(RUNTIME_LIMIT);
+    }
+    let mut bytes = vec![0u8; (len * unit.width()) as usize];
+    memory
+        .read_bytes(address, &mut bytes)
+        .map_err(ExitReason::MemoryFault)?;
+    if wide {
+        let mut narrow = Vec::with_capacity(len as usize);
+        for index in 0..len as usize {
+            let at = 2 * index;
+            let unit = u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+            if unit > 0xFF {
+                // The synthetic narrow world is UTF-8 bytes; a wide argument
+                // outside Latin-1 has no faithful narrow form.
+                return Err(RUNTIME_LIMIT);
+            }
+            narrow.push(unit as u8);
+        }
+        return Ok(narrow);
+    }
+    Ok(bytes)
+}
+
+/// Read a `char *const *` vector: a NUL-terminated array of pointers to
+/// NUL-terminated strings. Capped the way the CRT caps argument vectors.
+fn spawn_string_vector(
+    memory: &GuestMemory,
+    address: u64,
+    wide: bool,
+) -> Result<Vec<Vec<u8>>, ExitReason> {
+    let mut entries = Vec::new();
+    for index in 0..256u64 {
+        let pointer = memory
+            .read_u64(address + index * 8)
+            .map_err(ExitReason::MemoryFault)?;
+        if pointer == 0 {
+            return Ok(entries);
+        }
+        entries.push(spawn_string(memory, pointer, wide)?);
+    }
+    Err(RUNTIME_LIMIT)
+}
+
+fn spawnve(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    cpu: &mut crate::cpu::CpuState,
+    memory: &mut GuestMemory,
+    wide: bool,
+) -> Result<u64, ExitReason> {
+    const ENOENT: u32 = 2;
+    const EINVAL: u32 = 22;
+    let mode = args.rcx & 0xFFFF_FFFF;
+    if mode != P_WAIT && mode != P_NOWAIT {
+        set_errno(memory, cpu.gs_base, 40)?;
+        return Ok(u64::MAX);
+    }
+    let image = match state.spawn_image() {
+        Some(image) => image,
+        None => {
+            // No image was kept: there is nothing a child could run.
+            set_errno(memory, cpu.gs_base, ENOENT)?;
+            return Ok(u64::MAX);
+        }
+    };
+    let command = spawn_string(memory, args.rdx, wide)?;
+    let expected = state.spawn_image_name();
+    let trailing = command
+        .rsplit(|byte| *byte == b'\\' || *byte == b'/')
+        .next()
+        .unwrap_or(&command);
+    if !trailing.eq_ignore_ascii_case(expected.as_bytes()) {
+        // Only the program's own image can run today: the machine keeps no
+        // other executable, so any other path is honestly not found.
+        set_errno(memory, cpu.gs_base, ENOENT)?;
+        return Ok(u64::MAX);
+    }
+    let argv_bytes = spawn_string_vector(memory, args.r8, wide)?;
+    let mut argv = Vec::with_capacity(argv_bytes.len());
+    for entry in &argv_bytes {
+        match std::str::from_utf8(entry) {
+            Ok(text) => argv.push(text.to_owned()),
+            Err(_) => {
+                set_errno(memory, cpu.gs_base, EINVAL)?;
+                return Ok(u64::MAX);
+            }
+        }
+    }
+
+    let child = state.child_for_spawn();
+    {
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        if child.set_program_arguments(&refs).is_err() {
+            set_errno(memory, cpu.gs_base, EINVAL)?;
+            return Ok(u64::MAX);
+        }
+    }
+    // The child inherits no input bytes in this slice - redirection into a
+    // spawn is step 3 of the issue - but its stdin exists, as a console
+    // child's does.
+    child.set_standard_input(&[]);
+    let mut imports = ImportRegistry::new();
+    crate::services::register_standard_services(&mut imports, Arc::clone(&child));
+    let run = crate::startup::run_synthetic_startup_scheduled_with_budget(
+        &image,
+        crate::startup::StartupLayout {
+            image_base: 0x150000000,
+            stack_top: 0x200010000,
+            tls_base: 0x300000000,
+        },
+        imports,
+        Arc::clone(&child),
+        CHILD_STEP_BUDGET,
+        crate::scheduler::DEFAULT_QUANTUM,
+        crate::pe::DEFAULT_MAPPED_IMAGE_BUDGET,
+        |_| {},
+    );
+    let startup = match run {
+        Ok(startup) => startup,
+        Err(_) => {
+            set_errno(memory, cpu.gs_base, EINVAL)?;
+            return Ok(u64::MAX);
+        }
+    };
+    state.forward_child_output(&child.standard_output(), &child.standard_error());
+    match startup.execution.exit_reason {
+        ExitReason::ProcessExit(status) => {
+            if mode == P_NOWAIT {
+                Ok(state.finish_spawn_child(status))
+            } else {
+                Ok(u64::from(status))
+            }
+        }
+        // A child that stops any other way - a refusal, a fault, the budget -
+        // died abnormally, which the CRT reports as a spawn failure rather
+        // than an exit status.
+        _ => {
+            let cpu = &startup.execution.final_state;
+            set_errno(memory, cpu.gs_base, EINVAL)?;
             Ok(u64::MAX)
+        }
+    }
+}
+
+/// `waitpid`/`_cwait`: collect a `_P_NOWAIT` child. The child finished
+/// inside its spawn, so the wait never blocks: the status is either already
+/// there or the handle is not a child, the documented EINVAL.
+fn cwait(
+    state: &Arc<ServicesState>,
+    args: &Win64Args,
+    cpu: &mut crate::cpu::CpuState,
+    memory: &mut GuestMemory,
+    style: WaitStyle,
+) -> Result<u64, ExitReason> {
+    const EINVAL: u32 = 22;
+    // _cwait(status_ptr, handle, action) or waitpid(handle, status_ptr, options):
+    // the handle is the middle argument of one and the first of the other.
+    let (status_ptr, handle) = match style {
+        WaitStyle::Cwait => (args.rcx, args.rdx),
+        WaitStyle::Waitpid => (args.rdx, args.rcx),
+    };
+    match state.collect_spawn_child(handle) {
+        Some(status) => {
+            if status_ptr != 0 {
+                memory
+                    .write_u32(status_ptr, status)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            Ok(handle)
+        }
+        None => {
+            set_errno(memory, cpu.gs_base, EINVAL)?;
+            Ok(u64::MAX)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WaitStyle {
+    Cwait,
+    Waitpid,
+}
+
+pub(super) fn register_spawn_wait(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    for (module, symbol, style) in [
+        (UCRT, "_cwait", WaitStyle::Cwait),
+        (
+            "api-ms-win-crt-process-l1-1-0.dll",
+            "_cwait",
+            WaitStyle::Cwait,
+        ),
+        (MSVCRT, "_cwait", WaitStyle::Cwait),
+        (MSVCRT, "waitpid", WaitStyle::Waitpid),
+    ] {
+        let s = Arc::clone(state);
+        registry.register(module, symbol, move |args, cpu, memory| {
+            cwait(&s, args, cpu, memory, style)
         });
         registry.set_status(module, symbol, ServiceStatus::Partial);
     }
@@ -1352,7 +1589,7 @@ fn the_legacy_crt_aliases_the_integer_parses_and_the_console_keys_stop() {
 
 #[cfg(test)]
 #[test]
-fn spawnve_refuses_honestly_with_enosys() {
+fn spawnve_modes_other_than_pwait_refuse_honestly_with_enosys() {
     use super::ServicesState;
     use crate::cpu::{CpuState, Register};
     use crate::import_table::ImportName;
@@ -1363,7 +1600,7 @@ fn spawnve_refuses_honestly_with_enosys() {
 
     let mut registry = ImportRegistry::new();
     let _state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
-    register_spawn_refusal(&mut registry);
+    register_spawn(&mut registry, &_state);
     let mut memory = GuestMemory::new();
     memory
         .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
@@ -1388,8 +1625,10 @@ fn spawnve_refuses_honestly_with_enosys() {
         (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
     };
 
-    // The refusal is the documented failure shape: minus one, ENOSYS in
-    // errno. No pretend success ever stands in for a child process.
+    // Modes other than _P_WAIT refuse in the documented failure shape:
+    // minus one, ENOSYS in errno. No pretend success ever stands in for a
+    // child process topology the machine does not have. (mode = 1 here is
+    // _P_NOWAIT.)
     for (module, symbol) in [
         (UCRT, "_spawnve"),
         (UCRT, "_wspawnve"),

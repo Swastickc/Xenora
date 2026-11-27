@@ -20,6 +20,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
+use crate::export_table::ExportTableError;
+use crate::import_table::ImportTableError;
 use crate::imports::ImportRegistry;
 use crate::memory::GuestMemory;
 use crate::module_binding::{BindingOutcome, ModuleBindingError, ModuleBindingPlan};
@@ -107,6 +109,14 @@ pub enum ModuleStoreError {
         name: String,
         source: ModuleGraphError,
     },
+    InvalidImportTable {
+        name: String,
+        source: ImportTableError,
+    },
+    InvalidExportTable {
+        name: String,
+        source: ExportTableError,
+    },
 }
 
 impl fmt::Display for ModuleStoreError {
@@ -146,11 +156,32 @@ impl fmt::Display for ModuleStoreError {
             Self::InvalidImage { name, source } => {
                 write!(f, "module image {name:?} is invalid: {source}")
             }
+            Self::InvalidImportTable { name, source } => {
+                write!(
+                    f,
+                    "module image {name:?} has an invalid import table: {source}"
+                )
+            }
+            Self::InvalidExportTable { name, source } => {
+                write!(
+                    f,
+                    "module image {name:?} has an invalid export table: {source}"
+                )
+            }
         }
     }
 }
 
-impl std::error::Error for ModuleStoreError {}
+impl std::error::Error for ModuleStoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidImage { source, .. } => Some(source),
+            Self::InvalidImportTable { source, .. } => Some(source),
+            Self::InvalidExportTable { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// A bounded map from logical module names to authorized image snapshots.
 #[derive(Clone, Debug, Default)]
@@ -241,16 +272,24 @@ impl ProvisionedModuleStore {
             });
         }
 
-        // A singleton graph validates the PE headers and both data-directory
-        // shapes before the image becomes available to a prepared load.
+        // Static inspection can report a partial table, but admission needs
+        // a complete view of the ordinary imports and exports.
         let package = [PackageModule {
             file_name: name.as_str(),
             bytes: &bytes,
         }];
-        ModuleGraph::build(&package).map_err(|source| ModuleStoreError::InvalidImage {
-            name: name.clone(),
-            source,
-        })?;
+        let graph =
+            ModuleGraph::build(&package).map_err(|source| ModuleStoreError::InvalidImage {
+                name: name.clone(),
+                source,
+            })?;
+        let module = &graph.modules()[0];
+        if let Some(source) = module.import_error {
+            return Err(ModuleStoreError::InvalidImportTable { name, source });
+        }
+        if let Some(source) = module.export_error {
+            return Err(ModuleStoreError::InvalidExportTable { name, source });
+        }
 
         let index = self.modules.len();
         self.index.insert(canonical_name.clone(), index);

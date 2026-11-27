@@ -166,6 +166,12 @@ enum Descriptor {
     /// `_open_osfhandle` made it: the state is a kernel object's, as the
     /// CRT takes ownership of the handle it wraps.
     Handle(u64),
+    /// `_dup` or `_dup2` made it from one of the three standard descriptors:
+    /// the state is the standard stream's, which the runtime keeps outside
+    /// the table - so the entry only records which one it is a copy of.
+    /// Closing it removes the copy alone; the stream answers for it exactly
+    /// as it answers for the original.
+    Standard(u32),
 }
 
 /// An anonymous pipe's shared state: the bytes written and not yet read,
@@ -773,11 +779,40 @@ impl FileStreams {
     /// `_dup`: the lowest free descriptor sharing the file position, as the
     /// CRT's duplication shares it.
     pub(super) fn descriptor_duplicate(&mut self, fd: u32) -> Result<u32, u32> {
-        self.descriptor_terminal(fd)?;
+        let standard = match self.descriptor_terminal(fd) {
+            Ok(_) => None,
+            Err(errno) if fd < 3 && errno == EBADF => Some(fd),
+            Err(errno) => return Err(errno),
+        };
         if !self.has_descriptor_room() {
             return Err(EMFILE);
         }
-        self.insert_descriptor(Descriptor::Alias(fd))
+        match standard {
+            // One of the three the table does not carry: the copy is the
+            // standard stream's entry of its own, as the CRT's table holds
+            // the standard handles in the same entries everything copies.
+            Some(n) => self.insert_descriptor(Descriptor::Standard(n)),
+            None => {
+                // A duplication of a standard copy is another copy of the
+                // stream, not an alias of the first copy: the CRT's entries
+                // are independent, and closing one leaves the others open.
+                if let Some(n) = self.standard_terminal(fd) {
+                    return self.insert_descriptor(Descriptor::Standard(n));
+                }
+                self.insert_descriptor(Descriptor::Alias(fd))
+            }
+        }
+    }
+
+    /// The standard descriptor a duplication chain ends at, for the service
+    /// layer to route back to the standard stream: the streams live outside
+    /// this table, so only the layer owning them can answer for them.
+    pub(super) fn standard_terminal(&self, fd: u32) -> Option<u32> {
+        let terminal = self.descriptor_terminal(fd).ok()?;
+        match self.descriptors.get(&terminal) {
+            Some(Descriptor::Standard(n)) => Some(*n),
+            _ => None,
+        }
     }
 
     /// `_dup2`: `target` becomes the duplication, closed first as the CRT
@@ -789,7 +824,9 @@ impl FileStreams {
         fd: u32,
         target: u32,
     ) -> Result<u32, u32> {
-        self.descriptor_terminal(fd)?;
+        if self.descriptor_terminal(fd).is_err() && fd >= 3 {
+            return Err(EBADF);
+        }
         if target >= MAX_DESCRIPTORS {
             return Err(EBADF);
         }
@@ -799,7 +836,17 @@ impl FileStreams {
         if self.descriptors.contains_key(&target) {
             self.descriptor_close(memory, drive, target);
         }
-        self.descriptors.insert(target, Descriptor::Alias(fd));
+        if let Some(n) = self.standard_terminal(fd) {
+            // A copy of a copy is the stream's own entry, independent of
+            // the one it was made from.
+            self.descriptors.insert(target, Descriptor::Standard(n));
+        } else if self.descriptors.contains_key(&fd) {
+            self.descriptors.insert(target, Descriptor::Alias(fd));
+        } else {
+            // The terminal check above passed only for the standard
+            // descriptors the table does not carry.
+            self.descriptors.insert(target, Descriptor::Standard(fd));
+        }
         Ok(target)
     }
 
@@ -1157,6 +1204,9 @@ impl FileStreams {
                 true
             }
             Some(Descriptor::Alias(_)) => true,
+            // The copy alone closes: the standard stream is not the
+            // table's to destroy.
+            Some(Descriptor::Standard(_)) => true,
             Some(Descriptor::PipeRead(id)) => {
                 // The pipe itself goes once nothing references it: no other
                 // descriptor of it, and the write end closed.

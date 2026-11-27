@@ -7507,6 +7507,50 @@ fn closing_the_original_descriptor_keeps_the_rewired_stdout() {
     assert_eq!(&bytes, b"redirected");
 }
 
+/// `_dup` of a standard descriptor copies it as the CRT's table copies the
+/// standard handles: the shell's save-redirect-restore frame. The copy
+/// answers as the stream itself from whatever number it hangs on, closing
+/// it removes only the copy, and duplicating it back restores the original
+/// descriptor exactly as the shell restores it.
+#[test]
+fn dup_of_a_standard_descriptor_frames_a_redirection() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    guest.memory.write_bytes(NAME, b"frame.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    // save: stdout duplicates where it used to fail.
+    let save = guest.call("_dup", &[1]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&save), "{save:x}");
+    // redirect: stdout becomes the file.
+    assert_eq!(guest.call("_dup2", &[fd, 1]) & 0xFFFF_FFFF, 1);
+    guest.memory.write_bytes(buf, b"in-file").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 7]) & 0xFFFF_FFFF, 7);
+    assert!(guest.state.standard_output().is_empty());
+    // restore: the copy rewires back, and stdout is the console again.
+    assert_eq!(guest.call("_dup2", &[save, 1]) & 0xFFFF_FFFF, 1);
+    guest.memory.write_bytes(buf, b"on-console").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 10]) & 0xFFFF_FFFF, 10);
+    assert_eq!(guest.state.standard_output(), b"on-console");
+    // the file holds only what its redirection captured.
+    assert_eq!(guest.call("_lseeki64", &[fd, 0, 0]), 0);
+    let mut bytes = [0u8; 7];
+    assert_eq!(guest.call("_read", &[fd, buf, 7]) & 0xFFFF_FFFF, 7);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"in-file");
+    // closing the copy removes it alone: stdout answers as before.
+    assert_eq!(guest.call("_close", &[save]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"!").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 1]) & 0xFFFF_FFFF, 1);
+    // stdin duplicates as well, and the copy consumes the standard input.
+    let input = guest.call("_dup", &[0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&input), "{input:x}");
+    assert!(guest.call("_read", &[input, buf, 1]) & 0xFFFF_FFFF <= 1);
+    // a duplication of nothing is still nothing.
+    assert_eq!(guest.call("_dup", &[77]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EBADF);
+}
+
 #[test]
 fn legacy_strdup_and_ldexp_run() {
     let mut guest = Guest::new();

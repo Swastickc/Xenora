@@ -15,18 +15,18 @@
 //! even though [`map_module_batch`] currently produces exactly that shape: the
 //! memory boundary must not depend on a caller composing the wrong metadata
 //! for a batch. Nothing else is inferred from the spans. This layer does not
-//! check base alignment, agreement with the image extent or overlap between
-//! reservations; it only uses each base as the `loaded_base` argument of
-//! [`apply_relocations`], whose own validation decides whether the relocation
-//! directory and targets are admissible.
+//! check base alignment, agreement with the image extent and overlap between
+//! reservations before any relocation write. It uses each validated base as
+//! the `loaded_base` argument of [`apply_relocations`], whose own validation
+//! decides whether the relocation directory and targets are admissible.
 //!
 //! Rollback is deliberately exact and deliberately expensive, matching the
 //! batch mapping layer. For a nonempty batch, after the whole metadata
 //! validation passes, the batch clones the entire [`GuestMemory`] once. If
 //! applying relocations fails for any image, that clone is assigned back,
 //! restoring the prior address space and its metadata rather than merely
-//! reverting the fixups of earlier images. Time cost scales with the batch
-//! length times the committed guest bytes, while peak host memory includes
+//! reverting the fixups of earlier images. Time cost is one whole-memory copy plus relocation-entry
+//! work, while peak host memory includes
 //! the live address space and the batch snapshot. This is not the final
 //! memory-ownership or efficient reservation design.
 //!
@@ -40,6 +40,7 @@
 use std::fmt;
 
 use crate::memory::GuestMemory;
+use crate::module_layout::IMAGE_BASE_ALIGNMENT;
 use crate::module_memory::{ExplicitModuleImage, ModuleReservation};
 use crate::reloc::{RelocationError, RelocationReport, apply_relocations};
 
@@ -79,6 +80,16 @@ pub enum ModuleRelocationError {
         base: u64,
         end: u64,
     },
+    /// Reservation metadata cannot describe the parsed image at the same
+    /// input index. The end must be the checked `SizeOfImage` end, the base
+    /// must satisfy PE image alignment and the preferred-base/entry metadata
+    /// must agree with the image and base.
+    ReservationMismatch { image_index: usize },
+    /// Two reservation spans overlap. Half-open adjacency is valid.
+    OverlappingReservations {
+        first_image_index: usize,
+        second_image_index: usize,
+    },
     /// The image's own relocation application failed. The batch restored the
     /// exact prior [`GuestMemory`] snapshot before returning this error, so
     /// fixups already applied to earlier images are reverted as well.
@@ -112,6 +123,17 @@ impl fmt::Display for ModuleRelocationError {
             } => write!(
                 f,
                 "reservation for image {image_index} is not a nonzero half-open span: [{base:#x}, {end:#x})"
+            ),
+            Self::ReservationMismatch { image_index } => write!(
+                f,
+                "reservation metadata does not describe image {image_index}"
+            ),
+            Self::OverlappingReservations {
+                first_image_index,
+                second_image_index,
+            } => write!(
+                f,
+                "reservations for images {first_image_index} and {second_image_index} overlap"
             ),
             Self::RelocationFailed {
                 image_index,
@@ -148,7 +170,7 @@ pub fn relocate_module_batch(
     reservations: &[ModuleReservation],
     memory: &mut GuestMemory,
 ) -> Result<Vec<ModuleRelocationOutcome>, ModuleRelocationError> {
-    let ordered = validate_reservations(images.len(), reservations)?;
+    let ordered = validate_reservations(images, reservations)?;
     if images.is_empty() {
         return Ok(Vec::new());
     }
@@ -178,9 +200,10 @@ pub fn relocate_module_batch(
 /// the reservations reordered into input order. The caller's slice order does
 /// not matter because records are matched by their `image_index` field.
 fn validate_reservations(
-    module_images: usize,
+    images: &[ExplicitModuleImage<'_>],
     reservations: &[ModuleReservation],
 ) -> Result<Vec<ModuleReservation>, ModuleRelocationError> {
+    let module_images = images.len();
     if reservations.len() != module_images {
         return Err(ModuleRelocationError::ReservationInputMismatch {
             reservations: reservations.len(),
@@ -209,81 +232,40 @@ fn validate_reservations(
                 end: reservation.end,
             });
         }
+        let image = &images[image_index];
+        let valid_span = reservation
+            .end
+            .checked_sub(reservation.base)
+            .is_some_and(|size| size == u64::from(image.pe.size_of_image));
+        let expected_entry = if image.pe.entry_point_rva == 0 {
+            None
+        } else {
+            reservation
+                .base
+                .checked_add(u64::from(image.pe.entry_point_rva))
+        };
+        if !valid_span
+            || reservation.base % IMAGE_BASE_ALIGNMENT != 0
+            || reservation.used_preferred_base != (reservation.base == image.pe.image_base)
+            || reservation.entry_point != expected_entry
+        {
+            return Err(ModuleRelocationError::ReservationMismatch { image_index });
+        }
         ordered.push(reservation);
     }
+
+    let mut spans: Vec<_> = ordered
+        .iter()
+        .map(|reservation| (reservation.image_index, reservation.base, reservation.end))
+        .collect();
+    spans.sort_unstable_by_key(|&(_, base, end)| (base, end));
+    for pair in spans.windows(2) {
+        if pair[1].1 < pair[0].2 {
+            return Err(ModuleRelocationError::OverlappingReservations {
+                first_image_index: pair[0].0,
+                second_image_index: pair[1].0,
+            });
+        }
+    }
     Ok(ordered)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn reservation(image_index: usize, base: u64, end: u64) -> ModuleReservation {
-        ModuleReservation {
-            image_index,
-            base,
-            end,
-            used_preferred_base: true,
-            entry_point: None,
-        }
-    }
-
-    #[test]
-    fn validation_accepts_reservations_in_any_slice_order() {
-        let ordered = validate_reservations(
-            2,
-            &[
-                reservation(1, 0x2000, 0x3000),
-                reservation(0, 0x1000, 0x2000),
-            ],
-        )
-        .expect("one valid record per image");
-        assert_eq!(ordered[0].image_index, 0);
-        assert_eq!(ordered[1].image_index, 1);
-    }
-
-    #[test]
-    fn validation_rejects_repeated_and_out_of_batch_indexes() {
-        let repeated = validate_reservations(
-            2,
-            &[
-                reservation(0, 0x1000, 0x2000),
-                reservation(0, 0x2000, 0x3000),
-            ],
-        );
-        assert_eq!(
-            repeated,
-            Err(ModuleRelocationError::InvalidReservationIndex {
-                reservation_position: 1,
-                image_index: 0,
-            })
-        );
-
-        let out_of_batch = validate_reservations(1, &[reservation(1, 0x1000, 0x2000)]);
-        assert_eq!(
-            out_of_batch,
-            Err(ModuleRelocationError::InvalidReservationIndex {
-                reservation_position: 0,
-                image_index: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn validation_rejects_empty_and_reversed_spans_in_input_order() {
-        for (base, end) in [(0x1000, 0x1000), (0x2000, 0x1000)] {
-            let result = validate_reservations(
-                2,
-                &[reservation(1, 0x4000, 0x5000), reservation(0, base, end)],
-            );
-            assert_eq!(
-                result,
-                Err(ModuleRelocationError::InvalidReservationSpan {
-                    image_index: 0,
-                    base,
-                    end,
-                })
-            );
-        }
-    }
 }

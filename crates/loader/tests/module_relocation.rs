@@ -377,10 +377,7 @@ fn empty_and_reversed_reservation_spans_are_rejected_before_memory_mutation() {
 }
 
 #[test]
-fn nonzero_span_shape_is_the_whole_extent_validation() {
-    // This layer validates only indexes and the nonzero half-open span shape.
-    // A shorter-than-image but nonzero span is still valid metadata: only the
-    // base is consumed, as relocation input for the primitive.
+fn inconsistent_reservation_extent_is_rejected_before_memory_mutation() {
     let first = fixture(PREFERRED, standard_table());
     let second = fixture(SECOND, standard_table());
     let occupied = [occupied_span(PREFERRED)];
@@ -389,12 +386,13 @@ fn nonzero_span_shape_is_the_whole_extent_validation() {
     let mut narrowed = reservations.clone();
     narrowed[0].end = narrowed[0].base + 1;
 
-    let outcomes = relocate_module_batch(&images, &narrowed, &mut memory).unwrap();
-    assert_eq!(outcomes[0].reservation.end, reservations[0].base + 1);
-    assert_eq!(outcomes[0].report.applied_dir64, 2);
+    assert_eq!(
+        relocate_module_batch(&images, &narrowed, &mut memory),
+        Err(ModuleRelocationError::ReservationMismatch { image_index: 0 })
+    );
     assert_eq!(
         slots(&memory, reservations[0].base),
-        [reservations[0].base + 0x1100, reservations[0].base + 0x2000]
+        unrelocated_slots(PREFERRED)
     );
 }
 

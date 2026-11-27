@@ -112,6 +112,11 @@ outcome, with the status, and runs neither the remaining callbacks nor the
 entry point; `StartupResult::tls_callbacks` counts the callbacks that finished.
 Any other stop inside a TLS callback is still a startup error.
 
+The executable's static TLS block follows the alignment in its PE TLS
+directory, up to 8 KiB. Startup rounds the address again when the block must
+move past the reserved thread environment block. An unspecified alignment
+keeps the default layout, and the reserved encoding is rejected.
+
 The engine recognises two return addresses, one under the entry point and one
 under a guest callback, before it executes anything at them. Both are in the
 4 KiB page at `imports::RETURN_SENTINEL_PAGE`, which startup reserves with no

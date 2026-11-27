@@ -274,6 +274,18 @@ Preparation does not itself admit the images to the kernel32 dynamic-module
 catalog; that metadata registration is a separate crate-internal hook for the
 later guest-visible load integration.
 
+The original fixture in `fixtures/pe/loadlib` is static evidence for the later
+guest-visible integration, not a working `LoadLibrary` path. Its no-CRT consumer
+imports only `LoadLibraryA`, `GetProcAddress`, `FreeLibrary` and `ExitProcess`,
+loads logical module `xenora_loadlib.dll`, resolves one function and three
+initialization-evidence exports by name, calls the function indirectly and exits
+with status 70 only when the expected values are present. The provider's TLS
+callback and `DllMain` write distinct markers. Two control images keep the same
+embedded logical module name: one omits the function export and one refuses
+`DLL_PROCESS_ATTACH`. The fixture build is reproducible with the native ARM64
+LLVM toolchain. No initializer execution, registry publication, reference
+counting, unloading or end-to-end dynamic loading is implied.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys

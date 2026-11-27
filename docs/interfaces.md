@@ -156,6 +156,12 @@ fixups already applied to earlier images. The implementation uses a whole
 `GuestMemory` snapshot for that transaction; this is correct but deliberately
 expensive and is not the final memory-ownership design. Relocation itself
 performs no import or IAT write. Ordinary-IAT binding is a separate implemented
+step, while delayed imports, service registration, exception-directory
+registration, TLS callbacks, unloading, reference counting and module execution
+remain unsupported. Before ordinary-IAT writes, the binder also requires
+fixed-base images to occupy their preferred reservations and each image/base
+pair to satisfy the same nonmutating mapping validation that produces legitimate
+reservations.
 step, while delayed imports, service registration, TLS callbacks, unloading,
 reference counting and module execution remain unsupported.
 

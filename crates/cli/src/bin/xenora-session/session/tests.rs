@@ -26,15 +26,15 @@ impl Exchange {
         let (commands, pending) = mpsc::channel();
         let (report, reports) = mpsc::channel();
         let presentation = Arc::new(Mutex::new(FramePresentation::default()));
-        let progress = install_exchange(
-            &mut registry,
-            pending,
-            report,
-            Arc::clone(&presentation),
-            Arc::new(AtomicUsize::new(0)),
-            (workload, Backend::Reference),
-            Arc::clone(&services),
-        );
+        let guest = Guest {
+            services: Arc::clone(&services),
+            graphics: Arc::new(GuestGraphics {
+                backend: Backend::Reference,
+                presentation: Arc::clone(&presentation),
+                native_draws: Arc::new(AtomicUsize::new(0)),
+            }),
+        };
+        let progress = install_exchange(&mut registry, pending, report, workload, &guest);
         Self {
             registry,
             commands: Some(commands),

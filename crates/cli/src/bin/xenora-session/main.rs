@@ -15,9 +15,10 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "Usage: xenora-session [--workload persistent|reopen] [--backend metal|reference] [--steps N] [--frame-dir PATH] [--replay PATH | left|right ...]\n\
+const USAGE: &str = "Usage: xenora-session [--workload persistent|reopen|threaded] [--backend metal|reference] [--steps N] [--frame-dir PATH] [--replay PATH | left|right ...]\n\
 Runs an embedded guest in one bounded session. Defaults to persistent, Metal, 1000000 steps and left right left.\n\
 The reopen workload opens and closes its journal every frame and verifies an auto-reset event.\n\
+The threaded workload moves one column per direction on a four-column scene and journals each resulting column.\n\
 Specify up to 32 directions, or replay a xenora-session-v1 file.\n\
 --frame-dir creates a new directory of PPM frames after a successful session.";
 const WORKER: &str = "--session-worker";
@@ -52,6 +53,7 @@ fn workload_name(workload: Workload) -> &'static str {
     match workload {
         Workload::Persistent => "persistent",
         Workload::Reopen => "reopen",
+        Workload::Threaded => "threaded",
     }
 }
 
@@ -59,13 +61,6 @@ fn direction_name(direction: &Direction) -> &'static str {
     match direction {
         Direction::Left => "left",
         Direction::Right => "right",
-    }
-}
-
-fn direction_byte(direction: &Direction) -> u8 {
-    match direction {
-        Direction::Left => b'L',
-        Direction::Right => b'R',
     }
 }
 
@@ -102,7 +97,10 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
                     match args.next().as_deref().and_then(|value| value.to_str()) {
                         Some("persistent") => Workload::Persistent,
                         Some("reopen") => Workload::Reopen,
-                        _ => return Err("--workload requires persistent or reopen".into()),
+                        Some("threaded") => Workload::Threaded,
+                        _ => {
+                            return Err("--workload requires persistent, reopen or threaded".into());
+                        }
                     },
                 );
             }
@@ -181,7 +179,7 @@ fn check_result(
         return Err("worker returned the wrong session workload".into());
     }
     let count = directions.len();
-    if result.exit_status != 0
+    if result.exit_status != workload.expected_exit_status()
         || result.open_handles != 0
         || result.native_draws != native_draws
         || result.frames.len() != count
@@ -189,7 +187,7 @@ fn check_result(
             .journal
             .iter()
             .copied()
-            .eq(directions.iter().map(direction_byte))
+            .eq(workload.expected_journal(directions))
     {
         return Err("worker returned inconsistent session counters or journal".into());
     }
@@ -209,6 +207,7 @@ fn encode(result: &CompletedSession, mut output: impl Write) -> io::Result<()> {
         match result.workload {
             Workload::Persistent => 0,
             Workload::Reopen => 1,
+            Workload::Threaded => 2,
         },
         result.exit_status,
         result.open_handles as u32,
@@ -240,6 +239,7 @@ fn decode(mut input: &[u8], count: usize) -> Result<CompletedSession, String> {
         let workload = match read_u32(&mut input)? {
             0 => Workload::Persistent,
             1 => Workload::Reopen,
+            2 => Workload::Threaded,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -435,6 +435,7 @@ fn print_result(
     let workload = match result.workload {
         Workload::Persistent => "",
         Workload::Reopen => " workload=reopen",
+        Workload::Threaded => " workload=threaded",
     };
     writeln!(
         output,
@@ -584,6 +585,27 @@ mod tests {
         );
         reply[REPLY_MAGIC.len()..][..4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode(&reply, 1).is_err());
+    }
+
+    #[test]
+    fn threaded_reply_requires_the_scene_journal_and_process_exit_code() {
+        let workload = Workload::Threaded;
+        let directions = [Direction::Left];
+        let mut result = CompletedSession {
+            workload,
+            frames: vec![example_frame(1)],
+            journal: vec![b'3'],
+            exit_status: workload.expected_exit_status(),
+            open_handles: 0,
+            native_draws: 0,
+        };
+        assert!(check_result(&result, workload, 0, &directions).is_ok());
+
+        result.journal[0] = b'L';
+        assert!(check_result(&result, workload, 0, &directions).is_err());
+        result.journal[0] = b'3';
+        result.exit_status = 0;
+        assert!(check_result(&result, workload, 0, &directions).is_err());
     }
 
     #[test]

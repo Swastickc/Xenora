@@ -760,6 +760,27 @@ arbitrary game execution and real-game compatibility remain unsupported. This ch
 into runtime services; it does not prove physical Xbox controller behavior and
 was not compared with Windows or Xbox hardware.
 
+### Host input router
+
+Each native application session owns one host input router, from the `xenora-input` crate (Campaign F, [#942](https://github.com/ranveersoni98/Xenora/issues/942)). The router is described in [the input campaign document](coordination/input-campaign.md). The app feeds it through the `xenora_session_input_*` functions:
+
+- physical macOS key codes, up to `0x7F`, as presses and releases;
+- relative mouse deltas and mouse buttons;
+- focus changes;
+- controller connections, each with a family number;
+- optional profile text for a controller;
+- raw GameController values (`xenora_controller_raw`): positional element bits, sticks from -1 to 1, triggers from 0 to 1, a vibration feature bit, and zeroed reserved bytes. These can come with battery evidence in the existing `xenora_xinput_battery` form.
+
+`xenora_controller_recognize` turns a GameController product category and the presence of paddle and Share buttons into a family number. It uses the crate's exact-match rule, so the app does not carry its own copy of that rule.
+
+`xenora_session_input_snapshot` writes the router's four slots in the `xenora_xinput_state` form without touching the guest, so a settings or test screen reads the same router that guest execution uses. `xenora_session_input_publish` installs those four slots into the running frame loop's XInput slots through the existing snapshot-and-battery path. Without a running loop it returns `XENORA_INVALID_STATE`.
+
+Every argument is validated before any state changes. Unknown devices, out-of-range modes, families, key codes and buttons, non-finite deltas, malformed raw structures, malformed batteries and malformed profile text return `XENORA_INVALID_ARGUMENT`. A fifth controller returns `XENORA_LIMIT_EXCEEDED`.
+
+A slot reports the vibration bit and battery evidence only in automatic and physical-only modes, and only when a controller owns that slot. A merged or keyboard-only slot reports neither. This is Xenora host policy.
+
+The router is not yet used by the app's frame loop. That comes with the app wiring.
+
 ### Guest heaps
 
 `GetProcessHeap`, `HeapAlloc`, `HeapSize`, and `HeapFree` expose the

@@ -1530,32 +1530,6 @@ impl StandardStreams {
         })
     }
 
-    /// `_access`. 0 when the name is a file or a directory; the files the
-    /// drive holds are always readable and writable, so the mode only
-    /// decides the answer for what is missing. -1 with `ENOENT` then, or
-    /// `EINVAL` for a null or empty name or a mode with other bits.
-    pub(super) fn access(
-        &self,
-        memory: &GuestMemory,
-        drive: &ObjectState,
-        name: u64,
-        mode: i32,
-    ) -> Outcome<i32> {
-        if mode & !7 != 0 {
-            return Ok(Err(Failed(-1, EINVAL)));
-        }
-        let Some(path) = drive_name(memory, name)? else {
-            return Ok(Err(Failed(-1, EINVAL)));
-        };
-        let Some(path) = path else {
-            return Ok(Err(Failed(-1, ENOENT)));
-        };
-        Ok(match drive.drive_entry(&path) {
-            DriveEntry::File | DriveEntry::Directory => Ok(0),
-            DriveEntry::Missing { .. } => Err(Failed(-1, ENOENT)),
-        })
-    }
-
     /// `feof`: the end-of-file indicator of the stream. Only the standard
     /// input can end here; the captured output streams cannot be read, and
     /// file streams do not expose theirs yet.
@@ -2305,6 +2279,26 @@ impl StandardStreams {
             }
             DriveEntry::Missing { parent: false } => Ok(Err(Failed(-1, ENOENT))),
             _ => Ok(Err(Failed(-1, EACCES))),
+        }
+    }
+
+    /// `_chmod`: the narrow form. Only the read-only bit of the mode means
+    /// anything here, exactly as the wide form: the drive's files are
+    /// otherwise readable and writable.
+    pub(super) fn chmod(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        mode: u32,
+    ) -> Outcome<i32> {
+        let Some(Some(path)) = drive_name(memory, name)? else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        if drive.drive_chmod(&path, mode & 0x80 == 0) {
+            Ok(Ok(0))
+        } else {
+            Ok(Err(Failed(-1, ENOENT)))
         }
     }
 

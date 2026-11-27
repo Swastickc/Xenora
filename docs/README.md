@@ -49,8 +49,9 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
 - [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.
 
-## Native media middleware
+## Native media and middleware
 
+- [Middleware compatibility coverage](middleware/coverage.md) — Implemented, partial, unsupported and research-only networking, upscaling, acceleration-structure and media surfaces.
 - [Native video playback foundation](video-playback.md) — AVFoundation-backed lifecycle, frame timing, seeking, ownership and explicit codec/Bink limitations.
 
 ## Testing, validation, and benchmarks
@@ -84,6 +85,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Legal scope](legal.md), [dependency licensing](licenses.md), and [third-party notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution findings.
 - [Contribution guidelines](../CONTRIBUTING.md) — Original authorship, Developer Certificate of Origin sign-off, and evidence requirements.
 - [Agent task queue](coordination/agent-tasks.md) — Areas, claiming, leases, upstream sync, verification and the security model for parallel contributors and coding agents.
+- [Input and playability campaign](coordination/input-campaign.md) — Campaign F progress: the host input router, keyboard and mouse translation, planned controller, app and replay work, and hardware evidence.
 - [CPU/runtime expansion campaign ledger](coordination/cpu-campaign-ledger.md) — Progress ledger for the Xenora native CPU and runtime compatibility campaign: starting/current commits, completed batches, new forms, verification evidence and the next implementation target.
 - [Infrastructure QA ownership](coordination/infrastructure-qa-ownership.md) — Non-overlapping paths for infrastructure and QA tooling.
 - [Agent queue smoke evidence](coordination/agent-queue-smoke.md) — Live Actions results from the disposable smoke repository.

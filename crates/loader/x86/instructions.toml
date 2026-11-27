@@ -72,6 +72,9 @@ lea = { ref = "sdm LEA" }
 xchg = { ref = "sdm XCHG" }
 xadd = { writes = "cf zf sf of pf af", ref = "sdm XADD" }
 cmpxchg = { writes = "cf zf sf of pf af", ref = "sdm CMPXCHG" }
+# CMPXCHG8B, and CMPXCHG16B with REX.W: the memory operand is twice the
+# operand size. Only ZF is written.
+cmpxchg8b = { writes = "zf", ref = "sdm CMPXCHG8B/CMPXCHG16B" }
 bswap = { ref = "sdm BSWAP" }
 cwde = { ref = "sdm CBW/CWDE/CDQE" }
 cdq = { ref = "sdm CWD/CDQ/CQO" }
@@ -990,6 +993,18 @@ map = "0f"
 opcode = 0xB1
 enc = "rm_reg"
 size = "v"
+lock = true
+
+# 0F C7 /1. A register operand is #UD, and CMPXCHG16B needs a 16-byte aligned
+# operand, which the semantics check.
+[[form]]
+op = "cmpxchg8b"
+map = "0f"
+opcode = 0xC7
+digit = 1
+enc = "rm"
+size = "y"
+memory_only = true
 lock = true
 
 [[form]]

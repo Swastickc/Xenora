@@ -847,13 +847,14 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
         }
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
-            // and the five features whose every instruction exists, CMOV and
-            // POPCNT in leaf 1, LAHF/SAHF, LZCNT and long mode in leaf
-            // 0x8000_0001.
+            // and the seven features whose every instruction exists, CX8
+            // (EDX bit 8), CMOV (EDX bit 15), CMPXCHG16B (ECX bit 13) and
+            // POPCNT (ECX bit 23) in leaf 1, LAHF/SAHF, LZCNT and long mode in
+            // leaf 0x8000_0001.
             let word = |text: &[u8; 4]| u32::from_le_bytes(*text);
             let values = match m.gpr[RAX] as u32 {
                 0 => [1, word(b"Xeno"), word(b"uest"), word(b"ra g")],
-                1 => [0, 0, 1 << 23, 1 << 15],
+                1 => [0, 0, 1 << 13 | 1 << 23, 1 << 8 | 1 << 15],
                 0x8000_0000 => [0x8000_0001, 0, 0, 0],
                 0x8000_0001 => [0, 0, 1 | 1 << 5, 1 << 29],
                 _ => [0; 4],
@@ -1114,7 +1115,9 @@ fn every_declared_form_is_executed_by_a_fixture() {
     }
     // Control flow and exits are covered by the tests below. String
     // instructions and the direction flag need their own memory layout and
-    // are covered form by form in `tests/cpu_rep.rs`.
+    // are covered form by form in `tests/cpu_rep.rs`. CMPXCHG8B and
+    // CMPXCHG16B take an 8- or 16-byte operand and two register pairs, and
+    // are covered in `tests/x86_cmpxchg_pair.rs`.
     let separate = [
         Op::Ldmxcsr,
         Op::Jcc,
@@ -1131,6 +1134,7 @@ fn every_declared_form_is_executed_by_a_fixture() {
         Op::Stos,
         Op::Cld,
         Op::Std,
+        Op::Cmpxchg8b,
     ];
     let mut missing: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (index, form) in FORMS.iter().enumerate() {

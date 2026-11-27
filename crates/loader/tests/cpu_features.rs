@@ -15,8 +15,8 @@
 //! assembled with `clang -target x86_64-apple-macos` and read with `objdump`.
 
 use xenora_loader::cpu::{
-    CPUID_CMOV, CPUID_LAHF_SAHF, CPUID_LONG_MODE, CPUID_LZCNT, CPUID_POPCNT, CpuState, ExitReason,
-    Interpreter, RFlags, cpuid,
+    CPUID_CMOV, CPUID_CMPXCHG16B, CPUID_CX8, CPUID_LAHF_SAHF, CPUID_LONG_MODE, CPUID_LZCNT,
+    CPUID_POPCNT, CpuState, ExitReason, Interpreter, RFlags, cpuid,
 };
 use xenora_loader::dbt::DbtEngine;
 use xenora_loader::memory::{GuestMemory, MemoryPermissions};
@@ -76,9 +76,10 @@ fn every_leaf_returns_its_documented_values() {
     let leaves: &[(u32, u32, [u32; 4])] = &[
         // Highest basic leaf 1, and "Xeno", "uest", "ra g" as little-endian text.
         (0, 0, [1, 0x6F6E_6558, 0x7473_6575, 0x6720_6172]),
-        // POPCNT is ECX bit 23 and CMOV is EDX bit 15. No signature.
-        (1, 0, [0, 0, 0x0080_0000, 0x0000_8000]),
-        (1, 0xFFFF_FFFF, [0, 0, 0x0080_0000, 0x0000_8000]),
+        // CMPXCHG16B is ECX bit 13, POPCNT ECX bit 23, CMPXCHG8B (CX8) EDX
+        // bit 8 and CMOV EDX bit 15. No signature.
+        (1, 0, [0, 0, 0x0080_2000, 0x0000_8100]),
+        (1, 0xFFFF_FFFF, [0, 0, 0x0080_2000, 0x0000_8100]),
         // Highest extended leaf.
         (0x8000_0000, 0, [0x8000_0001, 0, 0, 0]),
         // LAHF/SAHF is ECX bit 0, LZCNT ECX bit 5 and long mode EDX bit 29.
@@ -134,11 +135,13 @@ fn every_leaf_returns_its_documented_values() {
         (
             CPUID_POPCNT,
             CPUID_CMOV,
+            CPUID_CX8,
+            CPUID_CMPXCHG16B,
             CPUID_LAHF_SAHF,
             CPUID_LZCNT,
             CPUID_LONG_MODE
         ),
-        (1 << 23, 1 << 15, 1, 1 << 5, 1 << 29)
+        (1 << 23, 1 << 15, 1 << 8, 1 << 13, 1, 1 << 5, 1 << 29)
     );
 }
 
@@ -197,6 +200,17 @@ fn reported_features_have_all_their_instructions_in_the_fixtures() {
             decodable(&format!("{name} {high}, {}", memory(bits)));
         }
     }
+    // CMPXCHG8B and CMPXCHG16B are one memory-only form, 8 or 16 bytes by
+    // REX.W. The reference of `tests/x86_integer.rs` has no operand that wide,
+    // so `tests/x86_cmpxchg_pair.rs` and the SDM known answers run them instead.
+    assert_ne!(cpuid(1, 0)[EDX] & CPUID_CX8, 0);
+    assert_ne!(cpuid(1, 0)[ECX] & CPUID_CMPXCHG16B, 0);
+    for code in [&[0x0F, 0xC7, 0x0E][..], &[0x48, 0x0F, 0xC7, 0x0E]] {
+        decode(ENTRY, |at| {
+            code.get((at - ENTRY) as usize).copied().ok_or(())
+        })
+        .unwrap_or_else(|error| panic!("{code:02X?}: {error:?}"));
+    }
     // LAHF and SAHF have one form each and no operands.
     assert_ne!(cpuid(0x8000_0001, 0)[ECX] & CPUID_LAHF_SAHF, 0);
     decodable("lahf");
@@ -213,7 +227,6 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
     let witnesses: &[(&str, u32, usize, u32, &[u8])] = &[
         ("FPU", 1, EDX, 0, &[0xD9, 0xE8]),               // fld1
         ("TSC", 1, EDX, 4, &[0x0F, 0x31]),               // rdtsc
-        ("CX8", 1, EDX, 8, &[0x0F, 0xC7, 0x0E]),         // cmpxchg8b [rsi]
         ("CLFSH", 1, EDX, 19, &[0x0F, 0xAE, 0x3E]),      // clflush [rsi]
         ("MMX", 1, EDX, 23, &[0x0F, 0x77]),              // emms
         ("FXSR", 1, EDX, 24, &[0x0F, 0xAE, 0x06]),       // fxsave [rsi]
@@ -229,7 +242,6 @@ fn unreported_features_each_have_an_instruction_that_is_refused() {
         ), // pclmulqdq xmm0, xmm1, 0
         ("SSSE3", 1, ECX, 9, &[0x0F, 0x38, 0x00, 0xC1]), // pshufb mm0, mm1
         ("FMA", 1, ECX, 12, &[0xC4, 0xE2, 0x71, 0x98, 0xC2]), // vfmadd132ps xmm0, xmm1, xmm2
-        ("CMPXCHG16B", 1, ECX, 13, &[0x48, 0x0F, 0xC7, 0x0E]), // cmpxchg16b [rsi]
         ("MOVBE", 1, ECX, 22, &[0x0F, 0x38, 0xF0, 0x06]), // movbe eax, [rsi]
         ("AESNI", 1, ECX, 25, &[0x66, 0x0F, 0x38, 0xDC, 0xC1]), // aesenc xmm0, xmm1
         ("XSAVE", 1, ECX, 26, &[0x0F, 0x01, 0xD0]),      // xgetbv

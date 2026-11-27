@@ -43,6 +43,7 @@ exact revision and known limitations.
 
 ### Added
 
+- Documented native Metal acceleration-structure compatibility boundaries from the public SDK, including descriptor separation, sizing, scratch ownership, build/refit/copy/compaction ordering and deterministic fixture requirements. No implementation or console-specific ABI is claimed.
 - Added an original Scarlett-style Gaming Runtime fixture (#713) with static import and startup diagnostics.
 - The interpreter and ARM64 dynamic binary translator accept 73 additional 256-bit AVX2 packed integer forms through shared semantics (#711).
 - Synthetic guest applications can query a saved slot's exact byte length before reading it, including after reopening the platform service (#765).

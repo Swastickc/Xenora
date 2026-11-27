@@ -32,7 +32,6 @@ const BUDGET: usize = 5_000_000;
 
 const MAGIC: u32 = 0x6378_6764;
 const LAZY_VALUE: u32 = 41;
-const GUARD_MINUS_ONE: u32 = u32::MAX;
 const LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
 
 // ---------------------------------------------------------------------------
@@ -286,12 +285,12 @@ fn assert_common_expectations(name: &str, outcome: &Outcome) {
     assert_eq!(block.abort_first, 1, "{name}: first abort-guard acquire");
     assert_eq!(block.abort_after, 1, "{name}: acquire after abort");
     assert_eq!(
-        block.unmapped, GUARD_MINUS_ONE,
-        "{name}: unmapped guard result"
+        block.unmapped, 0,
+        "{name}: no unmapped acquire answer exists"
     );
     assert_eq!(
-        block.unaligned, GUARD_MINUS_ONE,
-        "{name}: unaligned guard result"
+        block.unaligned, 0,
+        "{name}: no unaligned acquire answer exists"
     );
     assert_eq!(
         block.direct_guard & 0xff,
@@ -334,21 +333,37 @@ fn cxx_guard_abi_runs_at_every_optimization_level() {
 }
 
 #[test]
-fn reentrant_guard_acquire_is_refused_without_mutating() {
+fn reentrant_guard_acquire_stops_without_mutating() {
     let name = "guest-cxx-guard-reentrant";
     let outcome = run(name, BUDGET).unwrap_or_else(|error| panic!("{name}: {error}"));
     assert_eq!(
-        outcome.result.execution.exit_reason,
-        ExitReason::ProcessExit(42),
-        "{name}: the second acquire was not refused"
+        outcome.result.execution.exit_reason, LIMIT,
+        "{name}: the refused second acquire must stop the guest: any answer \
+         authorizes or wrongly completes the initialization"
     );
-    assert_eq!(outcome.state.exit_status(), Some(42), "{name}");
+    assert_eq!(outcome.state.exit_status(), None, "{name}");
     assert_common_expectations(name, &outcome);
     assert_eq!(
         result_block(&outcome).reentrant,
-        GUARD_MINUS_ONE,
-        "{name}: reentrant acquire result"
+        0,
+        "{name}: the second acquire never answered"
     );
+}
+
+#[test]
+fn invalid_guard_acquires_stop_the_guest() {
+    for name in [
+        "guest-cxx-guard-invalid-acquire-unmapped",
+        "guest-cxx-guard-invalid-acquire-unaligned",
+    ] {
+        let outcome = run(name, BUDGET).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            outcome.result.execution.exit_reason, LIMIT,
+            "{name}: the invalid acquire was answered instead of stopped"
+        );
+        assert_eq!(outcome.state.exit_status(), None, "{name}");
+        assert_common_expectations(name, &outcome);
+    }
 }
 
 #[test]

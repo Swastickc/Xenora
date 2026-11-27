@@ -126,3 +126,5 @@ done
 build guest-cxx-guard-reentrant O1 REENTRANT_CONTROL
 build guest-cxx-guard-invalid-release O1 INVALID_RELEASE_CONTROL
 build guest-cxx-guard-invalid-abort O1 INVALID_ABORT_CONTROL
+build guest-cxx-guard-invalid-acquire-unmapped O1 INVALID_ACQUIRE_UNMAPPED_CONTROL
+build guest-cxx-guard-invalid-acquire-unaligned O1 INVALID_ACQUIRE_UNALIGNED_CONTROL

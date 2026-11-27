@@ -14,9 +14,13 @@
 //   0   every check passed
 //   1..8 the numbered check failed
 // Control exit status:
-//   42  the reentrant control observed -1 from its second acquire
-//   43  the reentrant control did not observe -1
+//   42  the reentrant control's second acquire answered nonzero - it
+//       authorized a second initialization, which no honest refusal may do
+//   43  the reentrant control's second acquire answered zero - it reported
+//       the object initialized while it was not
 //   44  the first acquire of the control guard did not return 1
+//   45  an unmapped acquire returned at all (it must stop the guest instead)
+//   46  an unaligned acquire returned at all (it must stop the guest instead)
 //   90  an invalid release reached the process exit after it (it must not)
 //   91  an invalid abort reached the process exit after it (it must not)
 
@@ -111,26 +115,29 @@ extern "C" void guest_cxx_guard_entry() {
     __cxa_guard_release(&abort_guard);
     result.abort_guard = abort_guard;
 
-    // Invalid addresses fail with -1 instead of faulting or initializing.
+#ifdef INVALID_ACQUIRE_UNMAPPED_CONTROL
+    // The ABI gives acquisition no error channel: any answer here is wrong,
+    // so the only honest behavior is the guest stop this control verifies.
     const int unmapped = __cxa_guard_acquire(reinterpret_cast<u64 *>(0x7000'0000u));
     result.unmapped = static_cast<u32>(unmapped);
-    if (unmapped != -1)
-        ExitProcess(8);
+    ExitProcess(45);
+#endif
+
+#ifdef INVALID_ACQUIRE_UNALIGNED_CONTROL
     const int unaligned = __cxa_guard_acquire(
         reinterpret_cast<u64 *>(reinterpret_cast<unsigned char *>(&direct_guard) + 1));
     result.unaligned = static_cast<u32>(unaligned);
-    if (unaligned != -1)
-        ExitProcess(8);
+    ExitProcess(46);
+#endif
 
 #ifdef REENTRANT_CONTROL
     if (__cxa_guard_acquire(&reentrant_guard) != 1)
         ExitProcess(44);
     const int second_acquire = __cxa_guard_acquire(&reentrant_guard);
     result.reentrant = static_cast<u32>(second_acquire);
-    if (second_acquire != -1)
-        ExitProcess(43);
-    __cxa_guard_release(&reentrant_guard);
-    ExitProcess(42);
+    // Reaching here means the refused acquisition answered: nonzero read as
+    // permission to initialize a second time, zero as a false completion.
+    ExitProcess(second_acquire != 0 ? 42 : 43);
 #endif
 
 #ifdef INVALID_RELEASE_CONTROL

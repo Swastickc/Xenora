@@ -11,6 +11,8 @@
 
 mod advapi;
 mod codepages;
+mod com;
+pub mod com_fixture;
 mod compare;
 mod console;
 mod crt;
@@ -266,6 +268,9 @@ pub struct ServicesState {
     file_apis_ansi: AtomicBool,
     crt_arguments: Mutex<crt_arguments::CrtArguments>,
     console: Mutex<ConsoleState>,
+    /// The COM apartment of each guest thread and the task allocator.
+    com: Mutex<com::Com>,
+    com_fixture: Mutex<com_fixture::Fixture>,
     startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
@@ -362,6 +367,8 @@ impl ServicesState {
             crt_clock: Mutex::default(),
             crt_directory: Mutex::new(String::new()),
             console: Mutex::default(),
+            com: Mutex::default(),
+            com_fixture: Mutex::default(),
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
@@ -544,6 +551,10 @@ impl ServicesState {
 
     fn console(&self) -> std::sync::MutexGuard<'_, ConsoleState> {
         self.console.lock().expect("console state")
+    }
+
+    fn com(&self) -> std::sync::MutexGuard<'_, com::Com> {
+        self.com.lock().expect("COM state")
     }
 
     /// Read the last-error value for a guest thread's TEB.
@@ -1102,6 +1113,15 @@ pub(crate) mod handlers {
     use crate::softfloat::{Control, F32, F64, square_root};
 
     type Outcome<T> = Result<T, ExitReason>;
+
+    // The COM base surface lives in `services/com.rs` so its state and its
+    // handlers stay together; the generated adapters still reach them here.
+    pub(crate) use super::com::{
+        clsid_from_string, co_create_guid, co_create_instance, co_create_instance_ex,
+        co_get_class_object, co_initialize, co_initialize_ex, co_task_mem_alloc, co_task_mem_free,
+        co_task_mem_realloc, co_uninitialize, iid_from_string, prop_variant_clear,
+        string_from_guid2,
+    };
 
     /// The exit for a request the runtime does not model.
     const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);

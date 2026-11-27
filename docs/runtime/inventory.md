@@ -12,16 +12,16 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 820 |
-| Typed registry services | 252 |
-| Manual code registrations | 568 |
-| Canonical libraries | 20 |
+| Canonical services | 833 |
+| Typed registry services | 266 |
+| Manual code registrations | 567 |
+| Canonical libraries | 21 |
 | Implemented | 218 |
-| Partial | 599 |
-| Stub | 2 |
+| Partial | 612 |
+| Stub | 3 |
 | Data-import services | 7 |
-| Aliases of every kind | 836 |
-| API-set aliases | 703 |
+| Aliases of every kind | 870 |
+| API-set aliases | 723 |
 | Ordinal aliases | 0 |
 | Statuses never explicitly set | 76 |
 | Duplicate canonical registrations | 0 |
@@ -33,6 +33,7 @@ independent acceptance or compatibility claims.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | <code>advapi32.dll</code> | <code>windows-system</code> | 20 | 0 | 20 | 0 | 1 | 19 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
+| <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 274 | 2 | 26 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
 | <code>libstdc++-6.dll</code> | <code>c++-support</code> | 9 | 0 | 9 | 0 | 9 | 0 | 0 | 0 |
@@ -59,9 +60,9 @@ metadata, are in `inventory.json`.
 
 | Alias kind | Count |
 | --- | --- |
-| API-set | 703 |
+| API-set | 723 |
 | Ordinal | 0 |
-| Other module | 133 |
+| Other module | 147 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.
 

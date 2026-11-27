@@ -3,6 +3,206 @@
     {
       "api_set": true,
       "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CLSIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateGuid",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitializeEx",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemAlloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemFree",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemRealloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoUninitialize",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoUninitialize"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "IIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "IIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "PropVariantClear",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "PropVariantClear"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "StringFromGUID2",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "StringFromGUID2"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CLSIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateGuid",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitializeEx",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemAlloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemFree",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemRealloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoUninitialize",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoUninitialize"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "IIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "IIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "PropVariantClear",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "PropVariantClear"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "StringFromGUID2",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "StringFromGUID2"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
       "canonical_library": "kernel32.dll",
       "canonical_symbol": "GetConsoleCP",
       "kind": "name",
@@ -8359,6 +8559,146 @@
       "library": "msvcrt.dll",
       "status": "partial",
       "symbol": "wcstoull"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CLSIDFromString",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateGuid",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateInstance",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoCreateInstance"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateInstanceEx",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoCreateInstanceEx"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoGetClassObject",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoGetClassObject"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitialize",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoInitialize"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitializeEx",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemAlloc",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemFree",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemRealloc",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoUninitialize",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoUninitialize"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "IIDFromString",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "IIDFromString"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "PropVariantClear",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "PropVariantClear"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "StringFromGUID2",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "StringFromGUID2"
     }
   ],
   "findings": {
@@ -9127,6 +9467,146 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_wspawnve"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoCreateInstance"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoCreateInstanceEx"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoGetClassObject"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoInitialize"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoUninitialize"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "IIDFromString"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "PropVariantClear"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "StringFromGUID2"
     },
     {
       "data_import": false,
@@ -17110,21 +17590,21 @@
     }
   ],
   "summary": {
-    "aliases": 836,
-    "api_set_aliases": 703,
-    "canonical_services": 820,
+    "aliases": 870,
+    "api_set_aliases": 723,
+    "canonical_services": 833,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 219,
     "implicit_status_services": 76,
-    "libraries": 20,
-    "manual_services": 568,
+    "libraries": 21,
+    "manual_services": 567,
     "ordinal_aliases": 0,
-    "partial": 599,
+    "partial": 612,
     "structural_consistency_findings": 0,
-    "stub": 2,
-    "typed_registry_entries": 252,
-    "typed_services": 252,
+    "stub": 3,
+    "typed_registry_entries": 266,
+    "typed_services": 266,
     "wanted_imports": null,
     "wanted_missing": null
   },

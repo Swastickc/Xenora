@@ -92,6 +92,7 @@ exact revision and known limitations.
 - An original hosted C record and compression fixture, with O0–O3 guest builds, independently specified output and file-byte checks, and malformed-input controls (#796).
 
 ### Fixed
+- Root-anchored guest paths (`/tmp/x`, `\tmp\x`) are no longer rejected as invalid: the leading separator anchors at the drive root, which the single-drive model already represents as the empty string, so the anchor is consumed in both the Win32 and CRT path conversions before component validation. The three spellings of the same object - anchored, drive-prefixed and relative - now resolve identically, while a `\\` UNC prefix and empty interior components stay rejected exactly as before.
 - Contended, recursive or invalid `__cxa_guard_acquire` no longer answers `-1`: the Itanium C++ ABI gives acquisition no error channel, so compiler-generated callers read any nonzero result as permission to initialize, and the old answer authorized exactly the double initialization the guard exists to prevent. The refusal now stops the guest with the explicit fault, matching the release/abort contract of the same surface. The compiler-generated fixture gains reentrant, unmapped-acquire and unaligned-acquire controls proving no answer leaves the handler.
 
 - QA benchmark statistics now reject NaN and infinite samples instead of producing meaningless ordering statistics or non-standard JSON evidence (#827).

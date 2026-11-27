@@ -7971,6 +7971,39 @@ fn filbuf_and_flsbuf_move_single_bytes() {
 }
 
 #[test]
+fn filbuf_and_flsbuf_honor_the_standard_streams() {
+    let (mut guest, [input, out, err]) = stdio_guest();
+    guest.state.set_standard_input(b"ab");
+    // stdin reads consume the host-supplied bytes one at a time, then EOF.
+    assert_eq!(guest.call("_filbuf", &[input]) & 0xFFFF_FFFF, b'a' as u64);
+    assert_eq!(guest.call("_filbuf", &[input]) & 0xFFFF_FFFF, b'b' as u64);
+    assert_eq!(guest.call("_filbuf", &[input]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    // stdout and stderr bytes go through the same capture as every write,
+    // text mode included.
+    assert_eq!(
+        guest.call("_flsbuf", &[b'x' as u64, out]) & 0xFFFF_FFFF,
+        b'x' as u64
+    );
+    assert_eq!(
+        guest.call("_flsbuf", &[b'\n' as u64, err]) & 0xFFFF_FFFF,
+        b'\n' as u64
+    );
+    assert_eq!(guest.state.standard_output(), b"x");
+    assert_eq!(guest.state.standard_error(), b"\r\n");
+    // stdin cannot be written and the output streams cannot be read: EOF
+    // with EBADF, as on a file stream open the wrong way.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_flsbuf", &[b'x' as u64, input]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    assert_eq!(guest.call("_filbuf", &[out]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EBADF);
+}
+
+#[test]
 fn an_assertion_prints_and_ends_the_process() {
     let (mut guest, _) = stdio_guest();
     let expression = place(&mut guest, NAME, b"x == 42");

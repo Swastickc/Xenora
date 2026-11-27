@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 266 |
-| Generated adapters | 266 |
-| Unique handler implementations | 257 |
-| Implemented | 84 |
+| Services with a declared ABI | 282 |
+| Generated adapters | 282 |
+| Unique handler implementations | 273 |
+| Implemented | 100 |
 | Partial | 180 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 266 |
-| API-set aliases (not services) | 334 |
+| Conformance-tested through guest dispatch | 282 |
+| API-set aliases (not services) | 366 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -128,6 +128,22 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!iswspace` | `(wide: u32) -> i32` | implemented | never |
 | `ucrtbase.dll!towlower` | `(wide: u32) -> u32` | implemented | never |
 | `ucrtbase.dll!towupper` | `(wide: u32) -> u32` | implemented | never |
+| `ucrtbase.dll!isalpha` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isdigit` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isalnum` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!islower` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isupper` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isspace` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!ispunct` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!iscntrl` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isprint` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isgraph` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isblank` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!isxdigit` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!tolower` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!toupper` | `(character: i32) -> i32` | implemented | never |
+| `ucrtbase.dll!atoi` | `(text: ptr) -> i32` | implemented | never; stops the guest for memory it cannot read |
+| `ucrtbase.dll!atof` | `(text: ptr) -> f64` | implemented | never; stops the guest for memory it cannot read |
 | `ucrtbase.dll!wcsncat` | `(start: ptr, end: ptr, count: u64) -> ptr` | implemented | never; stops the guest for memory it cannot write |
 | `ucrtbase.dll!wcscpy` | `(start: ptr, end: ptr) -> ptr` | implemented | never; nothing bounds the copy, as the CRT does not bound it |
 | `ucrtbase.dll!_wcsnicmp` | `(first: ptr, second: ptr, count: u64) -> i32` | implemented | never; the folding is the ASCII one of the C locale, the only locale modelled, and the answer is -1, 0 or 1 as the sign-only contract permits |

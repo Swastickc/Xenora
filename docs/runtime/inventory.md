@@ -12,16 +12,16 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 833 |
-| Typed registry services | 266 |
-| Manual code registrations | 567 |
+| Canonical services | 848 |
+| Typed registry services | 282 |
+| Manual code registrations | 566 |
 | Canonical libraries | 21 |
-| Implemented | 218 |
-| Partial | 612 |
-| Stub | 3 |
+| Implemented | 235 |
+| Partial | 611 |
+| Stub | 2 |
 | Data-import services | 7 |
-| Aliases of every kind | 870 |
-| API-set aliases | 723 |
+| Aliases of every kind | 900 |
+| API-set aliases | 737 |
 | Ordinal aliases | 0 |
 | Statuses never explicitly set | 76 |
 | Duplicate canonical registrations | 0 |
@@ -40,7 +40,7 @@ independent acceptance or compatibility claims.
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
 | <code>msvcrt.dll</code> | <code>c-runtime</code> | 30 | 4 | 26 | 7 | 14 | 16 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 280 | 189 | 91 | 0 | 87 | 193 | 0 | 10 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 294 | 205 | 89 | 0 | 103 | 191 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 6 | 0 | 6 | 0 | 0 | 6 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 11 | 0 | 11 | 0 | 0 | 11 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
@@ -60,9 +60,9 @@ metadata, are in `inventory.json`.
 
 | Alias kind | Count |
 | --- | --- |
-| API-set | 723 |
+| API-set | 737 |
 | Ordinal | 0 |
-| Other module | 147 |
+| Other module | 163 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.
 

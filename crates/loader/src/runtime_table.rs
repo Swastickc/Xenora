@@ -2236,22 +2236,22 @@ pub static SERVICES: [ServiceMetadata; 296] = [
         symbol: "VirtualProtect",
         parameters: &[Parameter { name: "address", kind: "ptr" }, Parameter { name: "size", kind: "u64" }, Parameter { name: "protect", kind: "u32" }, Parameter { name: "old", kind: "out<4>" }],
         result: "bool32",
-        status: ServiceStatus::Stub,
+        status: ServiceStatus::Partial,
         aliases: &["api-ms-win-core-memory-l1-1-0.dll"],
-        failure: "always: stops the guest with the runtime-limit fault; no protection changes",
+        failure: "0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED or ERROR_INVALID_ADDRESS; executable protections and non-VirtualAlloc ownership are unsupported; invalid spans change nothing",
         reference: "memoryapi.h VirtualProtect",
-        tests: &["memory_and_exception_stubs_stop_the_guest_and_change_nothing"],
+        tests: &["virtual_memory_query_and_protect_committed_pages", "virtual_memory_protect_failures_leave_memory_unchanged", "virtual_memory_services_cover_static_committed_regions"],
     },
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "VirtualQuery",
         parameters: &[Parameter { name: "address", kind: "ptr" }, Parameter { name: "information", kind: "out<48>" }, Parameter { name: "length", kind: "u64" }],
         result: "u64",
-        status: ServiceStatus::Stub,
+        status: ServiceStatus::Partial,
         aliases: &["api-ms-win-core-memory-l1-1-0.dll"],
-        failure: "always: stops the guest with the runtime-limit fault; nothing is written",
+        failure: "0 with ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS",
         reference: "memoryapi.h VirtualQuery",
-        tests: &["memory_and_exception_stubs_stop_the_guest_and_change_nothing"],
+        tests: &["virtual_memory_query_and_protect_committed_pages", "virtual_memory_protect_failures_leave_memory_unchanged", "virtual_memory_services_cover_static_committed_regions"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -5075,7 +5075,7 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         Ok(result.place(cpu))
     });
     let s = state.clone();
-    registry.register_with_status("kernel32.dll", "VirtualProtect", ServiceStatus::Stub, move |args, cpu, memory| {
+    registry.register_with_status("kernel32.dll", "VirtualProtect", ServiceStatus::Partial, move |args, cpu, memory| {
         let call = Call::new(args, cpu, memory);
         let a0 = call.u64(0)?;
         let a1 = call.u64(1)?;
@@ -5086,7 +5086,7 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         Ok(result.place(cpu))
     });
     let s = state.clone();
-    registry.register_with_status("kernel32.dll", "VirtualQuery", ServiceStatus::Stub, move |args, cpu, memory| {
+    registry.register_with_status("kernel32.dll", "VirtualQuery", ServiceStatus::Partial, move |args, cpu, memory| {
         let call = Call::new(args, cpu, memory);
         let a0 = call.u64(0)?;
         let a1 = call.out::<48>(1)?;

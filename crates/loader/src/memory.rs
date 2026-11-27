@@ -264,14 +264,21 @@ impl GuestMemory {
         let copy_len = size.min(initial_data.len());
         data[..copy_len].copy_from_slice(&initial_data[..copy_len]);
 
-        self.regions.push(MappedRegion {
-            base,
-            data,
-            permissions,
-            allocation,
-            allocation_base: base,
-        });
-        self.regions.sort_by_key(|r| r.base);
+        // The table is already sorted. Insert at the sorted position instead
+        // of pushing and sorting the whole table again; use the end of any
+        // equal-base empty markers to preserve the stable ordering the sort
+        // provided.
+        let position = self.regions.partition_point(|region| region.base <= base);
+        self.regions.insert(
+            position,
+            MappedRegion {
+                base,
+                data,
+                permissions,
+                allocation,
+                allocation_base: base,
+            },
+        );
         Ok(())
     }
 
@@ -740,10 +747,14 @@ impl GuestMemory {
             });
             return self.regions.len() != before;
         }
-        let Some(index) = self
-            .regions
+        // Equal-base empty heap markers can form a small cluster, but the
+        // sorted table lets the search skip every unrelated region.
+        let first = self.regions.partition_point(|region| region.base < base);
+        let end = self.regions.partition_point(|region| region.base <= base);
+        let Some(index) = self.regions[first..end]
             .iter()
-            .position(|region| region.base == base && region.allocation == allocation)
+            .position(|region| region.allocation == allocation)
+            .map(|index| first + index)
         else {
             return false;
         };
@@ -1988,6 +1999,50 @@ mod mapping_search_contract_tests {
                 );
                 assert_eq!(failed, [0xee; 2]);
             }
+        }
+    }
+}
+
+/// An opt-in timing run for region insertion and removal (#106). Run in a
+/// release build on an otherwise idle host:
+///
+/// ```text
+/// cargo test --release -p xenora-loader --lib region_maintenance_timing -- --ignored --nocapture
+/// ```
+///
+/// The run uses the public heap mapping surface and the internal exact-base
+/// release path. Every returned allocation is removed once and the empty final
+/// table is checked.
+#[cfg(test)]
+mod region_maintenance_timing {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "manual region maintenance timing run; release build on an otherwise idle host"]
+    fn region_maintenance_timing() {
+        for blocks in [1usize, 16, 256, 4096] {
+            let started = Instant::now();
+            let mut memory = GuestMemory::new();
+            let mut bases = Vec::with_capacity(blocks);
+            for _ in 0..blocks {
+                bases.push(memory.map_heap_allocation(PROCESS_HEAP, 64).unwrap());
+            }
+            let inserted = started.elapsed();
+
+            let started = Instant::now();
+            for &base in bases.iter().rev() {
+                assert!(
+                    memory.release_dynamic_allocation(base, AllocationKind::Heap(PROCESS_HEAP))
+                );
+            }
+            let removed = started.elapsed();
+            assert!(memory.regions.is_empty());
+            println!(
+                "blocks={blocks} insert={inserted:?} remove={removed:?} insert_per_op={:.1?} remove_per_op={:.1?}",
+                inserted / blocks as u32,
+                removed / blocks as u32,
+            );
         }
     }
 }

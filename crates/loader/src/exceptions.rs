@@ -108,6 +108,24 @@ fn span(address: u64, size: u64) -> Result<(), ExitReason> {
 /// trailing handler RVA or chained 12-byte entry.
 const UNWIND_INFO_SPAN: u64 = 4 + 2 * 256 + 12;
 
+/// Fixed bytes of one unwind-info chain link: header, whole aligned unwind
+/// codes, and the trailing handler RVA or chained RUNTIME_FUNCTION entry.
+/// Language-specific handler data is variable-sized and intentionally excluded.
+fn fixed_unwind_span(header: u32) -> u64 {
+    let bytes = header.to_le_bytes();
+    let count = u64::from(bytes[2]);
+    let codes = (count + 1) & !1;
+    let flags = bytes[0] >> 3;
+    let trailing = if flags & UNW_FLAG_CHAININFO != 0 {
+        12
+    } else if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+        4
+    } else {
+        0
+    };
+    4 + 2 * codes + trailing
+}
+
 fn at(base: u64, offset: u64) -> Result<u64, ExitReason> {
     base.checked_add(offset).ok_or(fault(MemoryError::Overflow))
 }
@@ -200,10 +218,17 @@ fn register_exception_directory_impl(
                 "entry {index} has a function range outside committed image memory"
             ));
         }
-        if !unwind.is_multiple_of(4) || u64::from(unwind) + 4 > u64::from(size_of_image) {
+        let unwind_address = base.checked_add(u64::from(unwind)).ok_or_else(|| {
+            format!("malformed exception directory: entry {index}: unwind address overflows")
+        })?;
+        let unwind_header = memory.read_u32(unwind_address).map_err(|e| {
+            format!("malformed exception directory: entry {index}: unwind header: {e}")
+        })?;
+        let fixed_span = fixed_unwind_span(unwind_header);
+        if !unwind.is_multiple_of(4) || u64::from(unwind) + fixed_span > u64::from(size_of_image) {
             return bad(&format!("entry {index} has unwind data outside the image"));
         }
-        if backing.is_some_and(|backing| !backing.covers(unwind, 4)) {
+        if backing.is_some_and(|backing| !backing.covers(unwind, fixed_span)) {
             return bad(&format!(
                 "entry {index} has unwind data outside committed image memory"
             ));

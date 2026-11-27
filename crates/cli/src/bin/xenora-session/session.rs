@@ -15,7 +15,6 @@ use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile
 #[cfg(test)]
 mod tests;
 
-const GUEST: &[u8] = include_bytes!("../../../../../fixtures/pe/persistent-guest.exe");
 const VERTEX_SHADER: &[u8] = include_bytes!("../../../../../fixtures/rdna2/x9-constant-vs.bin");
 const PIXEL_SHADER: &[u8] = include_bytes!("../../../../../fixtures/rdna2/x9-constant-ps.bin");
 const JOURNAL: &str = "C:\\xenora-session.log";
@@ -24,6 +23,32 @@ pub(super) const WIDTH: usize = 4;
 pub(super) const HEIGHT: usize = 3;
 pub(super) const MAX_EVENTS: usize = 32;
 pub(super) const MAX_STEPS: usize = 1_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Workload {
+    Persistent,
+    Reopen,
+}
+
+impl Workload {
+    fn guest(self) -> &'static [u8] {
+        match self {
+            Self::Persistent => include_bytes!("../../../../../fixtures/pe/persistent-guest.exe"),
+            Self::Reopen => {
+                include_bytes!("../../../../../fixtures/pe/persistent-reopen-guest.exe")
+            }
+        }
+    }
+
+    fn retained_handles(self) -> usize {
+        match self {
+            // The original retains an open journal and an event. Reopen
+            // closes each file handle before presenting and retains a latch.
+            Self::Persistent => 2,
+            Self::Reopen => 1,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Backend {
@@ -75,6 +100,7 @@ pub(super) struct Frame {
 }
 
 pub(super) struct CompletedSession {
+    pub(super) workload: Workload,
     pub(super) frames: Vec<Frame>,
     pub(super) journal: Vec<u8>,
     pub(super) exit_status: u32,
@@ -103,13 +129,13 @@ struct RunningSession {
 }
 
 impl RunningSession {
-    fn start(backend: Backend, steps: usize) -> Result<Self, String> {
+    fn start(workload: Workload, backend: Backend, steps: usize) -> Result<Self, String> {
         let (commands, pending) = mpsc::sync_channel(1);
         let (report, reports) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("xenora-guest-application".to_owned())
             .spawn(move || {
-                let outcome = execute_guest(backend, steps, pending, report.clone());
+                let outcome = execute_guest(workload, backend, steps, pending, report.clone());
                 let _ = report.send(Report::Finished(outcome));
             })
             .map_err(|error| format!("start guest worker: {error}"))?;
@@ -166,6 +192,7 @@ impl Drop for RunningSession {
 }
 
 pub(super) fn run(
+    workload: Workload,
     backend: Backend,
     steps: usize,
     directions: &[Direction],
@@ -173,7 +200,7 @@ pub(super) fn run(
     if !(1..=MAX_STEPS).contains(&steps) || directions.len() > MAX_EVENTS {
         return Err("session exceeds its instruction or input limits".to_owned());
     }
-    let mut session = RunningSession::start(backend, steps)?;
+    let mut session = RunningSession::start(workload, backend, steps)?;
     let frames = directions
         .iter()
         .map(|&direction| session.advance(direction))
@@ -187,6 +214,7 @@ pub(super) fn run(
         return Err("guest journal does not match the delivered events".to_owned());
     }
     Ok(CompletedSession {
+        workload,
         frames,
         journal: finished.journal,
         exit_status: finished.exit_status,
@@ -213,7 +241,7 @@ fn install_exchange(
     report: Sender<Report>,
     presentation: Arc<Mutex<FramePresentation>>,
     native_draws: Arc<AtomicUsize>,
-    backend: Backend,
+    (workload, backend): (Workload, Backend),
     services: Arc<ServicesState>,
 ) -> Arc<Mutex<GuestProgress>> {
     let progress = Arc::new(Mutex::new(GuestProgress::default()));
@@ -241,6 +269,7 @@ fn install_exchange(
         }
     });
     let current = Arc::clone(&progress);
+    let frame_services = Arc::clone(&services);
     registry.register(MODULE, "XenoraPresent", move |args, _, _| {
         let mut state = lock(&current)?;
         let direction = state.pending.ok_or(ExitReason::ServiceAbiViolation)?;
@@ -253,6 +282,7 @@ fn install_exchange(
             || frame.height != HEIGHT
             || frame.draw_count != 1
             || !matches_frame_pixels(direction, &frame.pixels)
+            || frame_services.open_handle_count() != workload.retained_handles()
             || native_draws.load(Ordering::Relaxed) != backend.expected_native_draws(next)
         {
             return Err(ExitReason::ServiceAbiViolation);
@@ -305,6 +335,7 @@ fn matches_frame_pixels(direction: Direction, rgba: &[u8]) -> bool {
 }
 
 fn execute_guest(
+    workload: Workload,
     backend: Backend,
     steps: usize,
     commands: Receiver<Direction>,
@@ -329,11 +360,11 @@ fn execute_guest(
         report,
         Arc::clone(&presentation),
         Arc::clone(&native_draws),
-        backend,
+        (workload, backend),
         Arc::clone(&services),
     );
     let result = run_synthetic_startup(
-        GUEST,
+        workload.guest(),
         StartupLayout {
             image_base: 0x1_4000_0000,
             stack_top: 0x2_0001_0000,

@@ -12,11 +12,11 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 819 |
+| Canonical services | 820 |
 | Typed registry services | 252 |
-| Manual code registrations | 567 |
+| Manual code registrations | 568 |
 | Canonical libraries | 20 |
-| Implemented | 218 |
+| Implemented | 219 |
 | Partial | 598 |
 | Stub | 3 |
 | Data-import services | 7 |
@@ -45,7 +45,7 @@ independent acceptance or compatibility claims.
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
-| <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 9 | 0 | 9 | 0 | 0 | 9 | 0 | 0 |
+| <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 10 | 0 | 10 | 0 | 1 | 9 | 0 | 0 |
 | <code>xinput1_3.dll</code> | <code>other</code> | 8 | 0 | 8 | 0 | 0 | 8 | 0 | 0 |
 | <code>xinput1_4.dll</code> | <code>other</code> | 8 | 0 | 8 | 0 | 0 | 8 | 0 | 0 |
 | <code>xinput9_1_0.dll</code> | <code>other</code> | 4 | 0 | 4 | 0 | 0 | 4 | 0 | 0 |

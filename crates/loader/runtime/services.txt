@@ -1758,19 +1758,23 @@ service kernel32.dll VirtualFree(address: ptr, size: u64, kind: u32) -> bool32
 
 service kernel32.dll VirtualProtect(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32
     handler virtual_protect
-    status stub
+    status partial
     alias api-ms-win-core-memory-l1-1-0.dll
-    fails always: stops the guest with the runtime-limit fault; no protection changes
+    fails 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED or ERROR_INVALID_ADDRESS; executable protections and non-VirtualAlloc ownership are unsupported; invalid spans change nothing
     ref memoryapi.h VirtualProtect
-    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
+    test virtual_memory_query_and_protect_committed_pages
+    test virtual_memory_protect_failures_leave_memory_unchanged
+    test virtual_memory_services_cover_static_committed_regions
 
 service kernel32.dll VirtualQuery(address: ptr, information: out<48>, length: u64) -> u64
     handler virtual_query
-    status stub
+    status partial
     alias api-ms-win-core-memory-l1-1-0.dll
-    fails always: stops the guest with the runtime-limit fault; nothing is written
+    fails 0 with ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS
     ref memoryapi.h VirtualQuery
-    test memory_and_exception_stubs_stop_the_guest_and_change_nothing
+    test virtual_memory_query_and_protect_committed_pages
+    test virtual_memory_protect_failures_leave_memory_unchanged
+    test virtual_memory_services_cover_static_committed_regions
 
 service ucrtbase.dll sqrt(x: f64) -> f64
     handler sqrt

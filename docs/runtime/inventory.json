@@ -2617,7 +2617,7 @@
       "canonical_symbol": "VirtualProtect",
       "kind": "name",
       "library": "api-ms-win-core-memory-l1-1-0.dll",
-      "status": "stub",
+      "status": "partial",
       "symbol": "VirtualProtect"
     },
     {
@@ -2627,7 +2627,7 @@
       "canonical_symbol": "VirtualQuery",
       "kind": "name",
       "library": "api-ms-win-core-memory-l1-1-0.dll",
-      "status": "stub",
+      "status": "partial",
       "symbol": "VirtualQuery"
     },
     {
@@ -12954,7 +12954,7 @@
       "kind": "name",
       "library": "kernel32.dll",
       "source": "typed",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "VirtualProtect"
     },
@@ -12964,7 +12964,7 @@
       "kind": "name",
       "library": "kernel32.dll",
       "source": "typed",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "VirtualQuery"
     },
@@ -18270,9 +18270,9 @@
     "libraries": 21,
     "manual_services": 569,
     "ordinal_aliases": 0,
-    "partial": 628,
+    "partial": 630,
     "structural_consistency_findings": 0,
-    "stub": 2,
+    "stub": 0,
     "typed_registry_entries": 296,
     "typed_services": 296,
     "wanted_imports": null,

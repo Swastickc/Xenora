@@ -412,23 +412,37 @@ References include Microsoft's
 [handle duplication](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-duplicatehandle),
 [handle close](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-closehandle),
 [virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
-and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.
+[virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree),
+[virtual protection](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect),
+and [virtual query](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualquery) contracts.
 
-### Stubs a hosted C program binds
+### Virtual-memory query and protection
 
-`VirtualProtect` and `VirtualQuery` are declared `stub` in the typed
-registry (`docs/runtime/services.md`). A C program built with the mingw-w64
-runtime imports both and does not call them on a normal run: they serve its
-runtime pseudo-relocations. They exist so that such a program's imports bind.
+`VirtualQuery` reports the 48-byte x64 `MEMORY_BASIC_INFORMATION` layout for
+a committed region of Xenora's guest memory. The answer uses the region's
+current permissions, `MEM_COMMIT` state, private/image type inference and the
+allocation base Xenora actually tracks. A hole, including an uncommitted hole
+inside a retained module image span, fails with `ERROR_INVALID_ADDRESS` rather
+than inventing reserve or free-state bookkeeping the memory model does not
+record. A short output buffer receives only the requested prefix and the
+return value is the number of bytes copied.
 
-A call to either stops the guest with the runtime-limit fault
-(`IllegalInstruction(0xFE)`). The service writes nothing: no output buffer, no
-result and no last-error value. It does not return a made-up success or a
-failure code Windows would not give, so a program that needs one of them
-stops at that call. Neither changes a page protection nor describes a region;
-each needs work the runtime does not have yet (regions that can be split,
-translated-code invalidation for executable pages, recorded allocation
-bases).
+`VirtualProtect` supports the non-executable base protections Xenora already
+models: `PAGE_NOACCESS`, `PAGE_READONLY` and `PAGE_READWRITE`. The affected
+range is rounded to whole pages as documented, including a two-byte range
+straddling a page boundary. Complete committed coverage and one allocation
+ownership domain are validated before mutation; an invalid range leaves all
+pages and the old-protection output unchanged. The old protection of the first
+page is written before the change, so the output variable may itself lie in a
+range being made inaccessible. Split regions preserve the original allocation
+identity, keeping adjacent independent allocations distinct.
+
+Executable protection values, guard pages and mapped-file access modes remain
+unsupported because translated-code invalidation and those ownership models
+are outside the current slice. Heap, thread and Xmem-owned allocations are
+likewise refused rather than confused with `VirtualAlloc` ownership. The
+registrations remain partial; no Windows comparison, independent acceptance
+or game execution is claimed.
 
 ### Structured exceptions and CPU faults
 

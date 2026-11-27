@@ -10,8 +10,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | Generated adapters | 296 |
 | Unique handler implementations | 278 |
 | Implemented | 100 |
-| Partial | 194 |
-| Stub | 2 |
+| Partial | 196 |
+| Stub | 0 |
 | Conformance-tested through guest dispatch | 296 |
 | API-set aliases (not services) | 369 |
 | Independently accepted | 0 |
@@ -220,8 +220,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_initialize_narrow_environment` | `() -> i32` | partial | stops the guest when the table cannot be allocated |
 | `kernel32.dll!VirtualAlloc` | `(address: ptr, size: u64, kind: u32, protect: u32) -> ptr` | partial | 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_INVALID_ADDRESS or ERROR_NOT_ENOUGH_MEMORY |
 | `kernel32.dll!VirtualFree` | `(address: ptr, size: u64, kind: u32) -> bool32` | partial | 0 with ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS |
-| `kernel32.dll!VirtualProtect` | `(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32` | stub | always: stops the guest with the runtime-limit fault; no protection changes |
-| `kernel32.dll!VirtualQuery` | `(address: ptr, information: out<48>, length: u64) -> u64` | stub | always: stops the guest with the runtime-limit fault; nothing is written |
+| `kernel32.dll!VirtualProtect` | `(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32` | partial | 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED or ERROR_INVALID_ADDRESS; executable protections and non-VirtualAlloc ownership are unsupported; invalid spans change nothing |
+| `kernel32.dll!VirtualQuery` | `(address: ptr, information: out<48>, length: u64) -> u64` | partial | 0 with ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS |
 | `ucrtbase.dll!sqrt` | `(x: f64) -> f64` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!sqrtf` | `(x: f32) -> f32` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!fabs` | `(x: f64) -> f64` | implemented | never |

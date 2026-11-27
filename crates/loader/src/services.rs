@@ -51,6 +51,7 @@ pub(crate) mod threads;
 mod user32;
 mod winhttp;
 mod winsock;
+mod xinput;
 
 use crate::runtime::HResult;
 pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
@@ -827,6 +828,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry::register(registry, &state);
     file_mapping::register(registry, &state);
     user32::register(registry, &state);
+    xinput::register(registry);
     advapi::register(registry, &state);
     advapi::register_tokens(registry, &state);
     advapi::register_safer(registry, &state);

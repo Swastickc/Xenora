@@ -430,6 +430,23 @@ together, so both names resolve in each.
 `crates/loader/tests/startup_info.rs` runs original C and C++ programs through
 them. Nothing was compared with Windows.
 
+### XInput controller state
+
+`XInputGetState` resolves through `xinput1_4.dll`, `xinput9_1_0.dll` and
+`xinputuap.dll`. The public structure layout is 16 bytes: a 32-bit packet
+number followed by the packed 12-byte gamepad state. Xenora does not yet bridge
+host controllers into the guest, so slots zero through three honestly return
+`ERROR_DEVICE_NOT_CONNECTED` and leave the output bytes unchanged. Indexes
+outside zero through three return `ERROR_BAD_ARGUMENTS`. Null, unwritable or
+truncated output ranges also return `ERROR_BAD_ARGUMENTS` before any mutation;
+Microsoft does not document that pointer-validation case, so this is Xenora's
+memory-safety boundary rather than Windows comparison evidence.
+
+Vibration, capabilities, keystrokes, headset and battery interfaces, controller
+hotplugging and any actual host-input bridge remain unsupported. The current
+negative result is ABI and error-path evidence only; it is not gamepad input
+support and was not compared with Windows or Xbox hardware.
+
 ### Guest heaps
 
 `GetProcessHeap`, `HeapAlloc`, `HeapSize`, and `HeapFree` expose the

@@ -45,6 +45,9 @@ independent acceptance or compatibility claims.
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
 | <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 9 | 0 | 9 | 0 | 0 | 9 | 0 | 0 |
+| <code>xinput1_4.dll</code> | <code>other</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
+| <code>xinput9_1_0.dll</code> | <code>other</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
+| <code>xinputuap.dll</code> | <code>other</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
 | <code>xmem.dll</code> | <code>xbox-gaming</code> | 2 | 0 | 2 | 0 | 0 | 1 | 1 | 0 |
 
 The full canonical rows, including kind, data-import, source and explicit-status

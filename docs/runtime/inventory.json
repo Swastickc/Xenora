@@ -16790,6 +16790,36 @@
     },
     {
       "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput9_1_0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
       "family": "xbox-gaming",
       "kind": "name",
       "library": "xmem.dll",

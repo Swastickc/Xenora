@@ -876,8 +876,9 @@ fn formatted_output_reaches_the_captured_standard_streams() {
 
     // The option bits that concern floating point. With the three-digit
     // exponent bit the e style has three; without the standard rounding bit
-    // no floating point is printed and the guest stops, while a call that
-    // formats none is unaffected.
+    // the conversion still prints, rounding ties away from zero instead of
+    // to the even digit - and 1.5 at six fractional digits is exact, so the
+    // two modes agree here.
     let (mut fresh, [_, out, _]) = stdio_guest();
     let slots = [1.5f64.to_bits()];
     let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS | 0x10, out, b"%e", &slots);
@@ -886,10 +887,13 @@ fn formatted_output_reaches_the_captured_standard_streams() {
     for options in [0x04, 0x00, 0x14] {
         let (count, exit) = print_with(&mut fresh, options, out, b" %d", &[7]);
         assert_eq!((count, exit), (2, ExitReason::Halt), "{options:#x}");
-        let (_, exit) = print_with(&mut fresh, options, out, b"%f", &slots);
-        assert_eq!(exit, LIMIT, "{options:#x}");
+        let (count, exit) = print_with(&mut fresh, options, out, b"%f", &slots);
+        assert_eq!((count, exit), (8, ExitReason::Halt), "{options:#x}");
     }
-    assert_eq!(fresh.state.standard_output(), b"1.500000e+000 7 7 7");
+    assert_eq!(
+        fresh.state.standard_output(),
+        b"1.500000e+000 71.500000 71.500000 71.500000"
+    );
 
     // Several line feeds in one call, text with none, and an empty format.
     let (mut guest, [_, out, _]) = stdio_guest();
@@ -914,6 +918,46 @@ fn formatted_output_reaches_the_captured_standard_streams() {
             b"  007|ff  |",
             "{options:#x}"
         );
+    }
+}
+
+#[test]
+fn hexadecimal_float_rounding_follows_the_rounding_mode() {
+    // 1.53125 is exactly 0x1.88p+0: at precision 1 the first dropped digit
+    // is exactly half a unit of the last kept one. Ties-to-even keeps the
+    // even digit 8; the legacy mode rounds away from zero, up to 9. The
+    // pre-2015 library never printed hexadecimal floating-point at all, so
+    // the legacy answer is Xenora's consistent extension of its documented
+    // decimal rounding rule, not measured behavior.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.53125f64.to_bits()];
+    let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS, out, b"%.1a", &slots);
+    assert_eq!((count, exit), (8, ExitReason::Halt));
+    assert_eq!(fresh.state.standard_output(), b"0x1.8p+0");
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS & !0x20, out, b"%.1a", &slots);
+    assert_eq!((count, exit), (8, ExitReason::Halt));
+    assert_eq!(fresh.state.standard_output(), b"0x1.9p+0");
+
+    // The halfway case at the leading digit: 1.5 is exactly 0x1.8p+0, and
+    // the kept digit 1 is odd, so both modes round it up.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.5f64.to_bits()];
+    for options in [MINGW_OPTIONS, MINGW_OPTIONS & !0x20] {
+        let before = fresh.state.standard_output().len();
+        let (count, exit) = print_with(&mut fresh, options, out, b"%.0A", &slots);
+        assert_eq!((count, exit), (6, ExitReason::Halt), "{options:#x}");
+        assert_eq!(&fresh.state.standard_output()[before..], b"0X2P+0");
+    }
+    // 1.25 is 0x1.4p+0: the dropped digit is below half, so both modes
+    // round it down.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.25f64.to_bits()];
+    for options in [MINGW_OPTIONS, MINGW_OPTIONS & !0x20] {
+        let before = fresh.state.standard_output().len();
+        let (count, exit) = print_with(&mut fresh, options, out, b"%.0a", &slots);
+        assert_eq!((count, exit), (6, ExitReason::Halt), "{options:#x}");
+        assert_eq!(&fresh.state.standard_output()[before..], b"0x1p+0");
     }
 }
 
@@ -8512,4 +8556,88 @@ fn narrow_decimal_parses_follow_the_c_contract() {
     let at = place(&mut guest, TEXT + 0x3300, b"6.25");
     let bits = math_call(&mut guest, "atof", &[], &[at]);
     assert_eq!(f64::from_bits(bits as u64), 6.25);
+}
+
+// Itanium C++ ABI guard variables (#934). The -1 results are low 32-bit
+// values, the same RAX shape a C++ compiler reads after an `int` result.
+
+const GUARD_MINUS_ONE: u64 = 0xFFFF_FFFF;
+const INVALID_GUARD_ERROR: u64 = 87; // ERROR_INVALID_PARAMETER
+
+#[test]
+fn guard_acquire_once_release_and_second_acquire_returns_zero() {
+    let mut guest = Guest::new();
+    guest.memory.write_u8(SCRATCH, 0).unwrap();
+
+    assert_eq!(guest.call("__cxa_guard_acquire", &[SCRATCH]), 1);
+    // Acquiring ownership does not write the initialized byte.
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+    guest.call("__cxa_guard_release", &[SCRATCH]);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 1);
+    assert_eq!(guest.call("__cxa_guard_acquire", &[SCRATCH]), 0);
+
+    // A null, unaligned or unmapped guard is refused before it can be read.
+    for guard in [0, SCRATCH + 1, 0x7000_0000] {
+        assert_eq!(
+            guest.call("__cxa_guard_acquire", &[guard]),
+            GUARD_MINUS_ONE,
+            "guard {guard:#x}"
+        );
+        assert_eq!(guest.last_error(), INVALID_GUARD_ERROR);
+    }
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 1);
+}
+
+#[test]
+fn contended_and_reentrant_guard_acquire_fail_without_mutating() {
+    let mut guest = Guest::new();
+    guest.memory.write_u8(SCRATCH, 0).unwrap();
+    assert_eq!(guest.call("__cxa_guard_acquire", &[SCRATCH]), 1);
+
+    // A different guest thread cannot wait on this single-threaded machine.
+    guest.teb = 0x10000;
+    assert_eq!(
+        guest.call("__cxa_guard_acquire", &[SCRATCH]),
+        GUARD_MINUS_ONE
+    );
+    assert_eq!(guest.last_error(), INVALID_GUARD_ERROR);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+
+    // The owning thread cannot recursively acquire its own guard either.
+    guest.teb = 0;
+    assert_eq!(
+        guest.call("__cxa_guard_acquire", &[SCRATCH]),
+        GUARD_MINUS_ONE
+    );
+    assert_eq!(guest.last_error(), INVALID_GUARD_ERROR);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+
+    // Refusing the other callers leaves the original owner in charge.
+    guest.call("__cxa_guard_release", &[SCRATCH]);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 1);
+    assert_eq!(guest.call("__cxa_guard_acquire", &[SCRATCH]), 0);
+}
+
+#[test]
+fn invalid_guard_release_and_abort_fail_closed() {
+    let mut guest = Guest::new();
+    guest.memory.write_u8(SCRATCH, 0).unwrap();
+
+    let (_, exit) = guest.run("__cxa_guard_release", &[SCRATCH]);
+    assert_eq!(exit, LIMIT);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+
+    let (_, exit) = guest.run("__cxa_guard_abort", &[SCRATCH]);
+    assert_eq!(exit, LIMIT);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+
+    assert_eq!(guest.call("__cxa_guard_acquire", &[SCRATCH]), 1);
+    guest.teb = 0x10000;
+    let (_, exit) = guest.run("__cxa_guard_release", &[SCRATCH]);
+    assert_eq!(exit, LIMIT, "a different thread cannot release the guard");
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+    guest.teb = 0;
+    guest.call("__cxa_guard_abort", &[SCRATCH]);
+    assert_eq!(guest.memory.read_u8(SCRATCH).unwrap(), 0);
+    assert_eq!(guest.call("__cxa_guard_acquire", &[SCRATCH]), 1);
 }

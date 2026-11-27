@@ -126,7 +126,7 @@ Compiler configuration:
 
 | Step | Command |
 | --- | --- |
-| Compile and link | `x86_64-w64-mingw32-g++ -O<level> -fno-rtti -fno-exceptions -fno-threadsafe-statics -o <name>.exe guest_cpp.cpp` |
+| Compile and link | `x86_64-w64-mingw32-g++ -O<level> -fno-rtti -fno-exceptions -o <name>.exe guest_cpp.cpp` |
 
 It is built at `-O0`, `-O1`, `-O2` and `-Os`, and once more as a control that
 imports a service no Xenora service provides, so the loader must refuse the
@@ -147,21 +147,23 @@ mingw-built fixtures, the script requires the compiler driver, the compiler
 proper, the assembler and the linker, and every library they load that is a
 file on disk, to be ARM64, and checks each with `file` and `lipo -archs`.
 
-## C++ array allocation program
+## A C++ guard-variable program
 
-`cxx_array.cpp` is an original no-CRT C++ program for the public Itanium ABI
-array allocation operators (#936). Runtime-sized `new[]` expressions make the
-compiler emit `_Znay` and `_ZdaPv` itself; the program allocates two live
-arrays, verifies that their bytes are distinct, frees them, then repeats with
-zero-length arrays. It reports the observed addresses and values through a
-`.gate` section and exits with zero only when every check passes.
+`cxx_guard.cpp` is an original no-CRT C++ program for the Itanium C++ ABI
+guard services (#934). A function-local static with a noinline initializer
+makes the compiler emit `__cxa_guard_acquire` and `__cxa_guard_release`; the
+program also calls all three guard services directly with its own aligned
+guards. It checks that release sets the ABI's initialized byte, abort clears
+ownership, a second acquire reports completion, and null, unaligned and
+unmapped guards return -1. It reports the observed values in a `.gate` section
+and exits with zero when every check passes.
 
-`build-cxx-array.sh [output directory]` builds x86-64 PE32+ variants at `-O0`,
-`-O1`, `-O2` and `-Os` with native clang++ and LLD, using generated import
-libraries and no C or C++ runtime. It checks that host tools and the libraries
-they load are ARM64. `cargo test -p xenora-loader --test
-guest_cpp_array_allocation` builds, runs and checks those four executables and
-fails, rather than skips, when the native tools are absent.
+`build-cxx-guard.sh [output directory]` builds four optimization levels from
+that one source, plus controls for recursive acquisition and for release and
+abort by a non-owner. `cargo test -p xenora-loader --test guest_cxx_guard_abi`
+builds the fixtures and runs them through the loader, the standard services and
+the DBT. The test fails, and does not skip, when the native ARM64 clang++ or
+LLD is missing. No executable is committed.
 
 ## A C++ program that throws
 

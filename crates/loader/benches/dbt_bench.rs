@@ -3,7 +3,7 @@
 //! Synthetic interpreter and DBT timings.
 //!
 //! Set `XENORA_DBT_BENCH_JSON=<path>` to also write the results as one JSON
-//! document (format version 1). The text output does not change. Values the
+//! document (format version 1). Values the
 //! benchmark cannot determine, such as the git revision outside a checkout,
 //! are written as `null`. The benchmark cannot see build settings such as LTO,
 //! so `XENORA_DBT_BENCH_BUILD_LABEL=<text>` records a label of your choosing
@@ -179,6 +179,21 @@ fn check(result: ExecutionResult, workload: &Workload) {
     assert_eq!(result.exit_reason, ExitReason::Halt);
     assert_eq!(result.instructions_executed, workload.instructions);
     assert_eq!(result.final_state.get(Register::Rax), workload.final_rax);
+}
+
+// This compares all bytes emitted during the cold run with the complete input
+// fixture, not individual instruction encodings or the live code-cache size.
+// Host addresses in emitted code can make byte counts vary across runs.
+fn code_size_line(guest_bytes: usize, native_bytes: usize) -> String {
+    if guest_bytes == 0 {
+        return format!(
+            "Last measured cold DBT code size: {native_bytes} emitted native bytes; empty guest fixture (ratio unavailable)"
+        );
+    }
+    let ratio = native_bytes as f64 / guest_bytes as f64;
+    format!(
+        "Last measured cold DBT code size: {guest_bytes} guest fixture bytes, {native_bytes} emitted native bytes ({ratio:.2}x); includes block overhead and any retranslations"
+    )
 }
 
 fn percentile(sorted: &[Duration], fraction: f64) -> Duration {
@@ -957,6 +972,10 @@ fn main() {
         "Cold DBT compiled {} blocks and emitted {} native bytes in {} dispatches",
         metrics.blocks_compiled, metrics.native_bytes_emitted, metrics.dbt_dispatches
     );
+    println!(
+        "{}",
+        code_size_line(workload.code.len(), metrics.native_bytes_emitted)
+    );
 
     if let Some(path) = std::env::var_os("XENORA_DBT_BENCH_JSON") {
         let info = run_info(workload.code.len(), warmup_count);
@@ -968,6 +987,20 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn code_size_report_compares_fixture_and_emitted_bytes() {
+        use super::code_size_line;
+
+        assert_eq!(
+            code_size_line(20, 50),
+            "Last measured cold DBT code size: 20 guest fixture bytes, 50 emitted native bytes (2.50x); includes block overhead and any retranslations"
+        );
+        assert_eq!(
+            code_size_line(0, 50),
+            "Last measured cold DBT code size: 50 emitted native bytes; empty guest fixture (ratio unavailable)"
+        );
+    }
+
     #[test]
     fn single_sample_has_no_spread() {
         use super::{Duration, percentile};

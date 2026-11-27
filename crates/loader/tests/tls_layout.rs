@@ -18,7 +18,7 @@
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
 use xenora_loader::{
     ExitReason, GuestMemory, ImportRegistry, MemoryError, MemoryPermissions as P, ParsedPe,
-    Register, TlsDirectory, parse_tls_directory, setup_tls,
+    Register, TlsDirectory, TlsError, parse_tls_directory, setup_tls,
 };
 
 const IMAGE: u64 = 0x1_4000_0000;
@@ -132,6 +132,27 @@ fn an_inverted_template_range_is_rejected_before_anything_is_mapped() {
         memory.read_u64(THREAD_TLS),
         Err(MemoryError::UnmappedAddress(THREAD_TLS))
     );
+}
+
+#[test]
+fn invalid_tls_alignment_leaves_the_index_and_thread_array_untouched() {
+    let mut memory = image(IMAGE);
+    let tls = TlsDirectory {
+        characteristics: 15 << 20,
+        ..directory(20, 12)
+    };
+
+    assert_eq!(
+        setup_tls(&tls, IMAGE, IMAGE, &mut memory, THREAD_TLS),
+        Err(TlsError::InvalidAlignmentEncoding(15))
+    );
+    assert_eq!(memory.read_u64(INDEX), Ok(u64::MAX));
+    for address in [THREAD_TLS, THREAD_TLS + 0x1000] {
+        assert_eq!(
+            memory.read_u64(address),
+            Err(MemoryError::UnmappedAddress(address))
+        );
+    }
 }
 
 fn static_tls_fixture(size: u32, characteristics: u32) -> Vec<u8> {

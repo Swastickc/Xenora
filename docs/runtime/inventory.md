@@ -12,18 +12,18 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 789 |
-| Typed registry services | 251 |
-| Manual code registrations | 538 |
-| Canonical libraries | 16 |
-| Implemented | 216 |
-| Partial | 569 |
-| Stub | 4 |
+| Canonical services | 817 |
+| Typed registry services | 252 |
+| Manual code registrations | 565 |
+| Canonical libraries | 20 |
+| Implemented | 218 |
+| Partial | 596 |
+| Stub | 3 |
 | Data-import services | 7 |
-| Aliases of every kind | 832 |
-| API-set aliases | 702 |
+| Aliases of every kind | 836 |
+| API-set aliases | 703 |
 | Ordinal aliases | 0 |
-| Statuses never explicitly set | 74 |
+| Statuses never explicitly set | 76 |
 | Duplicate canonical registrations | 0 |
 | Structural consistency findings | 0 |
 
@@ -39,14 +39,18 @@ independent acceptance or compatibility claims.
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
 | <code>msvcrt.dll</code> | <code>c-runtime</code> | 30 | 4 | 26 | 7 | 14 | 16 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 277 | 188 | 89 | 0 | 85 | 191 | 1 | 8 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 280 | 189 | 91 | 0 | 87 | 192 | 1 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 6 | 0 | 6 | 0 | 0 | 6 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 11 | 0 | 11 | 0 | 0 | 11 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
 | <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 9 | 0 | 9 | 0 | 0 | 9 | 0 | 0 |
-| <code>xmem.dll</code> | <code>xbox-gaming</code> | 2 | 0 | 2 | 0 | 0 | 1 | 1 | 0 |
+| <code>xinput1_3.dll</code> | <code>other</code> | 8 | 0 | 8 | 0 | 0 | 8 | 0 | 0 |
+| <code>xinput1_4.dll</code> | <code>other</code> | 8 | 0 | 8 | 0 | 0 | 8 | 0 | 0 |
+| <code>xinput9_1_0.dll</code> | <code>other</code> | 4 | 0 | 4 | 0 | 0 | 4 | 0 | 0 |
+| <code>xinputuap.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
+| <code>xmem.dll</code> | <code>xbox-gaming</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
 
 The full canonical rows, including kind, data-import, source and explicit-status
 metadata, are in `inventory.json`.
@@ -55,9 +59,9 @@ metadata, are in `inventory.json`.
 
 | Alias kind | Count |
 | --- | --- |
-| API-set | 702 |
+| API-set | 703 |
 | Ordinal | 0 |
-| Other module | 130 |
+| Other module | 133 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.
 
@@ -111,6 +115,8 @@ before analysis; structurally valid discrepancies remain visible here.
 | <code>msvcrt.dll!srand (name)</code> | implemented | manual |
 | <code>msvcrt.dll!sscanf (name)</code> | implemented | manual |
 | <code>msvcrt.dll!vfprintf (name)</code> | implemented | manual |
+| <code>ucrtbase.dll!_chdir (name)</code> | implemented | manual |
+| <code>ucrtbase.dll!_getcwd (name)</code> | implemented | manual |
 | <code>ucrtbase.dll!_onexit (name)</code> | implemented | manual |
 | <code>ucrtbase.dll!_stricmp (name)</code> | implemented | manual |
 | <code>ucrtbase.dll!_strnicmp (name)</code> | implemented | manual |

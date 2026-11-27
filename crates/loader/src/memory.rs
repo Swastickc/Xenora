@@ -99,6 +99,9 @@ const FRONT_SCAN: usize = 4;
 enum AllocationKind {
     ImageOrStatic,
     Virtual,
+    /// Memory returned by `xmem.dll!XMemAlloc`; it shares the virtual-memory
+    /// budget but has a distinct ownership domain from `VirtualAlloc`.
+    Xmem,
     Heap(u64),
     /// Stack, guard or TEB of a guest thread; only the scheduler frees it.
     Thread,
@@ -239,6 +242,15 @@ impl GuestMemory {
         self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Virtual)
     }
 
+    pub(crate) fn map_xmem_allocation(
+        &mut self,
+        requested_base: u64,
+        size: usize,
+        permissions: MemoryPermissions,
+    ) -> Result<u64, MemoryError> {
+        self.map_dynamic_allocation(requested_base, size, permissions, AllocationKind::Xmem)
+    }
+
     /// Bytes mapped in total, held by virtual allocations, and held by heap
     /// blocks. Each of the last two kinds is bounded by [`DYNAMIC_BUDGET`].
     pub(crate) fn usage(&self) -> (u64, u64, u64) {
@@ -342,6 +354,10 @@ impl GuestMemory {
             .iter()
             .filter(|region| match allocation {
                 AllocationKind::Heap(_) => matches!(region.allocation, AllocationKind::Heap(_)),
+                AllocationKind::Virtual | AllocationKind::Xmem => matches!(
+                    region.allocation,
+                    AllocationKind::Virtual | AllocationKind::Xmem
+                ),
                 _ => region.allocation == allocation,
             })
             .map(|region| region.data.len())
@@ -429,6 +445,10 @@ impl GuestMemory {
 
     pub(crate) fn release_virtual_allocation(&mut self, base: u64) -> bool {
         self.release_dynamic_allocation(base, AllocationKind::Virtual)
+    }
+
+    pub(crate) fn release_xmem_allocation(&mut self, base: u64) -> bool {
+        self.release_dynamic_allocation(base, AllocationKind::Xmem)
     }
 
     pub(crate) fn release_heap_allocation(&mut self, heap: u64, base: u64) -> bool {
@@ -625,6 +645,11 @@ impl GuestMemory {
         result
     }
 
+    /// Return whether the complete span is writable without mutating it.
+    pub(crate) fn can_write(&self, address: u64, len: usize) -> bool {
+        self.resolve(address, len, Some("write")).is_ok()
+    }
+
     /// Read raw bytes from guest memory at the specified address, checking permissions.
     pub fn read_bytes(&self, address: u64, dst: &mut [u8]) -> Result<(), MemoryError> {
         if let Some((index, range)) = self.contiguous_region(address, dst.len())
@@ -753,6 +778,29 @@ mod tests {
         assert!(memory.read_u8(address).is_err());
         assert_eq!(memory.read_u8(retained), Ok(0));
         assert_ne!(memory.create_private_heap(0).unwrap(), private);
+    }
+
+    #[test]
+    fn xmem_allocations_have_a_distinct_owner_and_share_the_virtual_budget() {
+        let mut memory = GuestMemory::new();
+        let before = memory.usage().1;
+        let virtual_base = memory
+            .map_virtual_allocation(0, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let xmem_base = memory
+            .map_xmem_allocation(0, 0x2000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        assert_ne!(virtual_base, xmem_base);
+        assert_eq!(memory.usage().1, before + 0x3000);
+
+        assert!(!memory.release_virtual_allocation(xmem_base));
+        assert!(!memory.release_xmem_allocation(virtual_base));
+        assert_eq!(memory.read_u8(xmem_base), Ok(0));
+        assert_eq!(memory.read_u8(virtual_base), Ok(0));
+
+        assert!(memory.release_xmem_allocation(xmem_base));
+        assert!(memory.release_virtual_allocation(virtual_base));
+        assert_eq!(memory.usage().1, before);
     }
 
     #[test]

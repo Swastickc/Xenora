@@ -51,11 +51,13 @@ pub(crate) mod threads;
 mod user32;
 mod winhttp;
 mod winsock;
+mod xinput;
 
 use crate::runtime::HResult;
 pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
 pub use crt_streams::MAX_CAPTURED_OUTPUT;
 pub use startup_info::{ProcessStartupInfo, StartupInfoError};
+pub use xinput::XInputControllerState;
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -267,6 +269,7 @@ pub struct ServicesState {
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
     crt_clock: Mutex<crt_clock::ClockServices>,
+    crt_directory: Mutex<String>,
     pub(crate) threads: Mutex<threads::ThreadTable>,
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
@@ -286,6 +289,8 @@ pub struct ServicesState {
     exit_status: Mutex<Option<u32>>,
     crt_startup: Mutex<crt_startup::CrtStartup>,
     winhttp: Mutex<winhttp::WinHttpHandles>,
+    xinput: Mutex<xinput::Slots>,
+    xinput_enabled: AtomicBool,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -354,6 +359,7 @@ impl ServicesState {
             synch: Mutex::default(),
             crt_streams: Mutex::default(),
             crt_clock: Mutex::default(),
+            crt_directory: Mutex::new(String::new()),
             console: Mutex::default(),
             threads: Mutex::default(),
             hooks: Arc::default(),
@@ -363,6 +369,8 @@ impl ServicesState {
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
+            xinput: Mutex::default(),
+            xinput_enabled: AtomicBool::new(true),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -395,6 +403,14 @@ impl ServicesState {
 
     fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
         self.crt_arguments.lock().expect("program arguments")
+    }
+
+    pub(crate) fn xinput_input_enabled(&self) -> bool {
+        self.xinput_enabled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_xinput_input_enabled(&self, enabled: bool) {
+        self.xinput_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn file_apis_use_ansi(&self) -> bool {
@@ -818,12 +834,14 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_conio(registry);
     crt::register_spawn_refusal(registry);
     crt::register_utilities(registry);
+    crt::register_directories(registry, &state);
     crt_callbacks::register(registry, &state);
     environment::register(registry, &state);
     errors::register(registry, &state);
     registry::register(registry, &state);
     file_mapping::register(registry, &state);
     user32::register(registry, &state);
+    xinput::register(registry, &state);
     advapi::register(registry, &state);
     advapi::register_tokens(registry, &state);
     advapi::register_safer(registry, &state);
@@ -908,22 +926,31 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             .fetch_add(aligned_size as u64, Ordering::SeqCst);
 
         Ok(mem
-            .map_virtual_allocation(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
+            .map_xmem_allocation(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
             .unwrap_or(0))
     };
     registry.register("xmem.dll", "XMemAlloc", handler);
     registry.set_status("xmem.dll", "XMemAlloc", ServiceStatus::Partial);
 
     // 9. XMemFree(pAddress, dwAllocAttributes) -> VOID (Xbox Scarlett in xmem.dll)
+    // The public contract has no error return. Xenora therefore releases only
+    // the exact base of an allocation its XMemAlloc service created; any other
+    // ownership claim is a runtime-limit violation rather than a silent no-op
+    // that could hide use-after-free corruption. Attribute bits are not yet
+    // interpreted because allocation attributes themselves remain unsupported.
     let handler = move |args: &crate::imports::Win64Args,
                         _cpu: &mut crate::cpu::CpuState,
                         mem: &mut GuestMemory|
           -> Result<u64, ExitReason> {
-        let _addr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let addr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let _attr = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
+        if !mem.release_xmem_allocation(addr) {
+            return Err(ExitReason::IllegalInstruction(0xFE));
+        }
         Ok(0)
     };
     registry.register("xmem.dll", "XMemFree", handler);
-    registry.set_status("xmem.dll", "XMemFree", ServiceStatus::Stub);
+    registry.set_status("xmem.dll", "XMemFree", ServiceStatus::Partial);
 
     // 10. Synthetic Test Graphics Device Creation (xenora_fixture.dll)
     // Prototype graphics device creation for original integration fixtures.
@@ -1455,7 +1482,7 @@ pub(crate) mod handlers {
         locale: u64,
         arguments: u64,
     ) -> Outcome<i32> {
-        crt_scan::vsscanf(
+        let outcome = crt_scan::scan_string(
             context.memory,
             options,
             buffer,
@@ -1463,7 +1490,8 @@ pub(crate) mod handlers {
             format,
             locale,
             arguments,
-        )
+        );
+        or_errno(context, outcome)
     }
 
     pub fn vsprintf(
@@ -1541,6 +1569,33 @@ pub(crate) mod handlers {
         // The secure stream form validates what the plain one validates, and
         // `%n` is invalid in both, so they are the same here.
         vfprintf(context, options, stream, format, locale, arguments)
+    }
+
+    // Formatted input (#605): `crt_scan.rs` holds the rules. The string form
+    // needs no stream state; the stream form reads `stdin` or a file.
+
+    pub fn vfscanf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.scan(
+                context.memory,
+                &drive,
+                options,
+                stream,
+                format,
+                locale,
+                arguments,
+            )
+        };
+        or_errno(context, outcome)
     }
 
     pub fn putchar(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {

@@ -223,6 +223,10 @@ enum GuestObject {
     },
 }
 
+/// The live views of file mappings machine-wide: guest base address to
+/// view length and the object's backing store.
+type MappingViews = BTreeMap<u64, (u64, Arc<Mutex<Vec<u8>>>)>;
+
 #[derive(Default)]
 struct ObjectState {
     priority: i32,
@@ -239,7 +243,7 @@ struct ObjectState {
     /// Live views of file mappings: guest base address to (length, backing
     /// store). Machine-wide because only one process executes at a time,
     /// so the running process owns every live view.
-    mapping_views: BTreeMap<u64, (u64, Arc<Mutex<Vec<u8>>>)>,
+    mapping_views: MappingViews,
     next_temp: u32,
 }
 

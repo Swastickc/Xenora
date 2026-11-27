@@ -44,6 +44,11 @@ const PAGE_PROTECTIONS: u32 = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40;
 /// exhausting the host. 256 MiB is far beyond any shared-memory hand-off.
 const MAX_BACKING_SIZE: u64 = 256 * 1024 * 1024;
 
+/// The shared content of one mapping object.
+type Backing = Arc<std::sync::Mutex<Vec<u8>>>;
+/// A live view: guest base, length and backing store.
+type ViewEntry = (u64, u64, Backing);
+
 fn backing_of(
     state: &Arc<ServicesState>,
     object: u64,
@@ -57,12 +62,7 @@ fn backing_of(
 
 /// Copy the view's guest bytes back into its backing store. A view whose
 /// memory is gone - the process that owned it has exited - is skipped.
-fn copy_view_to_backing(
-    memory: &GuestMemory,
-    base: u64,
-    length: u64,
-    backing: &Arc<std::sync::Mutex<Vec<u8>>>,
-) {
+fn copy_view_to_backing(memory: &GuestMemory, base: u64, length: u64, backing: &Backing) {
     let mut bytes = vec![0u8; length as usize];
     if memory.read_bytes(base, &mut bytes).is_err() {
         return;
@@ -75,7 +75,7 @@ fn copy_view_to_backing(
 /// Every live view belongs to the running process, since only one process
 /// executes at a time: copy them all out before a spawn suspends it.
 pub(super) fn sync_views_to_backings(state: &Arc<ServicesState>, memory: &GuestMemory) {
-    let views: Vec<(u64, u64, Arc<std::sync::Mutex<Vec<u8>>>)> = {
+    let views: Vec<ViewEntry> = {
         let objects = state.objects.lock().expect("guest object state");
         objects
             .mapping_views

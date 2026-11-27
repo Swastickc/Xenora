@@ -194,6 +194,13 @@ name = "xenora-import-gen"
 version = "0.1.0"
 
 [[package]]
+name = "xenora-input"
+version = "0.1.0"
+dependencies = [
+ "xenora-loader",
+]
+
+[[package]]
 name = "xenora-isa"
 version = "0.1.0"
 

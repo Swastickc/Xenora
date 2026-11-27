@@ -943,27 +943,6 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         )
     });
 
-    // getenv_s over the empty environment: every variable is undefined,
-    // which is the documented empty answer, not an error.
-    registry.register(UCRT, "getenv_s", |args, cpu, memory| {
-        let (size_at, buffer, buffer_size, name) = (args.rcx, args.rdx, args.r8, args.r9);
-        if size_at == 0 || name == 0 {
-            set_errno(memory, cpu.gs_base, EINVAL)?;
-            return Ok(u64::from(EINVAL));
-        }
-        memory
-            .write_u64(size_at, 0)
-            .map_err(ExitReason::MemoryFault)?;
-        // Undefined variable: length zero, the buffer untouched when it
-        // cannot hold even the terminator - documented as no error.
-        if buffer != 0 && buffer_size != 0 {
-            memory
-                .write_u8(buffer, 0)
-                .map_err(ExitReason::MemoryFault)?;
-        }
-        Ok(0)
-    });
-
     // The copying and concatenation forms mingw inlines least often.
     registry.register(UCRT, "strcpy", |args, _, memory| {
         copy_string(memory, args.rcx, args.rdx, u64::MAX)?;
@@ -1248,7 +1227,6 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         ("_ultoa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_ui64toa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_itoa_s", "api-ms-win-crt-convert-l1-1-0.dll"),
-        ("getenv_s", "api-ms-win-crt-environment-l1-1-0.dll"),
     ] {
         registry.alias(api, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);

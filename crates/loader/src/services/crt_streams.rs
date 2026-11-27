@@ -908,6 +908,17 @@ impl StandardStreams {
     /// indicators separate the two, as the documentation asks. A null buffer
     /// or stream is `EINVAL` with a return of 0. More than this runtime
     /// transfers at once stops the guest, as for `fwrite`.
+    /// Bytes of the standard input, honoring a redirection: when fd 0 was
+    /// duplicated onto a pipe or file the stream reads what the descriptor
+    /// names, as the CRT's stdin is backed by its descriptor. The captured
+    /// input bytes answer only while fd 0 is the console's own.
+    fn input_bytes(&mut self, drive: &ObjectState, count: usize) -> Result<Vec<u8>, u32> {
+        if self.opened.has_descriptor(0) {
+            return self.opened.descriptor_read(drive, 0, count);
+        }
+        Ok(self.input.take(count))
+    }
+
     pub(super) fn read_items(
         &mut self,
         memory: &mut GuestMemory,
@@ -935,7 +946,10 @@ impl StandardStreams {
                 if self.closed[0] || !self.input.orient(false) {
                     return Ok(Err(Failed(0, EBADF)));
                 }
-                self.input.take(length as usize)
+                match self.input_bytes(drive, length as usize) {
+                    Ok(bytes) => bytes,
+                    Err(errno) => return Ok(Err(Failed(0, errno))),
+                }
             }
             Stream::File(file) => match self.opened.read_bytes(drive, file, length as usize) {
                 Ok(bytes) => {
@@ -971,6 +985,13 @@ impl StandardStreams {
             Stream::Input => {
                 if self.closed[0] {
                     return Ok(Err(Failed(-1, EBADF)));
+                }
+                if self.opened.has_descriptor(0) {
+                    return match self.opened.descriptor_read(drive, 0, 1) {
+                        Ok(bytes) if !bytes.is_empty() => Ok(Ok(i32::from(bytes[0]))),
+                        Ok(_) => Ok(Ok(-1)),
+                        Err(errno) => Ok(Err(Failed(-1, errno))),
+                    };
                 }
                 Ok(Ok(match self.input.character() {
                     Some(byte) => i32::from(byte),
@@ -1615,6 +1636,15 @@ impl StandardStreams {
             Stream::Input => {
                 if self.closed[0] || !self.input.orient(false) {
                     return Ok(Err(Failed(-1, EBADF)));
+                }
+                if self.opened.has_descriptor(0) {
+                    return match self.opened.descriptor_read(drive, 0, 1) {
+                        std::result::Result::Ok(bytes) if !bytes.is_empty() => {
+                            Ok(Ok(i32::from(bytes[0])))
+                        }
+                        std::result::Result::Ok(_) => Ok(Ok(-1)),
+                        std::result::Result::Err(errno) => Ok(Err(Failed(-1, errno))),
+                    };
                 }
                 Ok(Ok(match self.input.character() {
                     Some(byte) => i32::from(byte),

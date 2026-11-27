@@ -31,7 +31,7 @@ independent acceptance or compatibility claims.
 
 | Library | Family | Total | Typed | Manual | Data | Implemented | Partial | Stub | Implicit status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| <code>advapi32.dll</code> | <code>windows-system</code> | 20 | 0 | 20 | 0 | 1 | 19 | 0 | 0 |
+| <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 274 | 2 | 26 |
@@ -62,7 +62,7 @@ metadata, are in `inventory.json`.
 | --- | --- |
 | API-set | 738 |
 | Ordinal | 0 |
-| Other module | 163 |
+| Other module | 166 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.
 

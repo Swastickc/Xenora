@@ -256,6 +256,15 @@ service ucrtbase.dll setvbuf(stream: ptr, buffer: ptr, mode: i32, size: u64) -> 
     ref stdio.h setvbuf
     test fflush_and_setvbuf_return_their_documented_results
 
+service ucrtbase.dll setbuf(stream: ptr, buffer: ptr) -> void
+    handler setbuf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails errno EINVAL for a null stream; stops the guest for a pointer that is no stream
+    ref stdio.h setbuf
+    test fflush_and_setvbuf_return_their_documented_results
+
 # Files for a hosted C program, on the in-memory drive the handle services use.
 
 service ucrtbase.dll fread(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64

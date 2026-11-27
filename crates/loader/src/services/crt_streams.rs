@@ -1711,6 +1711,19 @@ impl StandardStreams {
         })
     }
 
+    /// `setbuf`, the legacy reduction of `setvbuf`: a null buffer selects
+    /// no buffering, anything else full buffering with the documented 512
+    /// of `BUFSIZ`. Output here is never held back either way, so past the
+    /// stream validation there is nothing to do - immediate delivery is
+    /// the unbuffered end of what every mode permits.
+    pub(super) fn set_buffer_legacy(&self, file: u64) -> Outcome<()> {
+        if file == 0 {
+            return Ok(Err(Failed((), EINVAL)));
+        }
+        self.stream(file)?;
+        Ok(Ok(()))
+    }
+
     /// `fopen`. Returns the new `FILE*`, or null with the `errno` value.
     pub(super) fn open(
         &mut self,

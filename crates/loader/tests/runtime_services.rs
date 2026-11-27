@@ -922,6 +922,46 @@ fn formatted_output_reaches_the_captured_standard_streams() {
 }
 
 #[test]
+fn hexadecimal_float_rounding_follows_the_rounding_mode() {
+    // 1.53125 is exactly 0x1.88p+0: at precision 1 the first dropped digit
+    // is exactly half a unit of the last kept one. Ties-to-even keeps the
+    // even digit 8; the legacy mode rounds away from zero, up to 9. The
+    // pre-2015 library never printed hexadecimal floating-point at all, so
+    // the legacy answer is Xenora's consistent extension of its documented
+    // decimal rounding rule, not measured behavior.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.53125f64.to_bits()];
+    let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS, out, b"%.1a", &slots);
+    assert_eq!((count, exit), (8, ExitReason::Halt));
+    assert_eq!(fresh.state.standard_output(), b"0x1.8p+0");
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS & !0x20, out, b"%.1a", &slots);
+    assert_eq!((count, exit), (8, ExitReason::Halt));
+    assert_eq!(fresh.state.standard_output(), b"0x1.9p+0");
+
+    // The halfway case at the leading digit: 1.5 is exactly 0x1.8p+0, and
+    // the kept digit 1 is odd, so both modes round it up.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.5f64.to_bits()];
+    for options in [MINGW_OPTIONS, MINGW_OPTIONS & !0x20] {
+        let before = fresh.state.standard_output().len();
+        let (count, exit) = print_with(&mut fresh, options, out, b"%.0A", &slots);
+        assert_eq!((count, exit), (6, ExitReason::Halt), "{options:#x}");
+        assert_eq!(&fresh.state.standard_output()[before..], b"0X2P+0");
+    }
+    // 1.25 is 0x1.4p+0: the dropped digit is below half, so both modes
+    // round it down.
+    let (mut fresh, [_, out, _]) = stdio_guest();
+    let slots = [1.25f64.to_bits()];
+    for options in [MINGW_OPTIONS, MINGW_OPTIONS & !0x20] {
+        let before = fresh.state.standard_output().len();
+        let (count, exit) = print_with(&mut fresh, options, out, b"%.0a", &slots);
+        assert_eq!((count, exit), (6, ExitReason::Halt), "{options:#x}");
+        assert_eq!(&fresh.state.standard_output()[before..], b"0x1p+0");
+    }
+}
+
+#[test]
 fn snprintf_writes_inside_the_buffer_and_returns_the_would_be_length() {
     let one_slot = &[42];
     // A fit: the text, its terminator, and the result is the length. The

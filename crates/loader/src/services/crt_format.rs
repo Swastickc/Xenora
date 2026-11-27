@@ -470,7 +470,13 @@ fn trim(digits: &mut Vec<u8>) {
 }
 
 /// The `a` style: the value's own binary digits, four to a hexadecimal one.
-fn hexadecimal(magnitude: f64, precision: Option<usize>, alternate: bool, upper: bool) -> Vec<u8> {
+fn hexadecimal(
+    magnitude: f64,
+    precision: Option<usize>,
+    alternate: bool,
+    upper: bool,
+    legacy: bool,
+) -> Vec<u8> {
     const FRACTION_BITS: u32 = 52;
     let bits = magnitude.to_bits();
     let field = (bits >> FRACTION_BITS) & 0x7FF;
@@ -493,8 +499,11 @@ fn hexadecimal(magnitude: f64, precision: Option<usize>, alternate: bool, upper:
         let half = 1u64 << (dropped - 1);
         let rest = whole & ((1 << dropped) - 1);
         whole >>= dropped;
-        // Ties go to the even digit.
-        if rest > half || (rest == half && whole & 1 == 1) {
+        // Ties go to the even digit, or away from zero in legacy mode. The
+        // pre-2015 library never printed hexadecimal floating-point at all,
+        // so this is Xenora's consistent extension of its documented decimal
+        // rounding rule rather than measured behavior.
+        if rest > half || (rest == half && (legacy || whole & 1 == 1)) {
             whole += 1;
         }
     }
@@ -624,7 +633,7 @@ pub(super) fn float(
             }
             digits
         }
-        _ => hexadecimal(magnitude, spec.precision, alternate, false),
+        _ => hexadecimal(magnitude, spec.precision, alternate, false, legacy),
     };
     if upper {
         digits.make_ascii_uppercase();

@@ -1967,6 +1967,15 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _chmod(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.chmod(context.memory, &mut drive, name, mode as u32)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _wchmod(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let outcome = {
             let streams = context.state.crt_streams();
@@ -2230,8 +2239,8 @@ pub(crate) mod handlers {
     pub fn _access(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let outcome = {
             let streams = context.state.crt_streams();
-            let drive = context.state.objects.lock().expect("guest object state");
-            streams.access(context.memory, &drive, name, mode)
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.access_file(context.memory, &mut drive, name, false, mode as u32)
         };
         or_errno(context, outcome)
     }

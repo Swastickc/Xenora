@@ -1790,6 +1790,14 @@ process information structure, because the guest is the only process.
 This is implemented behaviour verified through the unit tests. Nothing
 here was compared with Windows or with an Xbox console.
 
+## XNetworking connectivity hint
+
+`xgameruntime.dll!XNetworkingGetConnectivityHint` writes the documented 16-byte `XNetworkingConnectivityHint`: three little-endian 32-bit fields followed by four one-byte boolean fields. Xenora reports `networkInitialized` as true because its bounded networking facility exists, `connectivityLevel` as `None` (1), `connectivityCost` as `Unknown` (0), and `ianaInterfaceType` as IANA `softwareLoopback` (24). The data-limit and roaming booleans are false. This is the honest state of the current machine: it has process-local loopback sockets but no external network route, DNS, proxy, TLS or Internet connectivity truth. The query must not be read as evidence that a title endpoint is reachable.
+
+A null, unmapped or partially unwritable output pointer returns `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)` and writes no success result. Registration, change callbacks, security-information queries and configuration settings are not implemented. This is locally verified behavior only; it has not been compared with Windows or Xbox hardware.
+
+Sources: [XNetworkingGetConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkinggetconnectivityhint), [XNetworkingConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingconnectivityhint), [XNetworkingConnectivityLevelHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconnectivitylevelhint), and [network initialization and connectivity](https://docs.xbox.com/build/console-features/networking/initialization-connectivity-networking).
+
 ## Opt-in synthetic Gaming Runtime lifecycle
 
 `services::gaming_runtime::register_synthetic_lifecycle` registers partial

@@ -16724,6 +16724,16 @@
       "kind": "name",
       "library": "xgameruntime.dll",
       "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingGetConnectivityHint"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XTaskQueueCloseHandle"
@@ -17102,13 +17112,13 @@
   "summary": {
     "aliases": 836,
     "api_set_aliases": 703,
-    "canonical_services": 819,
+    "canonical_services": 820,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 218,
+    "implemented": 219,
     "implicit_status_services": 76,
     "libraries": 20,
-    "manual_services": 567,
+    "manual_services": 568,
     "ordinal_aliases": 0,
     "partial": 599,
     "structural_consistency_findings": 0,

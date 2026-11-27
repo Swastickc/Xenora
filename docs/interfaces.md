@@ -1874,6 +1874,18 @@ failure, 2 a refused command line), the last `trace stage=` it printed, and
 up to 256 KiB of each output stream. `XENORA_CLI` names another worker, for
 `swift run`.
 
+The optional guest file export takes an absolute path on the synthetic C:
+drive and a new host filename chosen in the Run Program panel. The app passes
+both to `--export-guest-file` before the guest arguments. The CLI exports at
+most 16 MiB from a successful run and preserves any existing destination.
+The Run panel shows export errors in the worker output.
+
+To exercise this path with the original file-writing guest, build it with
+`sh tests/compat_fixtures/build-guest-file-export.sh "$PWD/artifacts/app-guest-export"`,
+then set `XENORA_GUEST_FILE_EXPORT_FIXTURE="$PWD/artifacts/app-guest-export/guest-file-export.exe"`
+and `XENORA_CLI="$PWD/build/Xenora.app/Contents/MacOS/xenora-cli"` when running
+`scripts/build-app.sh --test`.
+
 The Metal HUD switch (View > Show Metal HUD, Shift-Command-H, or the Display
 section) is off by default and is stored in the app's defaults as
 `MetalHUDEnabled`. It overlays the Metal device, frame size, frame counters

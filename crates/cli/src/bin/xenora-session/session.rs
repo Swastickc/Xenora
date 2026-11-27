@@ -14,11 +14,17 @@ use xenora_shader::{Architecture, PIXEL_ENTRY_POINT, VERTEX_ENTRY_POINT, compile
 
 #[cfg(test)]
 mod tests;
+mod threaded;
 
 const VERTEX_SHADER: &[u8] = include_bytes!("../../../../../fixtures/rdna2/x9-constant-vs.bin");
 const PIXEL_SHADER: &[u8] = include_bytes!("../../../../../fixtures/rdna2/x9-constant-ps.bin");
 const JOURNAL: &str = "C:\\xenora-session.log";
 const MODULE: &str = "xenora_session.dll";
+const GUEST_LAYOUT: StartupLayout = StartupLayout {
+    image_base: 0x1_4000_0000,
+    stack_top: 0x2_0001_0000,
+    tls_base: 0x3_0000_0000,
+};
 pub(super) const WIDTH: usize = 4;
 pub(super) const HEIGHT: usize = 3;
 pub(super) const MAX_EVENTS: usize = 32;
@@ -28,6 +34,7 @@ pub(super) const MAX_STEPS: usize = 1_000_000;
 pub(super) enum Workload {
     Persistent,
     Reopen,
+    Threaded,
 }
 
 impl Workload {
@@ -37,6 +44,7 @@ impl Workload {
             Self::Reopen => {
                 include_bytes!("../../../../../fixtures/pe/persistent-reopen-guest.exe")
             }
+            Self::Threaded => threaded::GUEST,
         }
     }
 
@@ -46,7 +54,29 @@ impl Workload {
             // closes each file handle before presenting and retains a latch.
             Self::Persistent => 2,
             Self::Reopen => 1,
+            Self::Threaded => 4,
         }
+    }
+
+    pub(super) fn expected_exit_status(self) -> u32 {
+        match self {
+            Self::Persistent | Self::Reopen => 0,
+            Self::Threaded => threaded::EXIT_STATUS,
+        }
+    }
+
+    pub(super) fn expected_journal(
+        self,
+        directions: &[Direction],
+    ) -> impl Iterator<Item = u8> + '_ {
+        let mut column = 0;
+        directions.iter().map(move |&direction| match self {
+            Self::Persistent | Self::Reopen => direction.journal_byte(),
+            Self::Threaded => {
+                column = threaded::column_after(column, direction);
+                b'0' + column as u8
+            }
+        })
     }
 }
 
@@ -206,11 +236,12 @@ pub(super) fn run(
         .map(|&direction| session.advance(direction))
         .collect::<Result<Vec<_>, _>>()?;
     let finished = session.finish()?;
-    let journal: Vec<_> = directions
+    if !finished
+        .journal
         .iter()
-        .map(|direction| direction.journal_byte())
-        .collect();
-    if finished.journal != journal {
+        .copied()
+        .eq(workload.expected_journal(directions))
+    {
         return Err("guest journal does not match the delivered events".to_owned());
     }
     Ok(CompletedSession {
@@ -235,14 +266,104 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, ExitReason>
     mutex.lock().map_err(|_| ExitReason::ServiceAbiViolation)
 }
 
+struct GuestGraphics {
+    backend: Backend,
+    presentation: Arc<Mutex<FramePresentation>>,
+    native_draws: Arc<AtomicUsize>,
+}
+
+impl GuestGraphics {
+    fn capture(&self, sequence: usize, column: usize) -> Result<Frame, ExitReason> {
+        let frame = lock(&self.presentation)?;
+        if frame.frame_index != sequence as u64
+            || frame.backend != Some(self.backend.id())
+            || (frame.width, frame.height) != (WIDTH, HEIGHT)
+            || frame.draw_count != 1
+            || !matches_frame_column(column, &frame.pixels)
+            || self.native_draws.load(Ordering::Relaxed)
+                != self.backend.expected_native_draws(sequence)
+        {
+            return Err(ExitReason::ServiceAbiViolation);
+        }
+
+        Ok(Frame {
+            sequence: sequence as u32,
+            rgba: frame.pixels.clone(),
+        })
+    }
+}
+
+struct Guest {
+    services: Arc<ServicesState>,
+    graphics: Arc<GuestGraphics>,
+}
+
+impl Guest {
+    fn new(backend: Backend) -> Result<Self, String> {
+        let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+        let native_draws = Arc::new(AtomicUsize::new(0));
+        if backend == Backend::Metal {
+            install_metal(&services, Arc::clone(&native_draws))?;
+        }
+        let presentation = services
+            .graphics
+            .lock()
+            .map_err(|_| "guest graphics state is poisoned")?
+            .last_presentation
+            .clone();
+        Ok(Self {
+            services,
+            graphics: Arc::new(GuestGraphics {
+                backend,
+                presentation,
+                native_draws,
+            }),
+        })
+    }
+
+    fn finish(
+        &self,
+        presented: usize,
+        exit_status: u32,
+        journal_path: &str,
+    ) -> Result<Finished, String> {
+        if self.services.exit_status() != Some(exit_status) {
+            return Err("guest did not record its process exit status".to_owned());
+        }
+        let frame_index = self
+            .graphics
+            .presentation
+            .lock()
+            .map_err(|_| "guest graphics presentation is poisoned")?
+            .frame_index;
+        if frame_index != presented as u64 {
+            return Err("guest drew a frame without presenting it".to_owned());
+        }
+        let open_handles = self.services.open_handle_count();
+        if open_handles != 0 {
+            return Err(format!(
+                "guest retained {open_handles} open runtime handles"
+            ));
+        }
+        let journal = self
+            .services
+            .file_contents(journal_path)
+            .ok_or("guest did not create its journal")?;
+        Ok(Finished {
+            journal,
+            exit_status,
+            open_handles,
+            native_draws: self.graphics.native_draws.load(Ordering::Relaxed),
+        })
+    }
+}
+
 fn install_exchange(
     registry: &mut ImportRegistry,
     commands: Receiver<Direction>,
     report: Sender<Report>,
-    presentation: Arc<Mutex<FramePresentation>>,
-    native_draws: Arc<AtomicUsize>,
-    (workload, backend): (Workload, Backend),
-    services: Arc<ServicesState>,
+    workload: Workload,
+    guest: &Guest,
 ) -> Arc<Mutex<GuestProgress>> {
     let progress = Arc::new(Mutex::new(GuestProgress::default()));
     let next = Arc::clone(&progress);
@@ -269,28 +390,22 @@ fn install_exchange(
         }
     });
     let current = Arc::clone(&progress);
-    let frame_services = Arc::clone(&services);
+    let frame_services = Arc::clone(&guest.services);
+    let graphics = Arc::clone(&guest.graphics);
     registry.register(MODULE, "XenoraPresent", move |args, _, _| {
         let mut state = lock(&current)?;
         let direction = state.pending.ok_or(ExitReason::ServiceAbiViolation)?;
         let next = state.presented + 1;
-        let frame = lock(&presentation)?;
         if args.rcx as u32 as usize != next
-            || frame.frame_index != next as u64
-            || frame.backend != Some(backend.id())
-            || frame.width != WIDTH
-            || frame.height != HEIGHT
-            || frame.draw_count != 1
-            || !matches_frame_pixels(direction, &frame.pixels)
             || frame_services.open_handle_count() != workload.retained_handles()
-            || native_draws.load(Ordering::Relaxed) != backend.expected_native_draws(next)
         {
             return Err(ExitReason::ServiceAbiViolation);
         }
-        let rendered = Frame {
-            sequence: next as u32,
-            rgba: frame.pixels.clone(),
+        let column = match direction {
+            Direction::Left => 0,
+            Direction::Right => WIDTH - 1,
         };
+        let rendered = graphics.capture(next, column)?;
         report
             .send(Report::Frame(rendered))
             .map_err(|_| ExitReason::ServiceAbiViolation)?;
@@ -299,6 +414,7 @@ fn install_exchange(
         Ok(1)
     });
     let final_progress = Arc::clone(&progress);
+    let services = Arc::clone(&guest.services);
     registry.register(MODULE, "XenoraFinish", move |args, _, _| {
         let mut state = lock(&final_progress)?;
         if !state.stopping
@@ -315,13 +431,9 @@ fn install_exchange(
     progress
 }
 
-fn matches_frame_pixels(direction: Direction, rgba: &[u8]) -> bool {
+fn matches_frame_column(red_column: usize, rgba: &[u8]) -> bool {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const CLEAR: [u8; 4] = [19, 43, 93, 251];
-    let red_column = match direction {
-        Direction::Left => 0,
-        Direction::Right => WIDTH - 1,
-    };
     let (pixels, _) = rgba.as_chunks::<4>();
     rgba.len() == WIDTH * HEIGHT * 4
         && pixels.iter().enumerate().all(|(index, &pixel)| {
@@ -341,83 +453,38 @@ fn execute_guest(
     commands: Receiver<Direction>,
     report: Sender<Report>,
 ) -> Result<Finished, String> {
-    let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
-    let native_draws = Arc::new(AtomicUsize::new(0));
-    if backend == Backend::Metal {
-        install_metal(&services, Arc::clone(&native_draws))?;
-    }
-    let presentation = services
-        .graphics
-        .lock()
-        .map_err(|_| "guest graphics state is poisoned")?
-        .last_presentation
-        .clone();
+    let guest = Guest::new(backend)?;
     let mut imports = ImportRegistry::new();
-    register_standard_services(&mut imports, Arc::clone(&services));
-    let progress = install_exchange(
-        &mut imports,
-        commands,
-        report,
-        Arc::clone(&presentation),
-        Arc::clone(&native_draws),
-        (workload, backend),
-        Arc::clone(&services),
-    );
-    let result = run_synthetic_startup(
-        workload.guest(),
-        StartupLayout {
-            image_base: 0x1_4000_0000,
-            stack_top: 0x2_0001_0000,
-            tls_base: 0x3_0000_0000,
-        },
-        imports,
-        steps,
-    )
-    .map_err(|error| format!("guest startup: {error}"))?;
-    let exit_status = match result.execution.exit_reason {
-        ExitReason::ProcessExit(0) => 0,
-        ExitReason::ProcessExit(status) => {
-            return Err(format!("guest application exited with status {status}"));
-        }
-        ExitReason::StepLimitExceeded => {
-            return Err(format!(
-                "guest instruction budget exhausted ({steps} steps)"
-            ));
-        }
-        reason => return Err(format!("guest execution stopped: {reason:?}")),
-    };
+    register_standard_services(&mut imports, Arc::clone(&guest.services));
+    if workload == Workload::Threaded {
+        return threaded::execute(&guest, imports, steps, commands, report);
+    }
+
+    let progress = install_exchange(&mut imports, commands, report, workload, &guest);
+    let result = run_synthetic_startup(workload.guest(), GUEST_LAYOUT, imports, steps)
+        .map_err(|error| format!("guest startup: {error}"))?;
+    let exit_status = workload.expected_exit_status();
+    require_guest_exit(result.execution.exit_reason, exit_status, steps)?;
     let state = progress
         .lock()
         .map_err(|_| "guest protocol state is poisoned")?;
-    if state.pending.is_some()
-        || !state.stopping
-        || !state.finished
-        || services.exit_status() != Some(exit_status)
-    {
+    if state.pending.is_some() || !state.stopping || !state.finished {
         return Err("guest exited without completing its application protocol".to_owned());
     }
-    let frame_index = presentation
-        .lock()
-        .map_err(|_| "guest graphics presentation is poisoned")?
-        .frame_index;
-    if frame_index != state.presented as u64 {
-        return Err("guest drew a frame without presenting it".to_owned());
+    guest.finish(state.presented, exit_status, JOURNAL)
+}
+
+fn require_guest_exit(reason: ExitReason, expected: u32, steps: usize) -> Result<(), String> {
+    match reason {
+        ExitReason::ProcessExit(status) if status == expected => Ok(()),
+        ExitReason::ProcessExit(status) => {
+            Err(format!("guest application exited with status {status}"))
+        }
+        ExitReason::StepLimitExceeded => Err(format!(
+            "guest instruction budget exhausted ({steps} steps)"
+        )),
+        reason => Err(format!("guest execution stopped: {reason:?}")),
     }
-    let open_handles = services.open_handle_count();
-    if open_handles != 0 {
-        return Err(format!(
-            "guest retained {open_handles} open runtime handles"
-        ));
-    }
-    let journal = services
-        .file_contents(JOURNAL)
-        .ok_or("guest did not create its journal")?;
-    Ok(Finished {
-        journal,
-        exit_status,
-        open_handles,
-        native_draws: native_draws.load(Ordering::Relaxed),
-    })
 }
 
 fn install_metal(services: &ServicesState, native_draws: Arc<AtomicUsize>) -> Result<(), String> {

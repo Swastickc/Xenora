@@ -207,6 +207,15 @@ pub(super) struct ConditionSleep {
     pub(super) ticket: u64,
 }
 
+/// A same-process address wait. Once signaled, it stays ready until resumed.
+#[derive(Clone, Copy)]
+pub(super) struct AddressWait {
+    pub(super) address: u64,
+    pub(super) deadline: Option<u64>,
+    pub(super) ticket: u64,
+    pub(super) woken: bool,
+}
+
 /// What the call a thread is blocked in has to remember between retries.
 pub(super) enum Pending {
     Objects(PendingWait),
@@ -216,6 +225,7 @@ pub(super) enum Pending {
         ticket: u64,
     },
     Condition(ConditionSleep),
+    Address(AddressWait),
     /// No deadline sleeps until the thread is terminated.
     Sleep(Option<u64>),
 }
@@ -226,8 +236,9 @@ impl Pending {
         match self {
             Self::Objects(wait) => wait.deadline,
             Self::Condition(sleep) if sleep.phase == SleepPhase::Asleep => sleep.deadline,
+            Self::Address(wait) if !wait.woken => wait.deadline,
             Self::Sleep(deadline) => *deadline,
-            Self::Srw { .. } | Self::Condition(_) => None,
+            Self::Srw { .. } | Self::Condition(_) | Self::Address(_) => None,
         }
     }
 
@@ -569,6 +580,36 @@ impl ServicesState {
         asleep.truncate(if all { asleep.len() } else { 1 });
         for (_, teb) in asleep {
             table.end_sleep(teb, SleepPhase::Woken);
+            self.hooks.signal();
+        }
+    }
+
+    /// Mark the oldest eligible address waiter, or all eligible waiters.
+    /// An expired or suspended waiter does not consume a wake.
+    pub(super) fn wake_address(&self, address: u64, all: bool) {
+        let now = self.clock.performance_count();
+        let mut table = self.threads.lock().expect("guest thread table");
+        let table = &mut *table;
+        let threads = &table.threads;
+        let eligible = table.waits.iter_mut().filter_map(|(&teb, pending)| {
+            let Pending::Address(wait) = pending else {
+                return None;
+            };
+            (wait.address == address
+                && !wait.woken
+                && wait.deadline.is_none_or(|deadline| now < deadline)
+                && threads
+                    .values()
+                    .any(|thread| thread.teb == teb && thread.suspend == 0))
+            .then_some(wait)
+        });
+        if all {
+            for wait in eligible {
+                wait.woken = true;
+                self.hooks.signal();
+            }
+        } else if let Some(wait) = eligible.min_by_key(|wait| wait.ticket) {
+            wait.woken = true;
             self.hooks.signal();
         }
     }

@@ -229,6 +229,12 @@ impl<'a> RelocationReader<'a> {
 
 /// Applies PE base relocations when the image is loaded at a nonpreferred base.
 ///
+/// This primitive expects the image headers and sections to be mapped already.
+/// It is not transactional: if an entry fails after earlier fixups were written,
+/// those earlier writes remain in `memory`. Callers that need all-or-nothing
+/// batch semantics must use a transactional caller rather than treating an error
+/// from this primitive as proof that memory is unchanged.
+///
 /// An image with the COFF relocations-stripped flag can use only its preferred base.
 pub fn apply_relocations(
     pe: &ParsedPe,

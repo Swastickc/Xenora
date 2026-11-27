@@ -589,6 +589,26 @@ fn target_crossing_adjacent_header_and_section_backing_is_accepted() {
 }
 
 #[test]
+fn target_crossing_the_end_of_section_backing_is_rejected() {
+    // `.text` backing ends at RVA 0x1200. A DIR64 target at 0x11f9 lies inside
+    // SizeOfImage but its eight bytes are not continuously image-backed.
+    let table = block(0x1000, &[0xA1F9, 0x0000]);
+    let bytes = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1000;
+    let (pe, mut memory) = load(&bytes, base);
+
+    let result = apply_relocations(&pe, &bytes, base, &mut memory);
+
+    assert_eq!(
+        result.unwrap_err(),
+        RelocationError::TargetNotImageBacked {
+            target_rva: 0x11f9,
+            target_va: base + 0x11f9,
+        }
+    );
+}
+
+#[test]
 fn virtual_zero_fill_target_is_image_backed() {
     // `.reloc` has 0x200 bytes of file data and a 0x1000-byte virtual extent.
     // RVA 0x2800 is zero-filled section backing rather than a hole.

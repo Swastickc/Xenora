@@ -16,15 +16,19 @@
 //! currently preserves those invariants: the memory boundary must not depend
 //! on mutation order or on a caller composing the wrong plan for a batch.
 //!
-//! Rollback is deliberately exact and deliberately expensive. After the whole
-//! plan validates, the batch clones the entire [`GuestMemory`] once. If image
+//! Rollback is deliberately exact and deliberately expensive. For a nonempty
+//! batch, after the whole plan validates, the batch clones the entire
+//! [`GuestMemory`] once. If image
 //! validation or mapping fails later, that clone is assigned back, restoring
 //! the prior address space and its metadata rather than merely unmapping the
-//! successful images. Each single-image primitive additionally snapshots the
-//! whole address space for its own partial-section rollback. The current cost
-//! and peak host-memory use therefore scale with the existing address space
-//! once per batch and once per image, not just with the new image bytes. This
-//! is not the final memory-ownership or efficient reservation design.
+//! successful images. Each single-image primitive can additionally snapshot
+//! the whole address space for its own partial-section rollback. In the worst
+//! case this is one whole-memory copy before the batch plus one nested
+//! whole-memory copy for every image attempted: time cost scales with the
+//! batch length times the committed guest bytes and metadata, while peak host
+//! memory includes the live address space, the batch snapshot and one nested
+//! image snapshot. This is not the final memory-ownership or efficient
+//! reservation design.
 //!
 //! The returned reservations are logical `[base, end)` spans derived from the
 //! planned `SizeOfImage`. They are not ownership tokens. Only headers and

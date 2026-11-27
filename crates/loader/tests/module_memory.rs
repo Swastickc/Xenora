@@ -165,7 +165,9 @@ mod module_memory {
     }
 
     fn assert_scratch_and_absent_images(memory: &mut GuestMemory, bases: &[u64]) {
-        assert_eq!(memory.read_u8(SCRATCH), Ok(0x77));
+        let mut retained = [0; 0x40];
+        memory.read_bytes(SCRATCH, &mut retained).unwrap();
+        assert_eq!(retained, [0x77; 0x40]);
         memory.write_bytes(SCRATCH, &[0x78]).unwrap();
         assert_eq!(memory.read_u8(SCRATCH), Ok(0x78));
         memory.write_bytes(SCRATCH, &[0x77]).unwrap();
@@ -202,6 +204,8 @@ mod module_memory {
         assert_eq!(reservations[0].entry_point, None);
         assert_eq!(reservations[1].image_index, 1);
         assert_eq!(reservations[1].base, SECOND_BASE);
+        assert_eq!(reservations[1].end, SECOND_BASE + u64::from(SIZE_OF_IMAGE));
+        assert!(reservations[1].used_preferred_base);
         assert_eq!(
             reservations[1].entry_point,
             Some(SECOND_BASE + u64::from(TEXT_RVA))

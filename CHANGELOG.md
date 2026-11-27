@@ -79,6 +79,8 @@ exact revision and known limitations.
 - An original hosted C record and compression fixture, with O0–O3 guest builds, independently specified output and file-byte checks, and malformed-input controls (#796).
 
 ### Fixed
+
+- QA benchmark statistics now reject NaN and infinite samples instead of producing meaningless ordering statistics or non-standard JSON evidence (#827).
 - QA verification evidence is now bound to the selected checkout: profile suites run with that repository as their working directory, `qa verify` rejects a revision other than the checkout HEAD, and `--check-stale` requires matching profile and revision metadata and passing suites while reporting staleness separately (#277).
 - QA environment diagnostics now measure the current branch against its upstream instead of hard-coding a synchronized result, and report an unavailable upstream honestly (#832).
 - Refreshed the generated runtime inventory to match the registered services, restoring the inventory check on the current tree (#794).

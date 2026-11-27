@@ -579,6 +579,11 @@ impl ServicesState {
             // does on Windows: the pipes the parent created are the child's
             // own descriptors, which the shell redirection needs.
             crt_streams: Mutex::new(self.crt_streams().inherit_for_spawn()),
+            // The image travels too: a spawn child is itself able to spawn,
+            // as any Windows process is. Without it a shell re-executed as a
+            // child could not run another command of its own multi-call
+            // binary, which is exactly the nested `sh` case.
+            spawn_image: Mutex::new(self.spawn_image.lock().expect("spawn image").clone()),
             shares_object_table: true,
             ..ServicesState::new(Arc::clone(&self.clock))
         })

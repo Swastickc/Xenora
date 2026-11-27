@@ -505,6 +505,24 @@ fn target_crossing_adjacent_header_and_section_backing_is_accepted() {
 }
 
 #[test]
+fn virtual_zero_fill_target_is_image_backed() {
+    // `.reloc` has 0x200 bytes of file data and a 0x1000-byte virtual extent.
+    // RVA 0x2800 is zero-filled section backing rather than a hole.
+    let table = block(0x2000, &[0xA800, 0x0000]);
+    let bytes = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1000;
+    let pe = ParsedPe::parse(&bytes).expect("parse");
+    let mut memory = GuestMemory::new();
+    pe.map_into_memory(&bytes, &mut memory, base).expect("map");
+    assert_eq!(memory.read_u64_bypass(base + 0x2800).unwrap(), 0);
+
+    let report = apply_relocations(&pe, &bytes, base, &mut memory).expect("relocate");
+
+    assert_eq!(report.applied_dir64, 1);
+    assert_eq!(memory.read_u64_bypass(base + 0x2800).unwrap(), 0x1000);
+}
+
+#[test]
 fn target_rva_at_top_of_address_space_is_rejected() {
     let table = block(0xFFFF_F000, &[0xAFFC, 0x0000]);
     let bytes = build(16, &table, table.len() as u32);

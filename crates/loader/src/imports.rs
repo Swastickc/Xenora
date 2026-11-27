@@ -133,6 +133,28 @@ pub type ServiceHandler = Box<
     dyn Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason> + Send + Sync,
 >;
 
+/// The guest-visible value written for one import slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotBinding {
+    /// A dispatch trampoline the engine intercepts before execution.
+    Function {
+        trampoline: u64,
+        service_index: usize,
+    },
+    /// The address of a service-owned variable cell.
+    Data { address: u64, service_index: usize },
+}
+
+impl SlotBinding {
+    /// The eight-byte value stored in the import slot.
+    pub fn address(self) -> u64 {
+        match self {
+            Self::Function { trampoline, .. } => trampoline,
+            Self::Data { address, .. } => address,
+        }
+    }
+}
+
 /// Provider of the guest address of a data import's variable cell. The CRT
 /// variables live behind the same state the modern accessors use, so the
 /// provider allocates or finds the cell through it; the address is stable
@@ -691,6 +713,46 @@ impl ImportRegistry {
         self.data_providers.insert(index, Box::new(provider));
     }
 
+    /// Bind one import slot to the service registered for `module` and `name`.
+    ///
+    /// This is the single-slot form used by the multi-module startup path,
+    /// where in-package exports and host services share one image's import
+    /// table. Resolution and the guest memory write happen together: an
+    /// unresolved key or an unmapped slot changes nothing. Data imports write
+    /// the provider's variable-cell address instead of a dispatch trampoline.
+    pub fn bind_slot(
+        &mut self,
+        module: &str,
+        name: &ImportName,
+        slot_address: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<SlotBinding, ImportError> {
+        let Some(index) = self.index(module, name) else {
+            return Err(ImportError::UnresolvedImport {
+                module: module.to_owned(),
+                symbol: name.to_string(),
+            });
+        };
+        // The loader writes slots regardless of page permissions, so only
+        // mapping is checked here.
+        memory.read_u64_bypass(slot_address)?;
+        if let Some(provider) = self.data_providers.get(&index) {
+            let cell = provider(memory)?;
+            memory.write_u64_bypass(slot_address, cell)?;
+            return Ok(SlotBinding::Data {
+                address: cell,
+                service_index: index,
+            });
+        }
+        let trampoline = IMPORT_TRAMPOLINE_BASE_VA + (index as u64) * IMPORT_TRAMPOLINE_STRIDE;
+        memory.write_u64_bypass(slot_address, trampoline)?;
+        self.trampoline_to_service.insert(trampoline, index);
+        Ok(SlotBinding::Function {
+            trampoline,
+            service_index: index,
+        })
+    }
+
     /// Bind the PE's Import Address Table (IAT) in guest memory to synthetic trampoline VAs.
     pub fn bind_imports(
         &mut self,
@@ -710,29 +772,22 @@ impl ImportRegistry {
         // Resolve everything first: a refused image must leave memory unbound.
         let mut slots = Vec::with_capacity(entries.len());
         for entry in entries {
-            let Some(index) = self.index(&entry.module, &entry.name) else {
+            if self.index(&entry.module, &entry.name).is_none() {
                 return Err(ImportError::UnresolvedImport {
                     module: entry.module,
                     symbol: entry.name.to_string(),
                 });
-            };
+            }
             let address = loaded_base
                 .checked_add(u64::from(entry.iat_rva))
                 .ok_or(MemoryError::Overflow)?;
             // The loader writes slots regardless of page permissions, so only
             // mapping is checked here.
             memory.read_u64_bypass(address)?;
-            slots.push((address, index));
+            slots.push((address, entry.module, entry.name));
         }
-        for &(address, index) in &slots {
-            if let Some(provider) = self.data_providers.get(&index) {
-                let cell = provider(memory)?;
-                memory.write_u64_bypass(address, cell)?;
-                continue;
-            }
-            let trampoline = IMPORT_TRAMPOLINE_BASE_VA + (index as u64) * IMPORT_TRAMPOLINE_STRIDE;
-            memory.write_u64_bypass(address, trampoline)?;
-            self.trampoline_to_service.insert(trampoline, index);
+        for (address, module, name) in &slots {
+            self.bind_slot(module, name, *address, memory)?;
         }
         Ok(slots.len())
     }

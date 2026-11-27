@@ -256,6 +256,15 @@ service ucrtbase.dll setvbuf(stream: ptr, buffer: ptr, mode: i32, size: u64) -> 
     ref stdio.h setvbuf
     test fflush_and_setvbuf_return_their_documented_results
 
+service ucrtbase.dll setbuf(stream: ptr, buffer: ptr) -> void
+    handler setbuf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails errno EINVAL for a null stream; stops the guest for a pointer that is no stream
+    ref stdio.h setbuf
+    test fflush_and_setvbuf_return_their_documented_results
+
 # Files for a hosted C program, on the in-memory drive the handle services use.
 
 service ucrtbase.dll fread(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64
@@ -975,6 +984,150 @@ service ucrtbase.dll towupper(wide: u32) -> u32
     ref wctype.h towupper
     test wide_characters_convert_in_the_c_locale
 
+service ucrtbase.dll isalpha(character: i32) -> i32
+    handler isalpha
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isalpha
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isdigit(character: i32) -> i32
+    handler isdigit
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isdigit
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isalnum(character: i32) -> i32
+    handler isalnum
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isalnum
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll islower(character: i32) -> i32
+    handler islower
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h islower
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isupper(character: i32) -> i32
+    handler isupper
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isupper
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isspace(character: i32) -> i32
+    handler isspace
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isspace
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll ispunct(character: i32) -> i32
+    handler ispunct
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h ispunct
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll iscntrl(character: i32) -> i32
+    handler iscntrl
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h iscntrl
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isprint(character: i32) -> i32
+    handler isprint
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isprint
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isgraph(character: i32) -> i32
+    handler isgraph
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isgraph
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isblank(character: i32) -> i32
+    handler isblank
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isblank
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isxdigit(character: i32) -> i32
+    handler isxdigit
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isxdigit
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll tolower(character: i32) -> i32
+    handler tolower
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h tolower
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll toupper(character: i32) -> i32
+    handler toupper
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h toupper
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll atoi(text: ptr) -> i32
+    handler atoi
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; stops the guest for memory it cannot read
+    ref stdlib.h atoi
+    test narrow_decimal_parses_follow_the_c_contract
+
+service ucrtbase.dll atof(text: ptr) -> f64
+    handler atof
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; stops the guest for memory it cannot read
+    ref stdlib.h atof
+    test narrow_decimal_parses_follow_the_c_contract
+
 service ucrtbase.dll wcsncat(start: ptr, end: ptr, count: u64) -> ptr
     handler wcsncat
     status implemented
@@ -1026,12 +1179,26 @@ service ucrtbase.dll _wfopen(name: ptr, mode: ptr) -> ptr
     ref corecrt_wstdio.h _wfopen
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _wfopen(name: ptr, mode: ptr) -> ptr
+    handler _wfopen
+    status partial
+    fails null with errno EINVAL or ENOENT
+    ref corecrt_wstdio.h _wfopen; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _unlink(name: ptr) -> i32
     handler _unlink
     status partial
     alias api-ms-win-crt-filesystem-l1-1-0.dll
     fails -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file
     ref io.h _unlink
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _unlink(name: ptr) -> i32
+    handler _unlink
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref io.h _unlink; the legacy dll exports the same entry
     test the_wide_file_operations_follow_the_drive
 
 service ucrtbase.dll _wunlink(name: ptr) -> i32
@@ -1042,12 +1209,26 @@ service ucrtbase.dll _wunlink(name: ptr) -> i32
     ref corecrt_wio.h _wunlink
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _wunlink(name: ptr) -> i32
+    handler _wunlink
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref corecrt_wio.h _wunlink; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _access(name: ptr, mode: i32) -> i32
     handler _access
     status partial
     alias api-ms-win-crt-filesystem-l1-1-0.dll
     fails -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file
     ref io.h _access
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _access(name: ptr, mode: i32) -> i32
+    handler _access
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref io.h _access; the legacy dll exports the same entry
     test the_wide_file_operations_follow_the_drive
 
 service ucrtbase.dll _waccess(name: ptr, mode: i32) -> i32
@@ -1058,6 +1239,13 @@ service ucrtbase.dll _waccess(name: ptr, mode: i32) -> i32
     ref corecrt_wio.h _waccess
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _waccess(name: ptr, mode: i32) -> i32
+    handler _waccess
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref corecrt_wio.h _waccess; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _wmkdir(name: ptr) -> i32
     handler _wmkdir
     status partial
@@ -1065,6 +1253,29 @@ service ucrtbase.dll _wmkdir(name: ptr) -> i32
     fails -1 with errno EINVAL, ENOENT, ENOSPC or EACCES when the name is taken
     ref corecrt_wdirect.h _wmkdir
     test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _wmkdir(name: ptr) -> i32
+    handler _wmkdir
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref corecrt_wdirect.h _wmkdir; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _chmod(name: ptr, mode: i32) -> i32
+    handler _chmod
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_io.h _chmod
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _chmod(name: ptr, mode: i32) -> i32
+    handler _chmod
+    status partial
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_io.h _chmod; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 
 service ucrtbase.dll _wchmod(name: ptr, mode: i32) -> i32
     handler _wchmod
@@ -1074,12 +1285,26 @@ service ucrtbase.dll _wchmod(name: ptr, mode: i32) -> i32
     ref corecrt_wio.h _wchmod
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _wchmod(name: ptr, mode: i32) -> i32
+    handler _wchmod
+    status partial
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_wio.h _wchmod; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _wstat64i32(name: ptr, output: ptr) -> i32
     handler _wstat64i32
     status partial
     alias api-ms-win-crt-filesystem-l1-1-0.dll
     fails -1 with errno EINVAL or ENOENT; the times answer -1 because the drive has no time stamps
     ref corecrt_wio.h _wstat64i32, _mingw_stat64.h struct _stat64i32
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _wstat64i32(name: ptr, output: ptr) -> i32
+    handler _wstat64i32
+    status partial
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_wstat.h _wstat64i32; the legacy dll exports the same entry
     test the_wide_file_operations_follow_the_drive
 
 service ucrtbase.dll _assert(expression: ptr, file: ptr, line: u32) -> void

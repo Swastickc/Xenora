@@ -1442,7 +1442,7 @@ pub(crate) mod handlers {
         locale: u64,
         arguments: u64,
     ) -> Outcome<i32> {
-        crt_scan::vsscanf(
+        let outcome = crt_scan::scan_string(
             context.memory,
             options,
             buffer,
@@ -1450,7 +1450,8 @@ pub(crate) mod handlers {
             format,
             locale,
             arguments,
-        )
+        );
+        or_errno(context, outcome)
     }
 
     pub fn vsprintf(
@@ -1528,6 +1529,33 @@ pub(crate) mod handlers {
         // The secure stream form validates what the plain one validates, and
         // `%n` is invalid in both, so they are the same here.
         vfprintf(context, options, stream, format, locale, arguments)
+    }
+
+    // Formatted input (#605): `crt_scan.rs` holds the rules. The string form
+    // needs no stream state; the stream form reads `stdin` or a file.
+
+    pub fn vfscanf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.scan(
+                context.memory,
+                &drive,
+                options,
+                stream,
+                format,
+                locale,
+                arguments,
+            )
+        };
+        or_errno(context, outcome)
     }
 
     pub fn putchar(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {

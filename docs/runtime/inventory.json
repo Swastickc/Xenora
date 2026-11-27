@@ -16796,6 +16796,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpAddRequestHeaders"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpCloseHandle"
     },
     {
@@ -16887,6 +16897,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WinHttpSendRequest"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpSetOption"
     },
     {
       "data_import": false,
@@ -18262,15 +18282,15 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 865,
+    "canonical_services": 867,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 235,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 569,
+    "manual_services": 571,
     "ordinal_aliases": 0,
-    "partial": 628,
+    "partial": 630,
     "structural_consistency_findings": 0,
     "stub": 2,
     "typed_registry_entries": 296,

@@ -1105,13 +1105,23 @@ connection handle of the correct type. Validation and insertion happen under
 the same handle-table lock, so another thread cannot close the parent between
 the two steps. Null verb and version strings default to `GET` and `HTTP/1.1`;
 a null object name is transmitted as `/`. The request copies its strings and
-accept types into immutable state, so later guest-memory writes cannot mutate
-the object. Only the zero flags and `WINHTTP_FLAG_SECURE` are accepted. The
-secure flag records that HTTPS was requested but does not implement TLS;
-sending such a request fails with `ERROR_NOT_SUPPORTED` before any network
-use.
+accept types out of guest memory. Its initial header collection includes the
+configured User-Agent, Accept and Referer values. A request accepts zero
+flags or `WINHTTP_FLAG_SECURE`. The latter records that HTTPS was requested.
+Sending that request fails with `ERROR_NOT_SUPPORTED` before network use.
+
+`WinHttpAddRequestHeaders` updates a live request before sending begins. It
+copies a counted or null-terminated UTF-16 header block and accepts CRLF between
+fields, with an optional trailing CRLF. Add, add-if-new, replace, remove and
+comma or semicolon coalescing operate on case-insensitive field names.
+Replacement and coalescing affect the first match. Each update is atomic and
+the configured collection is bounded at 256 fields, 64 KiB serialized and
+8 KiB per field line. Indexed updates, conflicting modifiers and changes to
+transport-managed framing fields fail explicitly.
 
 `WinHttpSendRequest` performs one synchronous cleartext HTTP/1.1 exchange.
+The request includes configured fields followed by the call's additional
+header block.
 It validates and copies additional headers and the optional request body out
 of guest memory before network use. A header length of `-1` means a
 null-terminated UTF-16 header block; otherwise the documented length is a
@@ -1141,10 +1151,11 @@ system resolver. A request may connect to whatever address the resolver
 returns; loopback tests are evidence of the transport mechanics only, not of
 general Internet reachability.
 
-`WinHttpQueryOption` supports only the four DWORD timeout options matching
-those stored values: resolve, connect, send and receive on session or request
-handles. Infinite values are returned as unsigned `0xffffffff` DWORD bits. It
-implements the documented required-size contract by writing four to
+`WinHttpSetOption` takes a four-byte guest DWORD for resolve, connect, send or
+receive timeouts on a session or a request before sending begins. It preserves
+the full unsigned range. Zero and `0xffffffff` disable the timer in this
+transport, and `WinHttpQueryOption` returns the stored DWORD unchanged.
+Querying implements the required-size contract by writing four to
 `lpdwBufferLength` when the output buffer is null or too small and failing
 with `ERROR_INSUFFICIENT_BUFFER`; success writes exactly four bytes. Connection
 handles fail with the incorrect-handle-type error, unknown options fail with

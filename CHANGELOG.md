@@ -70,6 +70,7 @@ exact revision and known limitations.
 - Opt-in synthetic single-library Gaming Runtime lifecycle registration with idempotent initialization and terminal teardown failure for open GDK queues. The original Scarlett fixture now has a normal-startup integration test, and translated service tests cover queue close and active-object failure. Full DLL reference counting and platform initialization remain unsupported.
 
 ### Fixed
+- QA environment diagnostics now measure the current branch against its upstream instead of hard-coding a synchronized result, and report an unavailable upstream honestly (#832).
 - Refreshed the generated runtime inventory to match the registered services, restoring the inventory check on the current tree (#794).
 - CPU coverage intelligence now derives interpreter and DBT operation coverage from semantic execution modules and native-eligibility logic instead of misleading helper-function names such as `emit_fault_guard` (#855). The comparison remains a heuristic operation summary rather than per-encoding semantic proof.
 - The CPU coverage report derives opcode coverage from the declarative x86 registry rather than hexadecimal literals in implementation and fixture code (#850). Opcode identities retain encoding space, map and mandatory-prefix context, so internal error payloads are no longer reported as unsupported instructions.

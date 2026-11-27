@@ -156,9 +156,20 @@ fixups already applied to earlier images. The implementation uses a whole
 `GuestMemory` snapshot for that transaction; this is correct but deliberately
 expensive and is not the final memory-ownership design. Relocation itself
 performs no import or IAT write. Ordinary-IAT binding is a separate implemented
-step, while delayed imports, service registration, exception-directory
-registration, TLS callbacks, unloading, reference counting and module execution
-remain unsupported.
+step, while delayed imports, service registration, TLS callbacks, unloading,
+reference counting and module execution remain unsupported.
+
+Batch exception-directory registration uses the same exact-one reservation
+validation. For each image it reads PE data directory 3, requires whole aligned
+`RUNTIME_FUNCTION` entries in ascending order inside `SizeOfImage`, and requires
+the directory, function ranges and fixed unwind-data bytes to be backed by
+committed image headers or sections. Valid tables are registered in input order
+for the existing x64 exception lookup path, while an absent directory is an
+honest no-op. Registration writes no guest bytes; if a later image fails, the
+function-table list is truncated to its original length so earlier registrations
+do not remain visible. Language-specific variable-sized handler data is not fully bounded here. This
+does not execute module code, change unwind semantics, implement dynamic
+function-table APIs or provide unloading.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,

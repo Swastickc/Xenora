@@ -78,8 +78,27 @@ fn read_guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>,
     Ok(None)
 }
 
+// The object keys of the drive are relative to its root, so a leading
+// separator - which anchors the path at the drive root on Windows - is
+// consumed rather than validated as a component: the anchor itself names no
+// component. Exactly one separator is consumed. A second would be the UNC
+// prefix this model cannot express, and stays invalid through the empty
+// leading component it leaves behind; so does the bare root, which no
+// object operation names. Consumers that resolve paths lexically against
+// the working directory read the raw form instead, because the anchor is
+// load-bearing there.
+fn strip_root_anchor(name: &str) -> &str {
+    name.strip_prefix('\\').unwrap_or(name)
+}
+
+fn valid_key(name: &str) -> bool {
+    !name.is_empty() && name.split('\\').all(valid_component)
+}
+
 fn guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
-    Ok(read_guest_path(memory, address)?.filter(|name| name.split('\\').all(valid_component)))
+    Ok(read_guest_path(memory, address)?
+        .map(|name| strip_root_anchor(&name).to_owned())
+        .filter(|name| valid_key(name)))
 }
 
 /// The narrow form of `read_guest_path`: the process code page is UTF-8, so
@@ -107,7 +126,9 @@ fn read_guest_path_a(memory: &GuestMemory, address: u64) -> Result<Option<String
 }
 
 fn guest_path_a(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
-    Ok(read_guest_path_a(memory, address)?.filter(|name| name.split('\\').all(valid_component)))
+    Ok(read_guest_path_a(memory, address)?
+        .map(|name| strip_root_anchor(&name).to_owned())
+        .filter(|name| valid_key(name)))
 }
 
 // The operations the wide and narrow forms share. Each answers the error
@@ -2183,8 +2204,9 @@ impl super::ObjectState {
         let path = String::from_utf8_lossy(name)
             .replace('/', "\\")
             .to_ascii_lowercase();
-        let path = path.strip_prefix("c:\\").unwrap_or(&path).to_owned();
-        path.split('\\').all(valid_component).then_some(path)
+        let path = path.strip_prefix("c:\\").unwrap_or(&path);
+        let path = strip_root_anchor(path).to_owned();
+        valid_key(&path).then_some(path)
     }
 
     pub(super) fn drive_entry(&self, path: &str) -> DriveEntry {

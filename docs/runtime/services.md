@@ -10,8 +10,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | Generated adapters | 300 |
 | Unique handler implementations | 282 |
 | Implemented | 101 |
-| Partial | 197 |
-| Stub | 2 |
+| Partial | 199 |
+| Stub | 0 |
 | Conformance-tested through guest dispatch | 300 |
 | API-set aliases (not services) | 373 |
 | Independently accepted | 0 |
@@ -220,8 +220,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_initialize_narrow_environment` | `() -> i32` | partial | stops the guest when the table cannot be allocated |
 | `kernel32.dll!VirtualAlloc` | `(address: ptr, size: u64, kind: u32, protect: u32) -> ptr` | partial | 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_INVALID_ADDRESS or ERROR_NOT_ENOUGH_MEMORY |
 | `kernel32.dll!VirtualFree` | `(address: ptr, size: u64, kind: u32) -> bool32` | partial | 0 with ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS |
-| `kernel32.dll!VirtualProtect` | `(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32` | stub | always: stops the guest with the runtime-limit fault; no protection changes |
-| `kernel32.dll!VirtualQuery` | `(address: ptr, information: out<48>, length: u64) -> u64` | stub | always: stops the guest with the runtime-limit fault; nothing is written |
+| `kernel32.dll!VirtualProtect` | `(address: ptr, size: u64, protect: u32, old: out<4>) -> bool32` | partial | 0 with ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED or ERROR_INVALID_ADDRESS; executable protections and non-VirtualAlloc ownership are unsupported; invalid spans change nothing |
+| `kernel32.dll!VirtualQuery` | `(address: ptr, information: out<48>, length: u64) -> u64` | partial | 0 with ERROR_INVALID_PARAMETER or ERROR_INVALID_ADDRESS |
 | `ucrtbase.dll!sqrt` | `(x: f64) -> f64` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!sqrtf` | `(x: f32) -> f32` | partial | NaN for a negative argument; errno is not set |
 | `ucrtbase.dll!fabs` | `(x: f64) -> f64` | implemented | never |
@@ -315,6 +315,6 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `combase.dll!CoGetClassObject` | `(clsid: ptr, class_context: u32, server_info: ptr, iid: ptr, object: ptr) -> i32` | partial | uninitialized threads return CO_E_NOTINITIALIZED; ordinary runtime has no registered classes; remote activation is unsupported |
 | `combase.dll!CoCreateInstanceEx` | `(clsid: ptr, outer: ptr, class_context: u32, server_info: ptr, count: u32, results: ptr) -> i32` | partial | validates up to 64 MULTI_QI records; refuses remote or larger requests; ordinary runtime has no registered classes and output records remain unchanged on class lookup failure |
 | `combase.dll!PropVariantClear` | `(variant: ptr) -> i32` | partial | stops the guest for a null pointer, array, vector and by-reference forms, VT_BSTR, VT_UNKNOWN and VT_DISPATCH; their results or release paths are not modelled |
-| `libstdc++-6.dll!__cxa_guard_acquire` | `(guard: ptr) -> i32` | partial | -1 with ERROR_INVALID_PARAMETER for a null, unaligned, unmapped or contended guard |
+| `libstdc++-6.dll!__cxa_guard_acquire` | `(guard: ptr) -> i32` | partial | stops the guest with the runtime-limit fault for a null, unaligned, unmapped, contended or reentrant guard |
 | `libstdc++-6.dll!__cxa_guard_release` | `(guard: ptr) -> void` | partial | stops the guest for a guard the calling thread did not acquire |
 | `libstdc++-6.dll!__cxa_guard_abort` | `(guard: ptr) -> void` | partial | stops the guest for a guard the calling thread did not acquire |

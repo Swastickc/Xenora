@@ -184,6 +184,7 @@ dependencies = [
 name = "xenora-ffi"
 version = "0.1.0"
 dependencies = [
+ "xenora-input",
  "xenora-loader",
  "xenora-metal",
  "xenora-shader",

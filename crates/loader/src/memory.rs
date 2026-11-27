@@ -113,6 +113,29 @@ struct MappedRegion {
     data: Vec<u8>,
     permissions: MemoryPermissions,
     allocation: AllocationKind,
+    /// Base of the initial allocation this region came from. Splitting a
+    /// region for `VirtualProtect` preserves it, so adjacent but independent
+    /// allocations remain distinct ownership domains.
+    allocation_base: u64,
+}
+
+/// Why a requested protection change was not made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProtectionError {
+    Overflow,
+    Unmapped(u64),
+    CrossesAllocations,
+    UnsupportedAllocation,
+}
+
+/// Committed-memory attributes exposed to the virtual-memory services.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommittedRegionInfo {
+    pub(crate) base: u64,
+    pub(crate) end: u64,
+    pub(crate) allocation_base: u64,
+    pub(crate) permissions: MemoryPermissions,
+    pub(crate) image: bool,
 }
 
 impl MappedRegion {
@@ -246,6 +269,7 @@ impl GuestMemory {
             data,
             permissions,
             allocation,
+            allocation_base: base,
         });
         self.regions.sort_by_key(|r| r.base);
         Ok(())
@@ -553,6 +577,149 @@ impl GuestMemory {
         self.release_dynamic_allocation(base, AllocationKind::Heap(heap))
     }
 
+    /// Base of the image allocation a region belongs to, when Xenora knows
+    /// it as part of the main image or of an explicit module reservation.
+    fn image_allocation_base(&self, region: &MappedRegion) -> Option<u64> {
+        if region.allocation != AllocationKind::ImageOrStatic {
+            return None;
+        }
+        if let Some(image) = self.main_image {
+            let image_end = image.base.checked_add(u64::from(image.size))?;
+            if image.base <= region.base && region.base < image_end {
+                return Some(image.base);
+            }
+        }
+        self.module_reservations
+            .iter()
+            .find(|&&(base, end)| base <= region.base && region.base < end)
+            .map(|&(base, _)| base)
+    }
+
+    fn allocation_identity(&self, region: &MappedRegion) -> u64 {
+        self.image_allocation_base(region)
+            .unwrap_or(region.allocation_base)
+    }
+
+    /// Describe the committed region containing `address`. Holes in retained
+    /// module reservations are not committed memory and therefore return none.
+    pub(crate) fn committed_region_info(&self, address: u64) -> Option<CommittedRegionInfo> {
+        let (_, region) = self.first_ending_after(address)?;
+        if region.base > address || region.data.is_empty() {
+            return None;
+        }
+        let end = region.base.checked_add(region.data.len() as u64)?;
+        Some(CommittedRegionInfo {
+            base: region.base,
+            end,
+            allocation_base: self.allocation_identity(region),
+            permissions: region.permissions,
+            image: self.image_allocation_base(region).is_some(),
+        })
+    }
+
+    /// Validate the already page-rounded `[start, end)` span for a protection
+    /// change and return the first page's current permissions. No mutation is
+    /// made, so a service can validate its output pointer before committing.
+    pub(crate) fn validate_committed_protection_range(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Result<MemoryPermissions, ProtectionError> {
+        if end <= start {
+            return Err(ProtectionError::Overflow);
+        }
+        let len = usize::try_from(end - start).map_err(|_| ProtectionError::Overflow)?;
+        let pieces = self
+            .resolve(start, len, None)
+            .map_err(|error| match error {
+                MemoryError::UnmappedAddress(address) => ProtectionError::Unmapped(address),
+                _ => ProtectionError::Overflow,
+            })?;
+        let first = pieces
+            .first()
+            .and_then(|&(index, _, _)| self.regions.get(index))
+            .ok_or(ProtectionError::Unmapped(start))?;
+        let old = first.permissions;
+        if !matches!(
+            first.allocation,
+            AllocationKind::ImageOrStatic | AllocationKind::Virtual
+        ) {
+            return Err(ProtectionError::UnsupportedAllocation);
+        }
+        let identity = (first.allocation, self.allocation_identity(first));
+        for &(index, _, _) in &pieces {
+            let region = &self.regions[index];
+            if (region.allocation, self.allocation_identity(region)) != identity {
+                return Err(ProtectionError::CrossesAllocations);
+            }
+        }
+        Ok(old)
+    }
+
+    /// Change permissions over the already page-rounded `[start, end)` span.
+    /// The caller has validated the public arguments. Complete committed
+    /// coverage and one allocation ownership domain are checked before
+    /// mutating, so an invalid span leaves every region unchanged.
+    pub(crate) fn protect_committed_range(
+        &mut self,
+        start: u64,
+        end: u64,
+        permissions: MemoryPermissions,
+    ) -> Result<MemoryPermissions, ProtectionError> {
+        let len = usize::try_from(end - start).map_err(|_| ProtectionError::Overflow)?;
+        let pieces = self
+            .resolve(start, len, None)
+            .map_err(|error| match error {
+                MemoryError::UnmappedAddress(address) => ProtectionError::Unmapped(address),
+                _ => ProtectionError::Overflow,
+            })?;
+        let old = self.validate_committed_protection_range(start, end)?;
+
+        let regions = std::mem::take(&mut self.regions);
+        let mut rebuilt = Vec::with_capacity(regions.len() + pieces.len() * 2);
+        for mut region in regions {
+            let region_end = region.base + region.data.len() as u64;
+            if region.data.is_empty() || end <= region.base || region_end <= start {
+                rebuilt.push(region);
+                continue;
+            }
+            if start <= region.base && region_end <= end {
+                region.permissions = permissions;
+                rebuilt.push(region);
+                continue;
+            }
+
+            let middle_start = start.max(region.base);
+            let middle_end = end.min(region_end);
+            let base = region.base;
+            let allocation = region.allocation;
+            let allocation_base = region.allocation_base;
+            let old_permissions = region.permissions;
+            let data = region.data;
+            let mut push_piece = |piece_base: u64, offset: usize, len: usize, piece_permissions| {
+                if len != 0 {
+                    rebuilt.push(MappedRegion {
+                        base: piece_base,
+                        data: data[offset..offset + len].to_vec(),
+                        permissions: piece_permissions,
+                        allocation,
+                        allocation_base,
+                    });
+                }
+            };
+            let prefix_len = (middle_start - base) as usize;
+            push_piece(base, 0, prefix_len, old_permissions);
+            let middle_offset = prefix_len;
+            let middle_len = (middle_end - middle_start) as usize;
+            push_piece(middle_start, middle_offset, middle_len, permissions);
+            let suffix_offset = middle_offset + middle_len;
+            let suffix_len = (region_end - middle_end) as usize;
+            push_piece(middle_end, suffix_offset, suffix_len, old_permissions);
+        }
+        self.regions = rebuilt;
+        Ok(old)
+    }
+
     pub(crate) fn heap_allocation_size(&self, heap: u64, base: u64) -> Option<usize> {
         self.regions
             .iter()
@@ -561,6 +728,18 @@ impl GuestMemory {
     }
 
     fn release_dynamic_allocation(&mut self, base: u64, allocation: AllocationKind) -> bool {
+        if allocation == AllocationKind::Virtual {
+            let before = self.regions.len();
+            // VirtualProtect may split one virtual allocation into adjacent
+            // regions. Its original allocation base, not the current piece
+            // base, is the ownership key. Other allocation kinds cannot be
+            // split by the supported protection surface, and heap allocations
+            // may share a base while empty, so they keep exact-base removal.
+            self.regions.retain(|region| {
+                !(region.allocation == allocation && region.allocation_base == base)
+            });
+            return self.regions.len() != before;
+        }
         let Some(index) = self
             .regions
             .iter()
@@ -876,6 +1055,22 @@ mod tests {
         assert!(memory.read_u8(address).is_err());
         assert_eq!(memory.read_u8(retained), Ok(0));
         assert_ne!(memory.create_private_heap(0).unwrap(), private);
+    }
+
+    #[test]
+    fn protection_rejects_unsupported_allocation_ownership() {
+        let mut memory = GuestMemory::new();
+        let heap = memory.map_heap_allocation(PROCESS_HEAP, 0x1000).unwrap();
+        let xmem = memory
+            .map_xmem_allocation(0, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        for base in [heap, xmem] {
+            assert_eq!(
+                memory.validate_committed_protection_range(base, base + 0x1000),
+                Err(ProtectionError::UnsupportedAllocation)
+            );
+            memory.write_u8(base, 0x5a).unwrap();
+        }
     }
 
     #[test]

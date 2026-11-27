@@ -4554,6 +4554,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_putenv",
+      "kind": "name",
+      "library": "api-ms-win-crt-environment-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_putenv"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "getenv",
       "kind": "name",
       "library": "api-ms-win-crt-environment-l1-1-0.dll",
@@ -6404,6 +6414,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "setbuf",
+      "kind": "name",
+      "library": "api-ms-win-crt-stdio-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "setbuf"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "setvbuf",
       "kind": "name",
       "library": "api-ms-win-crt-stdio-l1-1-0.dll",
@@ -7824,6 +7844,16 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_putenv",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "status": "partial",
+      "symbol": "_putenv"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_read",
       "kind": "name",
       "library": "msvcrt.dll",
@@ -8244,6 +8274,16 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "getenv_s",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "status": "partial",
+      "symbol": "getenv_s"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "isalnum",
       "kind": "name",
       "library": "msvcrt.dll",
@@ -8509,6 +8549,16 @@
       "library": "msvcrt.dll",
       "status": "partial",
       "symbol": "rewind"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "setbuf",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "status": "partial",
+      "symbol": "setbuf"
     },
     {
       "api_set": false,
@@ -9548,6 +9598,16 @@
   },
   "schema": 1,
   "services": [
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "advapi32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "AccessCheck"
+    },
     {
       "data_import": false,
       "family": "windows-system",
@@ -14273,6 +14333,16 @@
       "family": "c-runtime",
       "kind": "name",
       "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_putenv"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
       "source": "typed",
       "status": "implemented",
       "status_explicit": true,
@@ -15937,6 +16007,16 @@
       "status": "implemented",
       "status_explicit": true,
       "symbol": "roundf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "setbuf"
     },
     {
       "data_import": false,
@@ -18030,9 +18110,9 @@
     }
   ],
   "summary": {
-    "aliases": 870,
-    "api_set_aliases": 723,
-    "canonical_services": 834,
+    "aliases": 905,
+    "api_set_aliases": 739,
+    "canonical_services": 851,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 235,
@@ -18040,11 +18120,11 @@
     "libraries": 21,
     "manual_services": 568,
     "ordinal_aliases": 0,
-    "partial": 613,
+    "partial": 614,
     "structural_consistency_findings": 0,
     "stub": 2,
-    "typed_registry_entries": 266,
-    "typed_services": 266,
+    "typed_registry_entries": 283,
+    "typed_services": 283,
     "wanted_imports": null,
     "wanted_missing": null
   },

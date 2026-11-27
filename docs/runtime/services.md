@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 282 |
-| Generated adapters | 282 |
-| Unique handler implementations | 273 |
+| Services with a declared ABI | 283 |
+| Generated adapters | 283 |
+| Unique handler implementations | 274 |
 | Implemented | 100 |
-| Partial | 180 |
+| Partial | 181 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 282 |
-| API-set aliases (not services) | 366 |
+| Conformance-tested through guest dispatch | 283 |
+| API-set aliases (not services) | 368 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -45,6 +45,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fputs` | `(text: ptr, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fflush` | `(stream: ptr) -> i32` | partial | stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!setvbuf` | `(stream: ptr, buffer: ptr, mode: i32, size: u64) -> i32` | partial | -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream |
+| `ucrtbase.dll!setbuf` | `(stream: ptr, buffer: ptr) -> void` | partial | errno EINVAL for a null stream; stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!fread` | `(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64` | partial | 0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once |
 | `ucrtbase.dll!fgetc` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream or EBADF for one open for writing |
 | `ucrtbase.dll!fseek` | `(stream: ptr, offset: i32, origin: i32) -> i32` | partial | -1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream |

@@ -2773,6 +2773,23 @@ fn fflush_and_setvbuf_return_their_documented_results() {
     }
     assert_eq!(guest.run("setvbuf", &[TEXT, 0, 4, 0]).1, LIMIT);
 
+    // `setbuf` is the legacy reduction: the buffer pointer only chooses
+    // between full and no buffering, and both are accepted for a real
+    // stream because output is never held back either way.
+    guest.set_errno(0);
+    for stream in [input, out, err] {
+        guest.call("setbuf", &[stream, TEXT]);
+        assert_eq!(guest.errno(), 0, "{stream:#x}");
+        guest.call("setbuf", &[stream, 0]);
+        assert_eq!(guest.errno(), 0, "{stream:#x}");
+    }
+    // A null stream is errno EINVAL through the void return; a pointer
+    // that is no stream stops the guest, as it does for `setvbuf`.
+    guest.call("setbuf", &[0, TEXT]);
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    guest.set_errno(0);
+    assert_eq!(guest.run("setbuf", &[TEXT, 0]).1, LIMIT);
+
     // Neither function holds output back or lets any through.
     assert!(guest.state.standard_output().is_empty());
     assert_eq!(print(&mut guest, out, b"now", &[]), 3);

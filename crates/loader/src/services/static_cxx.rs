@@ -19,7 +19,8 @@ use super::advapi::fill_random;
 use super::crt::set_errno;
 use crate::cpu::ExitReason;
 use crate::imports::{CallbackStart, CallbackStep, CallbackTask, ImportRegistry, ServiceStatus};
-use crate::memory::{GuestMemory, MemoryError};
+use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
+use super::ServicesState;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -79,7 +80,40 @@ impl CallbackTask for Once {
     }
 }
 
-pub(super) fn register(registry: &mut ImportRegistry) {
+/// The CRT environment lookup shared by `getenv` and `getenv_s`: read the
+/// narrow name at the guest address and find it case-insensitively in the
+/// CRT's own copy, answering the original casing and the guest pointer of
+/// the CRT-owned `NAME=VALUE` string.
+fn crt_environment_lookup(
+    state: &Arc<ServicesState>,
+    memory: &mut GuestMemory,
+    name_addr: u64,
+) -> Result<Option<(String, u64)>, ExitReason> {
+    let mut name_bytes = Vec::new();
+    let mut at = name_addr;
+    loop {
+        let byte = memory.read_u8(at).map_err(fault)?;
+        if byte == 0 {
+            break;
+        }
+        name_bytes.push(byte);
+        at = at.checked_add(1).ok_or(fault(MemoryError::Overflow))?;
+        if name_bytes.len() >= 1024 {
+            break;
+        }
+    }
+    let name = String::from_utf8_lossy(&name_bytes).into_owned();
+    let found = state
+        .crt_environment
+        .lock()
+        .expect("crt environment")
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+        .map(|(key, ptr)| (key.clone(), *ptr));
+    Ok(found)
+}
+
+pub(super) fn register(registry: &mut ImportRegistry, crt_state: &Arc<ServicesState>) {
     let state = Arc::new(Mutex::new(Pthreads::default()));
     let lock = move || Arc::clone(&state);
 
@@ -248,9 +282,131 @@ pub(super) fn register(registry: &mut ImportRegistry) {
             }
         },
     );
-    // The environment table is empty (see crt_arguments.rs), so no variable is set.
-    registry.register_with_status(UCRT, "getenv", ServiceStatus::Partial, |args, _, memory| {
-        memory.read_u8(args.rcx).map_err(fault)?;
+    // The C runtime's own environment, the copy `_putenv` maintains and
+    // `getenv` reads - separate from the kernel32 block exactly as on
+    // Windows, where the CRT keeps its own. Strings are copied into
+    // CRT-owned guest memory because the CRT owns them once inserted;
+    // removals leak the old copy, which no correct program can observe.
+    // What this does not yet do is rebuild the `_environ` table the
+    // startup snapshot fixed: programs reading `_environ` directly see
+    // the empty startup table, honestly documented.
+    let get_state = Arc::clone(crt_state);
+    registry.register_with_status(UCRT, "getenv", ServiceStatus::Partial, move |args, _, memory| {
+        // An empty or null name never resolves.
+        if args.rcx == 0 || memory.read_u8(args.rcx).map_err(fault)? == 0 {
+            return Ok(0);
+        }
+        match crt_environment_lookup(&get_state, memory, args.rcx)? {
+            Some((key, pointer)) => Ok(pointer + key.len() as u64 + 1),
+            None => Ok(0),
+        }
+    });
+
+    // `_putenv` inserts or removes one variable of the CRT's own
+    // environment. `NAME=` removes; a missing equals sign or empty name is
+    // the documented EINVAL.
+    let put_state = Arc::clone(crt_state);
+    registry.register_with_status(UCRT, "_putenv", ServiceStatus::Partial, move |args, cpu, memory| {
+        let mut bytes = Vec::new();
+        let mut at = args.rcx;
+        loop {
+            let byte = memory.read_u8(at).map_err(fault)?;
+            if byte == 0 {
+                break;
+            }
+            bytes.push(byte);
+            at = at.checked_add(1).ok_or(fault(MemoryError::Overflow))?;
+            if bytes.len() >= 32768 {
+                break;
+            }
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let invalid = |memory: &mut GuestMemory| -> Result<u64, ExitReason> {
+            set_errno(memory, cpu.gs_base, EINVAL as u32)?;
+            Ok(u64::from(u32::MAX))
+        };
+        let Some(equals) = text.find('=') else {
+            return invalid(memory);
+        };
+        let name = &text[..equals];
+        if name.is_empty() {
+            return invalid(memory);
+        }
+        let mut environment = put_state.crt_environment.lock().expect("crt environment");
+        if equals == text.len() - 1 {
+            // `NAME=` removes the variable.
+            environment.retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+            return Ok(0);
+        }
+        // The CRT owns the string once inserted: copy it into CRT-owned
+        // guest memory so the answer survives the caller reusing its buffer.
+        let allocation = memory
+            .map_heap_allocation(PROCESS_HEAP, bytes.len() + 1)
+            .map_err(fault)?;
+        memory.write_bytes(allocation, &bytes).map_err(fault)?;
+        memory.write_u8(allocation + bytes.len() as u64, 0).map_err(fault)?;
+        if let Some(entry) = environment
+            .iter_mut()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        {
+            entry.0 = name.to_owned();
+            entry.1 = allocation;
+        } else {
+            environment.push((name.to_owned(), allocation));
+        }
+        Ok(0)
+    });
+
+    // `getenv_s` is the bounded form over the same CRT copy: undefined is
+    // the documented empty answer, a defined variable reports its size and
+    // copies while the buffer holds it, ERANGE honestly when it cannot.
+    let gets_state = Arc::clone(crt_state);
+    registry.register_with_status(UCRT, "getenv_s", ServiceStatus::Partial, move |args, cpu, memory| {
+        let (size_at, buffer, buffer_size, name) = (args.rcx, args.rdx, args.r8, args.r9);
+        if size_at == 0 || name == 0 {
+            set_errno(memory, cpu.gs_base, EINVAL as u32)?;
+            return Ok(u64::from(EINVAL));
+        }
+        let found = if memory.read_u8(name).map_err(fault)? == 0 {
+            None
+        } else {
+            crt_environment_lookup(&gets_state, memory, name)?
+        };
+        let Some((key, pointer)) = found else {
+            memory
+                .write_u64(size_at, 0)
+                .map_err(ExitReason::MemoryFault)?;
+            if buffer != 0 && buffer_size != 0 {
+                memory
+                    .write_u8(buffer, 0)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            return Ok(0);
+        };
+        // Read the value out of the CRT-owned NAME=VALUE string.
+        let value_at = pointer + key.len() as u64 + 1;
+        let mut value = Vec::new();
+        let mut at = value_at;
+        loop {
+            let byte = memory.read_u8(at).map_err(fault)?;
+            if byte == 0 {
+                break;
+            }
+            value.push(byte);
+            at = at.checked_add(1).ok_or(fault(MemoryError::Overflow))?;
+        }
+        let needed = value.len() as u64 + 1;
+        memory
+            .write_u64(size_at, needed)
+            .map_err(ExitReason::MemoryFault)?;
+        if buffer == 0 || buffer_size < needed {
+            set_errno(memory, cpu.gs_base, 34)?; // ERANGE
+            return Ok(34);
+        }
+        memory.write_bytes(buffer, &value).map_err(fault)?;
+        memory
+            .write_u8(buffer + value.len() as u64, 0)
+            .map_err(fault)?;
         Ok(0)
     });
     // `LocalFree` is no longer a null-only stub here: the heap services
@@ -277,13 +433,15 @@ pub(super) fn register(registry: &mut ImportRegistry) {
         ("api-ms-win-crt-string-l1-1-0.dll", "memchr"),
         ("api-ms-win-crt-string-l1-1-0.dll", "strchr"),
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv"),
+        ("api-ms-win-crt-environment-l1-1-0.dll", "_putenv"),
+        ("api-ms-win-crt-environment-l1-1-0.dll", "getenv_s"),
         ("api-ms-win-crt-utility-l1-1-0.dll", "rand_s"),
     ] {
         registry.alias(api_set, UCRT, symbol);
     }
     // The legacy CRT exports the same memory, string and environment forms
     // under the same names, as it does for the forms crt.rs serves.
-    for symbol in ["memchr", "strchr", "getenv"] {
+    for symbol in ["memchr", "strchr", "getenv", "_putenv", "getenv_s"] {
         registry.alias("msvcrt.dll", UCRT, symbol);
     }
 }
@@ -312,7 +470,8 @@ mod tests {
     #[test]
     fn rand_s_host_entropy_writes_full_words_and_resolves_its_api_set() {
         let mut registry = ImportRegistry::new();
-        register(&mut registry);
+        let state = Arc::new(ServicesState::new(Arc::new(crate::services::MockClock::new(0))));
+        register(&mut registry, &state);
         let mut memory = memory();
         let call = |memory: &mut GuestMemory, output: u64| {
             let mut cpu = CpuState::default();
@@ -382,4 +541,74 @@ mod tests {
         assert_eq!(memory.read_u32(0x1000).unwrap(), 0x1234_5678);
         assert_eq!(errno(&mut memory, 0x7000), EINVAL as u32);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn putenv_maintains_the_crt_copy_getenv_reads() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 0x1000, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    memory.map_region(0x4000, 0x4000, MemoryPermissions::READ_WRITE).unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x5000);
+        let descriptor = registry
+            .resolve(UCRT, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    let write = |memory: &mut GuestMemory, at: u64, text: &[u8]| {
+        memory.write_bytes(at, text).unwrap();
+        memory.write_u8(at + text.len() as u64, 0).unwrap();
+    };
+    // Undefined before any insertion.
+    write(&mut memory, 0x6000, b"XENO_TEST");
+    assert_eq!(call(&mut memory, "getenv", &[0x6000]), 0);
+    // Insert, then read back the value bytes.
+    write(&mut memory, 0x6100, b"XENO_TEST=hello");
+    assert_eq!(call(&mut memory, "_putenv", &[0x6100]), 0);
+    let value = call(&mut memory, "getenv", &[0x6000]);
+    assert_ne!(value, 0);
+    let mut bytes = [0; 5];
+    memory.read_bytes(value, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"hello");
+    // Case-insensitive lookup, as the Windows environment is.
+    write(&mut memory, 0x6000, b"xeno_test");
+    assert_eq!(call(&mut memory, "getenv", &[0x6000]), value);
+    // Replacement answers the new value even though the caller's buffer
+    // is gone - the CRT owns its copy.
+    write(&mut memory, 0x6100, b"XENO_TEST=world!");
+    assert_eq!(call(&mut memory, "_putenv", &[0x6100]), 0);
+    write(&mut memory, 0x6100, b"xxxxxxxxxxxxxxx");
+    let value = call(&mut memory, "getenv", &[0x6000]);
+    let mut bytes = [0; 6];
+    memory.read_bytes(value, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"world!");
+    // `NAME=` removes.
+    write(&mut memory, 0x6100, b"XENO_TEST=");
+    assert_eq!(call(&mut memory, "_putenv", &[0x6100]), 0);
+    write(&mut memory, 0x6000, b"XENO_TEST");
+    assert_eq!(call(&mut memory, "getenv", &[0x6000]), 0);
+    // Malformed inputs are the documented failure, not a crash.
+    write(&mut memory, 0x6100, b"NOEQUALSSIGN");
+    assert_eq!(call(&mut memory, "_putenv", &[0x6100]) as u32, u32::MAX);
+    write(&mut memory, 0x6100, b"=empty");
+    assert_eq!(call(&mut memory, "_putenv", &[0x6100]) as u32, u32::MAX);
 }

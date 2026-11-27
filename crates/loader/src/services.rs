@@ -288,6 +288,11 @@ pub struct ServicesState {
     /// follow it, which is the real Windows behaviour: the CRT keeps its own
     /// copy, and only `_putenv` would update that one.
     pub(crate) environment: Mutex<Vec<(String, String)>>,
+    /// The C runtime's own environment copy, separate from the kernel32
+    /// block as it is on Windows: only `_putenv` writes it, and `getenv`
+    /// reads it. Each entry is the variable's original name casing and the
+    /// guest address of the CRT-owned `NAME=VALUE` string copy.
+    pub(crate) crt_environment: Mutex<Vec<(String, u64)>>,
     /// Emulated thread-local storage: the block each guest thread owns for
     /// each thread-local variable, keyed by the guest thread and then by the
     /// address of the variable's descriptor.
@@ -374,6 +379,7 @@ impl ServicesState {
             hooks: Arc::default(),
             atexit: Mutex::default(),
             environment: Mutex::default(),
+            crt_environment: Mutex::default(),
             emutls: Mutex::default(),
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
@@ -676,7 +682,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crate::runtime_table::register(registry, &state);
     registry.hooks = Some(Arc::clone(&state.hooks));
     threads::register(registry, &state);
-    static_cxx::register(registry);
+    static_cxx::register(registry, &state);
     crate::exceptions::register(registry);
     crt_jump::register(registry);
     xnetworking::register(registry);
@@ -1676,6 +1682,11 @@ pub(crate) mod handlers {
         size: u64,
     ) -> Outcome<i32> {
         let outcome = context.state.crt_streams().set_buffer(stream, mode, size);
+        or_errno(context, outcome)
+    }
+
+    pub fn setbuf(context: &mut ServiceContext<'_>, stream: u64, _buffer: u64) -> Outcome<()> {
+        let outcome = context.state.crt_streams().set_buffer_legacy(stream);
         or_errno(context, outcome)
     }
 

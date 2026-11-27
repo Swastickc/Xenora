@@ -12,16 +12,16 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 834 |
-| Typed registry services | 266 |
+| Canonical services | 851 |
+| Typed registry services | 283 |
 | Manual code registrations | 568 |
 | Canonical libraries | 21 |
-| Implemented | 219 |
-| Partial | 613 |
+| Implemented | 235 |
+| Partial | 614 |
 | Stub | 2 |
 | Data-import services | 7 |
-| Aliases of every kind | 900 |
-| API-set aliases | 737 |
+| Aliases of every kind | 905 |
+| API-set aliases | 739 |
 | Ordinal aliases | 0 |
 | Statuses never explicitly set | 76 |
 | Duplicate canonical registrations | 0 |
@@ -31,7 +31,7 @@ independent acceptance or compatibility claims.
 
 | Library | Family | Total | Typed | Manual | Data | Implemented | Partial | Stub | Implicit status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| <code>advapi32.dll</code> | <code>windows-system</code> | 20 | 0 | 20 | 0 | 1 | 19 | 0 | 0 |
+| <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 274 | 2 | 26 |
@@ -40,7 +40,7 @@ independent acceptance or compatibility claims.
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
 | <code>msvcrt.dll</code> | <code>c-runtime</code> | 30 | 4 | 26 | 7 | 14 | 16 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 294 | 205 | 89 | 0 | 103 | 191 | 0 | 10 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 296 | 206 | 90 | 0 | 103 | 193 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 6 | 0 | 6 | 0 | 0 | 6 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 11 | 0 | 11 | 0 | 0 | 11 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
@@ -60,9 +60,9 @@ metadata, are in `inventory.json`.
 
 | Alias kind | Count |
 | --- | --- |
-| API-set | 737 |
+| API-set | 739 |
 | Ordinal | 0 |
-| Other module | 163 |
+| Other module | 166 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.
 

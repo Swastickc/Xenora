@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 251 |
-| Generated adapters | 251 |
-| Unique handler implementations | 242 |
+| Services with a declared ABI | 266 |
+| Generated adapters | 266 |
+| Unique handler implementations | 257 |
 | Implemented | 84 |
-| Partial | 165 |
+| Partial | 180 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 251 |
-| API-set aliases (not services) | 299 |
+| Conformance-tested through guest dispatch | 266 |
+| API-set aliases (not services) | 334 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -34,6 +34,7 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!__acrt_iob_func` | `(index: u32) -> ptr` | partial | stops the guest for an index above 2 or when the streams cannot be allocated |
 | `ucrtbase.dll!__stdio_common_vfprintf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vsscanf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale |
+| `ucrtbase.dll!__stdio_common_vfscanf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream or format; EOF with errno EBADF for stdout, stderr or a stream not open for reading; EOF for an input failure before the first conversion; stops the guest for a pointer that is no stream and as __stdio_common_vsscanf does |
 | `ucrtbase.dll!__stdio_common_vsprintf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null format or a null buffer with a nonzero count, or an invalid format; -1 without errno for a legacy truncation; stops the guest when both behaviour bits are set or for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vswprintf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null format or an invalid one; stops the guest for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vsprintf_s` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null buffer, a zero count, a null or invalid format, or ERANGE when the text does not fit, and the buffer becomes empty; the invalid parameter handler is not modelled, so execution always continues |
@@ -269,3 +270,17 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!SetConsoleTitleA` | `(title: ptr) -> bool32` | partial | FALSE with ERROR_INVALID_PARAMETER for a null title |
 | `kernel32.dll!GetConsoleTitleA` | `(buffer: ptr, size: u32) -> u32` | partial | 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size, the same documented length answer as the wide form |
 | `ucrtbase.dll!_getpid` | `() -> i32` | implemented | never |
+| `combase.dll!CoInitialize` | `(reserved: ptr) -> i32` | partial | E_INVALIDARG for a non-null reserved pointer; RPC_E_CHANGED_MODE for an existing multithreaded apartment |
+| `combase.dll!CoInitializeEx` | `(reserved: ptr, model: u32) -> i32` | partial | E_INVALIDARG for a non-null reserved pointer or a COINIT bit outside the documented set; RPC_E_CHANGED_MODE when the thread already initialized the other apartment model |
+| `combase.dll!CoUninitialize` | `() -> void` | partial | never; a thread with no outstanding initialization is left unchanged |
+| `combase.dll!CoCreateGuid` | `(guid: out<16>) -> i32` | partial | E_UNEXPECTED when the host has no entropy; a guest fault for an address it cannot write |
+| `combase.dll!StringFromGUID2` | `(guid: ptr, text: ptr, capacity: i32) -> i32` | partial | 0 and no write when capacity is below 39 units; a guest fault for a GUID or buffer address it cannot access |
+| `combase.dll!CLSIDFromString` | `(text: ptr, clsid: out<16>) -> i32` | partial | CO_E_CLASSSTRING and no write for text that is not the braced or bare CLSID form; NULL produces GUID_NULL; a guest fault for an address it cannot read |
+| `combase.dll!IIDFromString` | `(text: ptr, clsid: out<16>) -> i32` | partial | E_INVALIDARG for malformed text by Xenora policy; NULL produces GUID_NULL; invalid guest pointers fault |
+| `combase.dll!CoTaskMemAlloc` | `(size: u64) -> ptr` | partial | null when the task allocator cannot map the block; a zero size requests the smallest block |
+| `combase.dll!CoTaskMemFree` | `(address: ptr) -> void` | partial | never for the null pointer; Xenora faults the guest for a block the task allocator does not own |
+| `combase.dll!CoTaskMemRealloc` | `(address: ptr, size: u64) -> ptr` | partial | null with the original block unchanged when the grow fails, null after freeing for a zero size, and a guest fault for a block the task allocator does not own |
+| `combase.dll!CoCreateInstance` | `(clsid: ptr, outer: ptr, class_context: u32, iid: ptr, object: ptr) -> i32` | partial | E_POINTER for a null out pointer, E_INVALIDARG for a null CLSID or IID, CO_E_NOTINITIALIZED for an uninitialized thread, and REGDB_E_CLASSNOTREG for unregistered classes; the out pointer is nulled first; a synthetic class exists only with explicit fixture registration |
+| `combase.dll!CoGetClassObject` | `(clsid: ptr, class_context: u32, server_info: ptr, iid: ptr, object: ptr) -> i32` | partial | uninitialized threads return CO_E_NOTINITIALIZED; ordinary runtime has no registered classes; remote activation is unsupported |
+| `combase.dll!CoCreateInstanceEx` | `(clsid: ptr, outer: ptr, class_context: u32, server_info: ptr, count: u32, results: ptr) -> i32` | partial | validates up to 64 MULTI_QI records; refuses remote or larger requests; ordinary runtime has no registered classes and output records remain unchanged on class lookup failure |
+| `combase.dll!PropVariantClear` | `(variant: ptr) -> i32` | partial | stops the guest for a null pointer, array, vector and by-reference forms, VT_BSTR, VT_UNKNOWN and VT_DISPATCH; their results or release paths are not modelled |

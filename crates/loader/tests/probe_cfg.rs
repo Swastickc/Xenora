@@ -65,6 +65,28 @@ impl PeBuilder {
         self.bytes[start..start + insns.len()].copy_from_slice(insns);
     }
 
+    fn entry(&mut self, rva: u32) {
+        self.bytes[0xA8..0xAC].copy_from_slice(&rva.to_le_bytes());
+    }
+
+    fn text_sizes(&mut self, virtual_size: u32, raw_size: u32) {
+        self.bytes[0x190..0x194].copy_from_slice(&virtual_size.to_le_bytes());
+        self.bytes[0x198..0x19C].copy_from_slice(&raw_size.to_le_bytes());
+    }
+
+    fn second_section(&mut self, raw: u32, executable: bool) {
+        self.bytes[0x86..0x88].copy_from_slice(&2u16.to_le_bytes());
+        self.bytes[0xD0..0xD4].copy_from_slice(&0x3000u32.to_le_bytes());
+        let section = 0x1B0;
+        self.bytes[section..section + 5].copy_from_slice(b".more");
+        self.bytes[section + 8..section + 12].copy_from_slice(&0x200u32.to_le_bytes());
+        self.bytes[section + 12..section + 16].copy_from_slice(&0x2000u32.to_le_bytes());
+        self.bytes[section + 16..section + 20].copy_from_slice(&0x200u32.to_le_bytes());
+        self.bytes[section + 20..section + 24].copy_from_slice(&raw.to_le_bytes());
+        let flags: u32 = if executable { 0x60000020 } else { 0x40000040 };
+        self.bytes[section + 36..section + 40].copy_from_slice(&flags.to_le_bytes());
+    }
+
     fn build(self) -> Vec<u8> {
         self.bytes
     }
@@ -283,19 +305,86 @@ fn cfg_indirect_jmp_stops_path_target_uncertain() {
     );
 }
 
-/// Test: malformed / truncated instruction stream at the boundary of the section
-/// does not panic and does not report beyond the available bytes.
+#[test]
+fn cfg_does_not_complete_a_call_using_overlay_bytes() {
+    let mut builder = PeBuilder::new();
+    builder.entry(0x11FF);
+    builder.write_text(0, &[0xF4]);
+    builder.write_text(0x1FF, &[0xE8]);
+    // The final backed byte is CALL's opcode. Pretending the file overlay
+    // contains its rel32 would make the isolated HLT reachable.
+    builder.bytes[0x400..0x404].copy_from_slice(&(-516i32).to_le_bytes());
+
+    let report = probe_pe_bytes(&builder.build(), &ProbeConfig::default()).unwrap();
+    assert!(report.instruction_records.is_empty());
+    assert!(report.first_unsupported_dbt_insn.is_none());
+}
+
+#[test]
+fn cfg_does_not_disassemble_a_zero_fill_tail_or_nonexecutable_target() {
+    let mut zero_fill = PeBuilder::new();
+    zero_fill.text_sizes(0x240, 0x200);
+    zero_fill.entry(0x1200);
+    zero_fill.bytes[0x400] = 0xF4;
+    let report = probe_pe_bytes(&zero_fill.build(), &ProbeConfig::default()).unwrap();
+    assert!(report.instruction_records.is_empty());
+
+    let mut nonexec = PeBuilder::new();
+    nonexec.second_section(0x600, false);
+    // JMP 0x2000, followed by no reachable executable instruction.
+    nonexec.write_text(0, &[0xE9, 0xFB, 0x0F, 0, 0]);
+    nonexec.bytes[0x600] = 0xF4;
+    let report = probe_pe_bytes(&nonexec.build(), &ProbeConfig::default()).unwrap();
+    let rvas: Vec<_> = report.instruction_records.iter().map(|r| r.rva).collect();
+    assert_eq!(rvas, [0x1000]);
+}
+
+#[test]
+fn cfg_joins_adjacent_executable_rvas_with_separate_raw_offsets() {
+    let mut builder = PeBuilder::new();
+    builder.bytes.resize(0x2000, 0);
+    builder.entry(0x1FFF);
+    builder.text_sizes(0x1000, 0x1000);
+    builder.second_section(0x1600, true);
+    builder.write_text(0xFFF, &[0xE8]);
+    // Leave different bytes immediately after the first section in the file.
+    // The 4-byte displacement is at the start of the next executable RVA.
+    builder.bytes[0x1200..0x1204].fill(0xA5);
+    builder.bytes[0x1600..0x1605].copy_from_slice(&[0, 0, 0, 0, 0xF4]);
+
+    let report = probe_pe_bytes(&builder.build(), &ProbeConfig::default()).unwrap();
+    assert_eq!(report.instruction_records.len(), 2);
+    assert_eq!(report.instruction_records[0].rva, 0x1FFF);
+    assert_eq!(report.instruction_records[0].bytes, [0xE8, 0, 0, 0, 0]);
+    assert_eq!(report.instruction_records[1].rva, 0x2004);
+    assert_eq!(report.instruction_records[1].bytes, [0xF4]);
+}
+
+#[test]
+fn cfg_byte_budget_never_admits_part_of_an_instruction() {
+    let mut builder = PeBuilder::new();
+    builder.write_text(0, &[0xE8, 0, 0, 0, 0, 0xF4]);
+    let image = builder.build();
+    for (max_disasm_bytes, expected) in [(0, 0), (4, 0), (5, 5), (6, 6)] {
+        let config = ProbeConfig {
+            max_disasm_bytes,
+            ..ProbeConfig::default()
+        };
+        let report = probe_pe_bytes(&image, &config).unwrap();
+        let total: usize = report
+            .instruction_records
+            .iter()
+            .map(|r| r.bytes.len())
+            .sum();
+        assert_eq!(total, expected, "limit={max_disasm_bytes}");
+    }
+}
+
 #[test]
 fn cfg_malformed_truncated_at_section_boundary() {
-    // REX prefix at the last byte — no opcode follows.
-    let mut b = PeBuilder::new();
-    b.write_text(0, &[0x48]); // just a REX prefix, no opcode
-    let pe = b.build();
-    let config = ProbeConfig::default();
-    // Must not panic; probe may return Ok with empty or partial records
-    let result = probe_pe_bytes(&pe, &config);
-    assert!(
-        result.is_ok(),
-        "truncated stream must not cause a probe error"
-    );
+    let mut builder = PeBuilder::new();
+    builder.entry(0x11FF);
+    builder.write_text(0x1FF, &[0x48]); // REX without a backed opcode.
+    let report = probe_pe_bytes(&builder.build(), &ProbeConfig::default()).unwrap();
+    assert!(report.instruction_records.is_empty());
 }

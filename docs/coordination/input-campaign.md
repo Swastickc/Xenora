@@ -23,7 +23,7 @@ Commercial game execution is not supported. Nothing in this document claims it.
 | --- | --- | --- | --- |
 | F1 | Keyboard to virtual Xbox controller | Partial: host-agnostic translator only | `crates/input/tests/keyboard.rs` (#944) |
 | F2 | Mouse and trackpad to the right stick | Partial: host-agnostic translator only | `crates/input/tests/mouse.rs` (#944) |
-| F3 | Host input router | Partial: routing model only, not wired to the app | `crates/input/tests/router.rs`, `review.rs` (#944) |
+| F3 | Host input router | Partial: routing model and session C interface; the app does not use it yet | `crates/input/tests/router.rs`, `review.rs` (#944); `crates/ffi/tests/input_router*.rs`, `input_recognize.rs` (#953) |
 | F4 | Versioned mapping profiles | Partial: profiles and text format, not wired to the app | `crates/input/tests/profile_format.rs` (#948) |
 | F5 | SwiftUI input settings | Not started | |
 | F6 | Per-application configuration | Not started | |
@@ -180,6 +180,10 @@ Dead zones default to zero, because XInput applications apply their own. The def
 The guest's output is compared with a hand-written literal. The same script in physical-only mode produces a different hand-written literal, and repeated runs are identical. Nothing reaches the guest except its own XInput calls.
 
 These are virtual devices: the raw element values stand in for what GameController reports. The app does not route live input this way yet.
+
+## The session C interface
+
+Each FFI session owns one router. The `xenora_session_input_*` functions feed it, and `xenora_session_input_snapshot` reads it back, for a settings screen. `xenora_session_input_publish` installs its output into the running frame loop's existing XInput slots. `xenora_controller_recognize` exposes the family rule. See [the interface description](../interfaces.md#host-input-router). The CPU tests drive the interface without a GPU. A GPU-gated test publishes into a running native frame loop and checks connection changes through the existing vibration poll.
 
 ## Hardware evidence
 

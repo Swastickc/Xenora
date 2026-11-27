@@ -17,6 +17,8 @@ pub mod jit;
 pub mod memory;
 pub mod module_binding;
 pub mod module_graph;
+pub mod module_layout;
+pub mod module_memory;
 pub mod output_path;
 pub mod pe;
 pub mod probe;
@@ -52,6 +54,9 @@ pub use graphics::{
 pub use imports::{ImportError, ImportRegistry, ServiceDescriptor, ServiceHandler, Win64Args};
 pub use jit::{JitError, JitMemory};
 pub use memory::{GuestMemory, MemoryError, MemoryPermissions};
+pub use module_memory::{
+    ExplicitModuleImage, ModuleMemoryError, ModuleReservation, map_module_batch,
+};
 pub use pe::{LoadedImage, ParsedPe, PeError, PeSection};
 pub use probe::{
     ImportedSymbol, InstructionRecord, ProbeConfig, ProbeReport, RelocationCensus, TlsCensus,

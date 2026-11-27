@@ -1179,12 +1179,26 @@ service ucrtbase.dll _wfopen(name: ptr, mode: ptr) -> ptr
     ref corecrt_wstdio.h _wfopen
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _wfopen(name: ptr, mode: ptr) -> ptr
+    handler _wfopen
+    status partial
+    fails null with errno EINVAL or ENOENT
+    ref corecrt_wstdio.h _wfopen; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _unlink(name: ptr) -> i32
     handler _unlink
     status partial
     alias api-ms-win-crt-filesystem-l1-1-0.dll
     fails -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file
     ref io.h _unlink
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _unlink(name: ptr) -> i32
+    handler _unlink
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref io.h _unlink; the legacy dll exports the same entry
     test the_wide_file_operations_follow_the_drive
 
 service ucrtbase.dll _wunlink(name: ptr) -> i32
@@ -1195,12 +1209,26 @@ service ucrtbase.dll _wunlink(name: ptr) -> i32
     ref corecrt_wio.h _wunlink
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _wunlink(name: ptr) -> i32
+    handler _wunlink
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref corecrt_wio.h _wunlink; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _access(name: ptr, mode: i32) -> i32
     handler _access
     status partial
     alias api-ms-win-crt-filesystem-l1-1-0.dll
     fails -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file
     ref io.h _access
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _access(name: ptr, mode: i32) -> i32
+    handler _access
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref io.h _access; the legacy dll exports the same entry
     test the_wide_file_operations_follow_the_drive
 
 service ucrtbase.dll _waccess(name: ptr, mode: i32) -> i32
@@ -1211,6 +1239,13 @@ service ucrtbase.dll _waccess(name: ptr, mode: i32) -> i32
     ref corecrt_wio.h _waccess
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _waccess(name: ptr, mode: i32) -> i32
+    handler _waccess
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref corecrt_wio.h _waccess; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _wmkdir(name: ptr) -> i32
     handler _wmkdir
     status partial
@@ -1218,6 +1253,29 @@ service ucrtbase.dll _wmkdir(name: ptr) -> i32
     fails -1 with errno EINVAL, ENOENT, ENOSPC or EACCES when the name is taken
     ref corecrt_wdirect.h _wmkdir
     test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _wmkdir(name: ptr) -> i32
+    handler _wmkdir
+    status partial
+    fails -1 with errno EINVAL, ENOENT or EACCES
+    ref corecrt_wdirect.h _wmkdir; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _chmod(name: ptr, mode: i32) -> i32
+    handler _chmod
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_io.h _chmod
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _chmod(name: ptr, mode: i32) -> i32
+    handler _chmod
+    status partial
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_io.h _chmod; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 
 service ucrtbase.dll _wchmod(name: ptr, mode: i32) -> i32
     handler _wchmod
@@ -1227,12 +1285,26 @@ service ucrtbase.dll _wchmod(name: ptr, mode: i32) -> i32
     ref corecrt_wio.h _wchmod
     test the_wide_file_operations_follow_the_drive
 
+service msvcrt.dll _wchmod(name: ptr, mode: i32) -> i32
+    handler _wchmod
+    status partial
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_wio.h _wchmod; the legacy dll exports the same entry
+    test the_wide_file_operations_follow_the_drive
+
 service ucrtbase.dll _wstat64i32(name: ptr, output: ptr) -> i32
     handler _wstat64i32
     status partial
     alias api-ms-win-crt-filesystem-l1-1-0.dll
     fails -1 with errno EINVAL or ENOENT; the times answer -1 because the drive has no time stamps
     ref corecrt_wio.h _wstat64i32, _mingw_stat64.h struct _stat64i32
+    test the_wide_file_operations_follow_the_drive
+
+service msvcrt.dll _wstat64i32(name: ptr, output: ptr) -> i32
+    handler _wstat64i32
+    status partial
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_wstat.h _wstat64i32; the legacy dll exports the same entry
     test the_wide_file_operations_follow_the_drive
 
 service ucrtbase.dll _assert(expression: ptr, file: ptr, line: u32) -> void

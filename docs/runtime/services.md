@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 283 |
-| Generated adapters | 283 |
+| Services with a declared ABI | 292 |
+| Generated adapters | 292 |
 | Unique handler implementations | 274 |
 | Implemented | 100 |
-| Partial | 181 |
+| Partial | 190 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 283 |
-| API-set aliases (not services) | 368 |
+| Conformance-tested through guest dispatch | 292 |
+| API-set aliases (not services) | 367 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -151,13 +151,23 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_wcsdup` | `(text: ptr) -> ptr` | implemented | null when the copy cannot be allocated |
 | `ucrtbase.dll!_strdup` | `(text: ptr) -> ptr` | partial | a string longer than 65536 bytes or an allocation failure answers null; errno is not set |
 | `ucrtbase.dll!_wfopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM |
+| `msvcrt.dll!_wfopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL or ENOENT |
 | `ucrtbase.dll!_unlink` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file |
+| `msvcrt.dll!_unlink` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES |
 | `ucrtbase.dll!_wunlink` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file |
+| `msvcrt.dll!_wunlink` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES |
 | `ucrtbase.dll!_access` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file |
+| `msvcrt.dll!_access` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES |
 | `ucrtbase.dll!_waccess` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file |
+| `msvcrt.dll!_waccess` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES |
 | `ucrtbase.dll!_wmkdir` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT, ENOSPC or EACCES when the name is taken |
+| `msvcrt.dll!_wmkdir` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES |
+| `ucrtbase.dll!_chmod` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL or ENOENT |
+| `msvcrt.dll!_chmod` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL or ENOENT |
 | `ucrtbase.dll!_wchmod` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL or ENOENT |
+| `msvcrt.dll!_wchmod` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL or ENOENT |
 | `ucrtbase.dll!_wstat64i32` | `(name: ptr, output: ptr) -> i32` | partial | -1 with errno EINVAL or ENOENT; the times answer -1 because the drive has no time stamps |
+| `msvcrt.dll!_wstat64i32` | `(name: ptr, output: ptr) -> i32` | partial | -1 with errno EINVAL or ENOENT |
 | `ucrtbase.dll!_assert` | `(expression: ptr, file: ptr, line: u32) -> void` | partial | nothing; the message prints on stderr and the process ends with status 3, since no signal handler can exist here |
 | `ucrtbase.dll!_beginthreadex` | `(security: ptr, stack_size: u64, start: ptr, arglist: ptr, initflag: u32, thrdaddr: ptr) -> ptr` | partial | 0 with errno EINVAL for a security descriptor, unknown flags or a null start, ENOMEM when the machine has no room or no scheduler |
 | `ucrtbase.dll!_endthreadex` | `(code: u32) -> void` | partial | nothing; the thread ends with the code as its exit code |

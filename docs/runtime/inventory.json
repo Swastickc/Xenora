@@ -4594,6 +4594,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_chmod",
+      "kind": "name",
+      "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_chmod"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_findclose",
       "kind": "name",
       "library": "api-ms-win-crt-filesystem-l1-1-0.dll",
@@ -13386,7 +13396,27 @@
       "source": "typed",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "_access"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "_amsg_exit"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_chmod"
     },
     {
       "data_import": true,
@@ -13523,6 +13553,16 @@
       "family": "c-runtime",
       "kind": "name",
       "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_unlink"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
       "source": "manual",
       "status": "implemented",
       "status_explicit": false,
@@ -13537,6 +13577,66 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "_vsnprintf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_waccess"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wchmod"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wfopen"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wmkdir"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wstat64i32"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_wunlink"
     },
     {
       "data_import": false,
@@ -13827,6 +13927,16 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "_chdir"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_chmod"
     },
     {
       "data_import": false,
@@ -16616,6 +16726,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "MsgWaitForMultipleObjects"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "PeekMessageA"
     },
     {
@@ -18110,21 +18230,21 @@
     }
   ],
   "summary": {
-    "aliases": 905,
-    "api_set_aliases": 739,
-    "canonical_services": 851,
+    "aliases": 901,
+    "api_set_aliases": 738,
+    "canonical_services": 858,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 235,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 568,
+    "manual_services": 566,
     "ordinal_aliases": 0,
-    "partial": 614,
+    "partial": 621,
     "structural_consistency_findings": 0,
     "stub": 2,
-    "typed_registry_entries": 283,
-    "typed_services": 283,
+    "typed_registry_entries": 292,
+    "typed_services": 292,
     "wanted_imports": null,
     "wanted_missing": null
   },

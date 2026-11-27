@@ -8077,6 +8077,32 @@ fn the_wide_file_operations_follow_the_drive() {
         0xFFFF_FFFF
     );
     assert_eq!(guest.errno(), 22);
+    // The narrow form marks a file the same way: write bit clear, read-only.
+    let narrow_mode = place(&mut guest, TEXT + 0x2100, b"c:\\narrowmode.txt");
+    let create_mode = place(&mut guest, TEXT + 0x2300, b"w");
+    let created = guest.call("fopen", &[narrow_mode, create_mode]);
+    assert_ne!(created, 0);
+    close(&mut guest, created);
+    assert_eq!(guest.call("_chmod", &[narrow_mode, 0x100]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("_access", &[narrow_mode, 2]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF,
+        "a read-only file denies the write probe"
+    );
+    assert_eq!(guest.call("_chmod", &[narrow_mode, 0x180]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("_access", &[narrow_mode, 2]) & 0xFFFF_FFFF,
+        0,
+        "the write bit restores access"
+    );
+    // A missing file is ENOENT, an unreadable name EINVAL.
+    let missing = place(&mut guest, TEXT + 0x2200, b"c:\\missing-narrow.txt");
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_chmod", &[missing, 0x100]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_ne!(guest.errno(), 0);
 }
 
 #[test]

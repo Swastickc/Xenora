@@ -33,6 +33,9 @@ const BATTERY_DEVTYPE_HEADSET: u32 = 1;
 const BATTERY_TYPE_DISCONNECTED: u8 = 0;
 const BATTERY_TYPE_UNKNOWN: u8 = 0xff;
 const BATTERY_LEVEL_EMPTY: u8 = 0;
+const BATTERY_LEVEL_LOW: u8 = 1;
+const BATTERY_LEVEL_MEDIUM: u8 = 2;
+const BATTERY_LEVEL_FULL: u8 = 3;
 const MODULES: [&str; 4] = [
     "xinput1_3.dll",
     "xinput1_4.dll",
@@ -56,6 +59,26 @@ pub struct XInputControllerState {
     pub right_y: i16,
 }
 
+/// Host evidence about a controller battery. Apple GameController exposes no
+/// battery chemistry, so this state is intentionally charge evidence rather
+/// than an XInput battery type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum XInputBatteryChargeState {
+    #[default]
+    Unknown,
+    Discharging,
+    Charging,
+    Full,
+}
+
+/// Battery metadata supplied by the host for one controller. `level_percent`
+/// is `None` when the host exposes a battery object but no trustworthy level.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XInputBatteryState {
+    pub charge_state: XInputBatteryChargeState,
+    pub level_percent: Option<u8>,
+}
+
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Slot {
     connected: bool,
@@ -63,6 +86,7 @@ pub(crate) struct Slot {
     state: XInputControllerState,
     vibration_sequence: u32,
     vibration_supported: bool,
+    battery: Option<XInputBatteryState>,
     left_motor: u16,
     right_motor: u16,
 }
@@ -70,7 +94,12 @@ pub(crate) struct Slot {
 pub(crate) type Slots = [Slot; 4];
 
 impl Slot {
-    fn set(&mut self, next: Option<XInputControllerState>, vibration_supported: bool) {
+    fn set(
+        &mut self,
+        next: Option<XInputControllerState>,
+        vibration_supported: bool,
+        battery: Option<XInputBatteryState>,
+    ) {
         match next {
             None => {
                 self.connected = false;
@@ -78,6 +107,7 @@ impl Slot {
                 self.left_motor = 0;
                 self.right_motor = 0;
                 self.vibration_sequence = 0;
+                self.battery = None;
             }
             Some(state) => {
                 if !self.connected || self.state != state {
@@ -86,6 +116,7 @@ impl Slot {
                 }
                 self.connected = true;
                 self.vibration_supported = vibration_supported;
+                self.battery = battery;
             }
         }
     }
@@ -130,7 +161,24 @@ impl ServicesState {
         if index >= XUSER_MAX_COUNT {
             return false;
         }
-        self.xinput.lock().unwrap()[index as usize].set(state, vibration_supported);
+        self.set_xinput_controller_with_details(index, state, vibration_supported, None)
+    }
+
+    /// Replace a user slot and atomically update vibration capability plus
+    /// battery metadata under the same slot lock. `None` battery metadata means
+    /// the host exposed no battery object; an object with unknown state or
+    /// level remains explicit inside `Some`.
+    pub fn set_xinput_controller_with_details(
+        &self,
+        index: u32,
+        state: Option<XInputControllerState>,
+        vibration_supported: bool,
+        battery: Option<XInputBatteryState>,
+    ) -> bool {
+        if index >= XUSER_MAX_COUNT {
+            return false;
+        }
+        self.xinput.lock().unwrap()[index as usize].set(state, vibration_supported, battery);
         true
     }
 }
@@ -355,20 +403,33 @@ fn get_battery_information(
     {
         return ERROR_BAD_ARGUMENTS;
     }
-    let connected = slots.lock().unwrap()[index as usize].connected;
-    // Xenora does not expose an XInput headset. A connected virtual gamepad
-    // has no host battery metadata yet, so unknown is the only honest battery
-    // type. The level is documented as valid only for known wireless battery
-    // types and remains empty here rather than inventing charge.
+    let slot = slots.lock().unwrap()[index as usize];
+    let connected = slot.connected;
+    // Xenora does not expose an XInput headset and GameController exposes no
+    // battery chemistry, so UNKNOWN remains the only honest battery type even
+    // when charge evidence exists. Microsoft says the level is valid only for
+    // known wireless battery types. Xenora nevertheless publishes this coarse
+    // level beside UNKNOWN as an explicit compatibility policy: it is real host
+    // evidence, not a claim about Windows behavior or battery chemistry. When
+    // the host has no level, EMPTY means "no valid level", not a drained pack.
     let battery_type = if device_type == BATTERY_DEVTYPE_GAMEPAD && connected {
         BATTERY_TYPE_UNKNOWN
     } else {
         BATTERY_TYPE_DISCONNECTED
     };
-    if memory
-        .write_bytes(output, &[battery_type, BATTERY_LEVEL_EMPTY])
-        .is_err()
-    {
+    let level = if device_type == BATTERY_DEVTYPE_GAMEPAD && connected {
+        match slot.battery.and_then(|battery| battery.level_percent) {
+            None => BATTERY_LEVEL_EMPTY,
+            Some(0..=10) => BATTERY_LEVEL_EMPTY,
+            Some(11..=40) => BATTERY_LEVEL_LOW,
+            Some(41..=70) => BATTERY_LEVEL_MEDIUM,
+            Some(71..=100) => BATTERY_LEVEL_FULL,
+            Some(_) => BATTERY_LEVEL_EMPTY,
+        }
+    } else {
+        BATTERY_LEVEL_EMPTY
+    };
+    if memory.write_bytes(output, &[battery_type, level]).is_err() {
         return ERROR_BAD_ARGUMENTS;
     }
     0
@@ -967,6 +1028,92 @@ mod tests {
         }
         memory.read_bytes(0x1ffe, &mut output).unwrap();
         assert_eq!(output, [0xaa; 2]);
+    }
+
+    #[test]
+    fn supplied_battery_levels_use_xenoras_documented_coarse_quantization() {
+        let (state, registry) = fixture();
+        let mut memory = writable_memory();
+        for (percent, expected) in [
+            (0, BATTERY_LEVEL_EMPTY),
+            (10, BATTERY_LEVEL_EMPTY),
+            (11, BATTERY_LEVEL_LOW),
+            (40, BATTERY_LEVEL_LOW),
+            (41, BATTERY_LEVEL_MEDIUM),
+            (70, BATTERY_LEVEL_MEDIUM),
+            (71, BATTERY_LEVEL_FULL),
+            (100, BATTERY_LEVEL_FULL),
+        ] {
+            assert!(state.set_xinput_controller_with_details(
+                1,
+                Some(XInputControllerState {
+                    buttons: u16::from(percent),
+                    ..XInputControllerState::default()
+                }),
+                false,
+                Some(XInputBatteryState {
+                    charge_state: XInputBatteryChargeState::Discharging,
+                    level_percent: Some(percent),
+                })
+            ));
+            assert_eq!(
+                call_battery(
+                    &registry,
+                    &mut memory,
+                    "xinput1_4.dll",
+                    1,
+                    BATTERY_DEVTYPE_GAMEPAD.into(),
+                    0x1ffe
+                ),
+                Some(0)
+            );
+            let mut output = [0; 2];
+            memory.read_bytes(0x1ffe, &mut output).unwrap();
+            assert_eq!(
+                output,
+                [BATTERY_TYPE_UNKNOWN, expected],
+                "percent={percent}"
+            );
+        }
+
+        assert!(state.set_xinput_controller_with_details(
+            1,
+            Some(XInputControllerState::default()),
+            false,
+            Some(XInputBatteryState {
+                charge_state: XInputBatteryChargeState::Unknown,
+                level_percent: None,
+            })
+        ));
+        assert_eq!(
+            call_battery(
+                &registry,
+                &mut memory,
+                "xinput1_4.dll",
+                1,
+                BATTERY_DEVTYPE_GAMEPAD.into(),
+                0x1ffe
+            ),
+            Some(0)
+        );
+        let mut output = [0; 2];
+        memory.read_bytes(0x1ffe, &mut output).unwrap();
+        assert_eq!(output, [BATTERY_TYPE_UNKNOWN, BATTERY_LEVEL_EMPTY]);
+
+        assert!(state.set_xinput_controller(1, None));
+        assert_eq!(
+            call_battery(
+                &registry,
+                &mut memory,
+                "xinput1_4.dll",
+                1,
+                BATTERY_DEVTYPE_GAMEPAD.into(),
+                0x1ffe
+            ),
+            Some(0)
+        );
+        memory.read_bytes(0x1ffe, &mut output).unwrap();
+        assert_eq!(output, [BATTERY_TYPE_DISCONNECTED, BATTERY_LEVEL_EMPTY]);
     }
 
     #[test]

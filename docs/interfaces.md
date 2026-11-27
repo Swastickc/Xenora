@@ -592,12 +592,19 @@ fabricated and the output buffer is not mutated for an empty result.
 reduced `xinput9_1_0.dll`. It validates the two-byte output range and accepts
 only the documented gamepad/headset device-type values. A disconnected slot or
 the unsupported headset reports `BATTERY_TYPE_DISCONNECTED` with empty level.
-A connected virtual gamepad reports `BATTERY_TYPE_UNKNOWN` with empty level:
-Xenora does not know the host controller's chemistry, wired/wireless class or
-charge and does not invent those properties. Public documentation says the
-level is meaningful only for wireless devices with a known battery type, so
-the empty byte is a serialization placeholder rather than measured charge.
-Physical battery integration remains future host work.
+A connected gamepad always reports `BATTERY_TYPE_UNKNOWN`: Apple
+GameController exposes charge state and an approximate fraction but no battery
+chemistry or wired/wireless XInput class, so Xenora must not invent
+`ALKALINE`, `NIMH` or `WIRED`. Public XInput documentation says the level is
+meaningful only for wireless devices with a known battery type. Xenora makes
+an explicit compatibility policy rather than claiming Windows behavior: when
+the host supplies a real percentage, it is published beside the unknown type
+using Xenora's coarse quantization (`0...10` empty, `11...40` low, `41...70`
+medium and `71...100` full). A missing battery object or an object with no
+trustworthy level leaves the level empty, where empty means no valid evidence
+rather than a measured drained pack. Charging/discharging/full evidence is
+transported through the additive host FFI and retained internally; it is not
+misrepresented as XInput chemistry.
 
 `XInputGetAudioDeviceIds` is available only on `xinput1_4.dll` and
 `xinputuap.dll`; it is absent from `xinput1_3.dll` and reduced
@@ -634,8 +641,8 @@ voice, plug-in module or physical force-feedback properties are known.
 Disconnected slots return `ERROR_DEVICE_NOT_CONNECTED`, and invalid slots,
 flags or output ranges return `ERROR_BAD_ARGUMENTS` before mutation.
 
-Hardware-verified vibration output, keystroke event capture, physical battery
-metadata, actual headset/audio endpoints and audio render/capture,
+Hardware-verified vibration output, keystroke event capture,
+hardware-verified physical battery behavior, actual headset/audio endpoints and audio render/capture,
 physical-controller hotplug policy beyond the app's existing
 polling, ordinal 101/102/103 guide-wait/poweroff functions,
 arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery

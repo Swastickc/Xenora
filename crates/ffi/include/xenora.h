@@ -87,6 +87,24 @@ typedef struct {
 
 #define XENORA_XINPUT_FEATURE_VIBRATION 0x01u
 
+#define XENORA_XINPUT_BATTERY_STATE_UNKNOWN 0u
+#define XENORA_XINPUT_BATTERY_STATE_DISCHARGING 1u
+#define XENORA_XINPUT_BATTERY_STATE_CHARGING 2u
+#define XENORA_XINPUT_BATTERY_STATE_FULL 3u
+#define XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN 255u
+
+/* Host battery evidence for one XInput controller. present=0 means the host
+ * exposed no battery object and requires zero state/level. For a present
+ * object, level is 0..100 or XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN. Charging
+ * state is host evidence only and is never battery chemistry.
+ */
+typedef struct {
+    uint8_t present;
+    uint8_t state;
+    uint8_t level;
+    uint8_t reserved;
+} xenora_xinput_battery;
+
 /* Latest vibration command accepted from the guest. When `connected` is zero,
  * sequence and motor values are zero and the host must stop actuators. When
  * `enabled` is zero the motor values are registered but must not actuate;
@@ -184,6 +202,12 @@ xenora_status xenora_session_send_controller_input(xenora_session session, const
  * connected value, feature bits or reserved bytes, and XENORA_INVALID_STATE when no loop runs.
  */
 xenora_status xenora_session_send_xinput_state(xenora_session session, uint32_t user_index, const xenora_xinput_state *input);
+/* Atomically replace one XInput snapshot and its latest battery evidence. */
+xenora_status xenora_session_send_xinput_state_with_battery(
+    xenora_session session,
+    uint32_t user_index,
+    const xenora_xinput_state *input,
+    const xenora_xinput_battery *battery);
 /* Poll the latest vibration command for user_index 0-3 without consuming it.
  * A disconnected slot succeeds with a zeroed disconnected command so the host
  * can stop output. Returns XENORA_INVALID_STATE when no loop runs.

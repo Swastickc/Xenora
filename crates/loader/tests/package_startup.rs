@@ -24,8 +24,8 @@ const MATH: &[u8] = include_bytes!("../../../fixtures/pe/multidll/xenora_math.dl
 
 /// 42 from `XenoraAdd`, 8 from `XenoraQuad` through the chain, 10 from the
 /// `XenoraScale` data import, 1 from the leaf `DllMain`, 2 from the middle
-/// `DllMain`.
-const EXPECTED_EXIT: u32 = 63;
+/// `DllMain`, 7 from the leaf TLS callback.
+const EXPECTED_EXIT: u32 = 70;
 
 fn layout() -> PackageStartupLayout {
     PackageStartupLayout {
@@ -84,16 +84,52 @@ fn original_multi_dll_package_runs_its_entry_point() {
         0
     );
 
-    // Both provider DllMains ran, the leaf before the middle one, and every
-    // import was bound to a real package export or a registered service.
-    let dll_mains: Vec<&str> = result
+    // The leaf TLS callback ran before the leaf DllMain, and both provider
+    // DllMains ran leaf-before-middle.
+    let attach_phases: Vec<(&str, xenora_loader::InitializationPhase)> = result
         .diagnostics
         .initialization
         .iter()
-        .filter(|record| record.phase == xenora_loader::InitializationPhase::DllMain)
+        .map(|record| (record.file_name.as_str(), record.phase))
+        .collect();
+    let tls_position = attach_phases
+        .iter()
+        .position(|(file, phase)| {
+            *file == "xenora_math.dll"
+                && matches!(
+                    phase,
+                    xenora_loader::InitializationPhase::TlsCallback { .. }
+                )
+        })
+        .expect("leaf TLS callback record");
+    let math_position = attach_phases
+        .iter()
+        .position(|(file, phase)| {
+            *file == "xenora_math.dll" && *phase == xenora_loader::InitializationPhase::DllMain
+        })
+        .expect("leaf DllMain record");
+    let chain_position = attach_phases
+        .iter()
+        .position(|(file, phase)| {
+            *file == "xenora_chain.dll" && *phase == xenora_loader::InitializationPhase::DllMain
+        })
+        .expect("middle DllMain record");
+    assert!(tls_position < math_position);
+    assert!(math_position < chain_position);
+
+    // Orderly teardown detaches the middle provider before the leaf.
+    let detach: Vec<&str> = result
+        .diagnostics
+        .shutdown
+        .iter()
+        .filter(|record| record.phase == xenora_loader::InitializationPhase::DllDetach)
         .map(|record| record.file_name.as_str())
         .collect();
-    assert_eq!(dll_mains, ["xenora_math.dll", "xenora_chain.dll"]);
+    assert_eq!(detach, ["xenora_chain.dll", "xenora_math.dll"]);
+    assert!(result.diagnostics.shutdown.iter().all(|record| !matches!(
+        record.outcome,
+        xenora_loader::InitializationOutcome::Fault(_)
+    )));
 
     let math = result
         .diagnostics
@@ -116,8 +152,8 @@ fn original_multi_dll_package_runs_its_entry_point() {
         .iter()
         .find(|module| module.file_name == "multidll-consumer.exe")
         .expect("consumer module report");
-    assert_eq!(consumer.imports, 6);
-    assert_eq!(consumer.resolved_imports, 6);
+    assert_eq!(consumer.imports, 7);
+    assert_eq!(consumer.resolved_imports, 7);
     assert_eq!(consumer.dependencies.len(), 2);
 
     // Package exports are bound to provider addresses, not to host services.
@@ -132,9 +168,9 @@ fn original_multi_dll_package_runs_its_entry_point() {
             )
         })
         .count();
-    // Seven package imports across both consumers; the eighth import is the
+    // Eight package imports across both consumers; the ninth import is the
     // kernel32 service.
-    assert_eq!(package_imports, 7);
+    assert_eq!(package_imports, 8);
 }
 
 #[test]

@@ -625,23 +625,9 @@ pub fn run_package_startup(
         });
     }
 
-    let tls = prepare_module_tls(&images, &reservations, &mut memory, layout.thread_tls_base)
-        .map_err(PackageStartupError::Tls)?;
-    diagnostics.modules = module_diagnostics(
-        &graph,
-        &bases,
-        &plan,
-        &diagnostics.imports,
-        Some(&reservations),
-        Some(&tls),
-    );
-
-    let init_plan = plan_module_initialization(package, &images, &graph, &reservations, Some(&tls))
-        .map_err(PackageStartupError::InitializationPlan)?;
-    let order = initialization_order(&init_plan)?;
-
-    // Stack, TEB and the sentinel page are mapped only after every refusal
-    // that could depend on image bytes has finished.
+    // Reserve the harness regions before TLS preparation allocates module
+    // storage, so the dynamic allocator cannot choose an address that the
+    // stack, TEB, TLS array or return-sentinel page already owns.
     memory
         .map_region(stack_base, STACK_SIZE, MemoryPermissions::READ_WRITE)
         .map_err(PackageStartupError::Memory)?;
@@ -660,6 +646,28 @@ pub fn run_package_startup(
         stack_base,
     )
     .map_err(PackageStartupError::Memory)?;
+    memory
+        .map_region(
+            layout.thread_tls_base,
+            crate::tls::TLS_ARRAY_SIZE,
+            MemoryPermissions::READ_WRITE,
+        )
+        .map_err(PackageStartupError::Memory)?;
+
+    let tls = prepare_module_tls(&images, &reservations, &mut memory, layout.thread_tls_base)
+        .map_err(PackageStartupError::Tls)?;
+    diagnostics.modules = module_diagnostics(
+        &graph,
+        &bases,
+        &plan,
+        &diagnostics.imports,
+        Some(&reservations),
+        Some(&tls),
+    );
+
+    let init_plan = plan_module_initialization(package, &images, &graph, &reservations, Some(&tls))
+        .map_err(PackageStartupError::InitializationPlan)?;
+    let order = initialization_order(&init_plan)?;
 
     let mut engine = DbtEngine::new(1024 * 1024).map_err(PackageStartupError::Jit)?;
     engine.set_import_registry(imports);

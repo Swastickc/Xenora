@@ -11,6 +11,7 @@ __declspec(dllimport) unsigned int XenoraScale;
 __declspec(dllimport) unsigned int XenoraQuad(unsigned int value);
 __declspec(dllimport) unsigned int XenoraMathInit;
 __declspec(dllimport) unsigned int XenoraChainInit;
+__declspec(dllimport) unsigned int XenoraMathTls;
 __declspec(dllimport) void ExitProcess(unsigned int status);
 
 void entry(void) {
@@ -20,5 +21,6 @@ void entry(void) {
     checksum += XenoraScale * 2;   /* 10 */
     checksum += XenoraMathInit;    /* 1, leaf DllMain */
     checksum += XenoraChainInit;   /* 2, middle DllMain after the leaf */
+    checksum += XenoraMathTls;     /* 7, leaf TLS callback before DllMain */
     ExitProcess(checksum);
 }

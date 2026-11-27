@@ -9,6 +9,7 @@ __declspec(dllimport) unsigned int XenoraAdd(unsigned int a, unsigned int b);
 __declspec(dllimport) unsigned int XenoraMathInit;
 
 __declspec(dllexport) unsigned int XenoraChainInit;
+__declspec(dllexport) unsigned int XenoraChainDetach;
 
 __declspec(dllexport) unsigned int XenoraQuad(unsigned int value) {
     return XenoraAdd(XenoraAdd(value, value), XenoraAdd(value, value));
@@ -19,6 +20,8 @@ int DllMain(void *module, unsigned int reason, void *reserved) {
     (void)reserved;
     if (reason == 1) {
         XenoraChainInit = XenoraMathInit == 1 ? 2 : 0xBAD;
+    } else if (reason == 0) {
+        XenoraChainDetach = 1;
     }
     return 1;
 }

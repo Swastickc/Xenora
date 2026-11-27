@@ -41,6 +41,8 @@ LIBRARY xenora_math.dll
 EXPORTS
     XenoraAdd
     XenoraScale DATA
+    XenoraMathTls DATA
+    XenoraMathDetach DATA
     XenoraMathInit DATA
 DEF
 cat > xenora_chain.def <<'DEF'
@@ -48,6 +50,7 @@ LIBRARY xenora_chain.dll
 EXPORTS
     XenoraQuad
     XenoraChainInit DATA
+    XenoraChainDetach DATA
 DEF
 cat > kernel32.def <<'DEF'
 LIBRARY kernel32.dll

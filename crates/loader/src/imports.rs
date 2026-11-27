@@ -353,6 +353,10 @@ pub struct ImportRegistry {
     data_providers: HashMap<usize, DataProvider>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
+    /// Module identity/export catalog owned by this service registry. Kernel32
+    /// initializes its built-in portion during service registration; the
+    /// dynamic half is crate-internal and per registry, not process-global.
+    pub(crate) module_catalog: crate::services::modules::ModuleCatalog,
 }
 
 impl Default for ImportRegistry {
@@ -373,6 +377,7 @@ impl ImportRegistry {
             data_providers: HashMap::new(),
             trampoline_to_service: HashMap::new(),
             dynamic_trampolines: DynamicTrampolines::default(),
+            module_catalog: crate::services::modules::ModuleCatalog::default(),
         }
     }
 

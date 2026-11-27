@@ -314,9 +314,6 @@ pub struct ServicesState {
     winsock_changed: Condvar,
     pub next_alloc_addr: AtomicU64,
     pub graphics: Arc<Mutex<crate::graphics::GraphicsContext>>,
-    /// Module identity/export catalog for the one standard-service registry
-    /// bound to this process state.
-    pub(crate) module_catalog: modules::ModuleCatalog,
 }
 
 /// The console state: the mode bits round-tripping per handle and the
@@ -401,7 +398,6 @@ impl ServicesState {
             winsock_changed: Condvar::new(),
             next_alloc_addr: AtomicU64::new(0x0000_0002_0000_0000), // 8GB guest heap
             graphics: Arc::new(Mutex::new(crate::graphics::GraphicsContext::new())),
-            module_catalog: modules::ModuleCatalog::default(),
         }
     }
     /// Give a hosted C program the arguments its `main` receives in `argv`,

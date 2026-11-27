@@ -201,10 +201,12 @@ struct DynamicModule {
 /// deliberately unavailable outside the loader crate.
 #[allow(dead_code)] // Consumed by the later crate-internal LoadLibrary integration (#923).
 pub(crate) fn register_dynamic_module(
-    state: &ServicesState,
+    registry: &ImportRegistry,
     registration: DynamicModuleRegistration,
 ) -> Result<u64, DynamicModuleRegistrationError> {
-    state.module_catalog.register_dynamic_module(registration)
+    registry
+        .module_catalog
+        .register_dynamic_module(registration)
 }
 
 /// Modules that are loaded for as long as the process runs.
@@ -483,7 +485,7 @@ fn export_target(table: &ExportTable, key: &ExportKey) -> Option<ExportTarget> {
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
-    let modules = state.module_catalog.clone();
+    let modules = registry.module_catalog.clone();
     let catalog = |modules: &ModuleCatalog| modules.clone();
 
     for (symbol, wide) in [("GetModuleHandleA", false), ("GetModuleHandleW", true)] {
@@ -1037,7 +1039,7 @@ mod tests {
         register_standard_services(&mut registry, Arc::clone(&state));
         assert_eq!(
             register_dynamic_module(
-                &state,
+                &registry,
                 DynamicModuleRegistration {
                     name: "Provider.dll".to_owned(),
                     base: PROVIDER_BASE,
@@ -1050,7 +1052,7 @@ mod tests {
         );
         assert_eq!(
             register_dynamic_module(
-                &state,
+                &registry,
                 DynamicModuleRegistration {
                     name: "Forwarder.dll".to_owned(),
                     base: FORWARDER_BASE,
@@ -1245,27 +1247,27 @@ mod tests {
             exports,
         };
         register_dynamic_module(
-            &state,
+            &registry,
             registration("provider.dll", BASE, Some(exports.clone())),
         )
         .unwrap();
         assert!(matches!(
             register_dynamic_module(
-                &state,
+                &registry,
                 registration("PROVIDER.dll", BASE + 0x10000, Some(exports.clone())),
             ),
             Err(DynamicModuleRegistrationError::NameCollision { .. })
         ));
         assert!(matches!(
             register_dynamic_module(
-                &state,
+                &registry,
                 registration("overlap.dll", BASE + 0x1000, Some(exports.clone())),
             ),
             Err(DynamicModuleRegistrationError::BaseCollision { .. })
         ));
         assert!(matches!(
             register_dynamic_module(
-                &state,
+                &registry,
                 registration("bad\\path.dll", BASE + 0x20000, Some(exports.clone())),
             ),
             Err(DynamicModuleRegistrationError::InvalidName { .. })
@@ -1275,7 +1277,7 @@ mod tests {
         outside.entries[0].target = ExportTarget::ExportRva(IMAGE_SIZE);
         assert!(matches!(
             register_dynamic_module(
-                &state,
+                &registry,
                 registration("outside.dll", BASE + 0x20000, Some(outside)),
             ),
             Err(DynamicModuleRegistrationError::ExportOutsideImage { .. })
@@ -1322,7 +1324,7 @@ mod tests {
             ("chain.dll", CHAIN_BASE, chain_exports),
         ] {
             register_dynamic_module(
-                &state,
+                &registry,
                 DynamicModuleRegistration {
                     name: name.to_owned(),
                     base,

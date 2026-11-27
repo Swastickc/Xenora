@@ -923,21 +923,21 @@ fn scheduler_exit_reason(outcome: crate::scheduler::Outcome) -> ExitReason {
 }
 
 #[derive(Clone, Debug)]
-struct ServiceBinding {
-    image_index: usize,
-    module: String,
-    symbol: String,
-    import_name: ImportName,
-    status: ServiceStatus,
-    data: bool,
-    slot_address: u64,
-    slot_rva: u32,
+pub(crate) struct ServiceBinding {
+    pub(crate) image_index: usize,
+    pub(crate) module: String,
+    pub(crate) symbol: String,
+    pub(crate) import_name: ImportName,
+    pub(crate) status: ServiceStatus,
+    pub(crate) data: bool,
+    pub(crate) slot_address: u64,
+    pub(crate) slot_rva: u32,
 }
 
 /// Resolve an import that the package graph could not bind to a registered
 /// service. The last forwarder target is tried before the direct key so a
 /// package DLL that forwards to a host module works.
-fn resolve_service(
+pub(crate) fn resolve_service(
     imports: &ImportRegistry,
     requested_module: &str,
     requested_name: &ImportName,
@@ -977,7 +977,7 @@ fn resolve_service(
     Ok(None)
 }
 
-fn classify_unresolved(
+pub(crate) fn classify_unresolved(
     graph: &ModuleGraph,
     image_index: usize,
     requested_module: &str,
@@ -1124,7 +1124,7 @@ fn export_key_to_import_name(key: &ExportKey) -> ImportName {
     }
 }
 
-fn module_diagnostics(
+pub(crate) fn module_diagnostics(
     graph: &ModuleGraph,
     bases: &[u64],
     plan: &ModuleLayoutPlan,

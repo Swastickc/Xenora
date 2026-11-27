@@ -53,10 +53,33 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--package <module>]... [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--package <module>]... [--module <name>=<path>]... [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
        --package names another explicit image to load beside the entry executable; it may be repeated and is never searched for on the host
+       --module admits a bounded logical name for a regular-file image held in the closed-world provisioned store; it is not loaded until a later runtime-load step
        a hosted export copies up to 16 MiB from the synthetic C: drive to a new UTF-8 filename in an existing directory
        an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProvisionedModuleArg {
+    name: String,
+    path: PathBuf,
+}
+
+fn parse_provisioned_module(argument: &OsString) -> Result<ProvisionedModuleArg, String> {
+    let text = argument
+        .to_str()
+        .ok_or("--module needs a UTF-8 name=path argument")?;
+    let (name, path) = text
+        .split_once('=')
+        .ok_or("--module needs a name=path argument")?;
+    if name.is_empty() || path.is_empty() {
+        return Err("--module needs nonempty name and path".into());
+    }
+    Ok(ProvisionedModuleArg {
+        name: name.to_owned(),
+        path: PathBuf::from(path),
+    })
+}
 
 enum GuestExport {
     Host {
@@ -73,6 +96,8 @@ struct Options {
     path: PathBuf,
     /// Explicit package modules loaded beside the entry executable.
     package: Vec<PathBuf>,
+    /// Authorized module snapshots admitted to the closed-world store.
+    modules: Vec<ProvisionedModuleArg>,
     max_steps: Option<usize>,
     wall_seconds: Option<u64>,
     executable_budget: u64,
@@ -122,6 +147,7 @@ impl Options {
         let mut args = args.into_iter();
         let mut path = None;
         let mut package = Vec::new();
+        let mut modules = Vec::new();
         let mut max_steps = None;
         let mut digest = None;
         let mut arguments = Vec::new();
@@ -144,6 +170,11 @@ impl Options {
                         return Err("--package needs a nonempty path".into());
                     }
                     package.push(PathBuf::from(module));
+                }
+                Some("--module") => {
+                    modules.push(parse_provisioned_module(
+                        &args.next().ok_or("missing --module name=path")?,
+                    )?);
                 }
                 Some("--max-steps") if max_steps.is_none() => {
                     max_steps = Some(
@@ -249,6 +280,7 @@ impl Options {
         Ok(Self {
             path: path.ok_or("missing --pe path")?,
             package,
+            modules,
             max_steps,
             wall_seconds,
             executable_budget: executable_budget.unwrap_or(DEFAULT_EXECUTABLE_BUDGET),
@@ -317,6 +349,7 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         options.digest.is_some()
             || !options.arguments.is_empty()
             || !options.package.is_empty()
+            || !options.modules.is_empty()
             || verify_fixture(&options.path).is_err()
     };
     let (steps, wall) = match options.limits(program) {
@@ -439,6 +472,12 @@ fn launch_worker(
     if program {
         for module in &options.package {
             command.arg("--package").arg(module);
+        }
+        for module in &options.modules {
+            let mut argument = OsString::from(&module.name);
+            argument.push("=");
+            argument.push(&module.path);
+            command.arg("--module").arg(argument);
         }
         command.arg("--").args(&options.arguments);
     }
@@ -730,6 +769,40 @@ fn run_program(
     state.set_standard_input(&input);
     let mut imports = ImportRegistry::new();
     register_standard_services(&mut imports, Arc::clone(&state));
+
+    // `--module` admits an image to the closed-world store. It does not load
+    // or execute the image: later lifecycle work may only name these entries.
+    let mut provisioned = xenora_loader::ProvisionedModuleStore::new();
+    let mut reserved_names = vec![name.to_ascii_lowercase()];
+    for path in &options.package {
+        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+            reserved_names.push(file_name.to_ascii_lowercase());
+        }
+    }
+    for module in &options.modules {
+        let canonical = module.name.to_ascii_lowercase();
+        if reserved_names.contains(&canonical) {
+            return Err(format!(
+                "module name {:?} collides with the program or another admitted image",
+                module.name
+            )
+            .into());
+        }
+        let bytes = read_program(&module.path, None, options.executable_budget)
+            .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?;
+        provisioned
+            .insert(module.name.clone(), bytes, &imports)
+            .map_err(|error| -> Box<dyn Error> { Box::new(error) })?;
+        reserved_names.push(canonical);
+    }
+    if options.trace && !provisioned.is_empty() {
+        eprintln!(
+            "trace provisioned-modules={} store-bytes={}",
+            provisioned.len(),
+            provisioned.total_bytes()
+        );
+    }
+
     let mut entered = false;
     let execution = if options.package.is_empty() {
         // The entry point runs under the deterministic cooperative scheduler,

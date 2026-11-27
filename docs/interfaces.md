@@ -248,6 +248,29 @@ budget as the arena limit. The tested package is an original no-CRT executable
 with two dependent provider DLLs built by the native ARM64 toolchain; console
 compatibility and game execution are not claimed.
 
+A separate closed-world provisioned module store admits immutable PE32+ images
+under bounded, printable logical names. Host callers populate it before
+execution; guest strings are never converted to host paths. Admission rejects
+duplicate canonical names, any name owned by a registered service module,
+malformed images and the store's aggregate byte and module limits. The ordinary
+runner exposes this admission as `--module <name>=<path>`: each value must name
+an existing regular file and is read as a bounded snapshot. Admission alone
+does not load or execute the image.
+
+`prepare_runtime_load` is a crate-internal preparation seam rather than a
+guest-visible `LoadLibrary` implementation. It takes logical roots, collects
+their in-package transitive dependencies and refuses circular components before
+any memory mutation. It uses the existing layout planner with caller-supplied
+occupied ranges, then composes batch mapping, relocation, exception-directory
+registration, transactional IAT writing and TLS preparation. Service registry
+keys are resolved first; provisioned images cannot claim a service module name,
+and package exports resolve forwarded requests inside the selected dependency
+closure. All imports are inspected before the first write, an explicit stub is
+refused, and any failure after mapping restores the caller's whole
+`GuestMemory` snapshot. Success returns reservations, per-stage reports and
+IAT diagnostics but runs no guest code: TLS callbacks are discovered only, and
+initialization, unloading and reference counting remain later lifecycle work.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys

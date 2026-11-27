@@ -1135,6 +1135,24 @@ reports. Numa, cache and group relationships are not modeled yet:
 enumerating them alone answers zero entries. Nothing was compared with
 Windows.
 
+### Cryptography API: Next Generation random generator
+
+The standard `bcrypt.dll` registry supports the user-mode `RNG` algorithm.
+`BCryptOpenAlgorithmProvider` accepts the default provider or the exact
+`Microsoft Primitive Provider` name. Each guest registry holds up to 64
+live provider tokens. Closing a token invalidates it and frees one slot.
+Tokens cannot be used in another guest registry or after process exit.
+
+`BCryptGenRandom` accepts an open RNG token, the Windows 10 RNG pseudo-handle,
+or a null handle with the system-preferred flag. The Windows 8 and later
+entropy-in-buffer flag is accepted and ignored. A request can write up to
+65,536 bytes. The runtime validates the complete guest span before reading
+host entropy and publishes the bytes only after a successful read. A
+zero-length request with a nonnull pointer writes nothing. The three APIs
+return an NTSTATUS value and leave the caller's Win32 last error intact.
+Provider registration, kernel flags and other algorithms are outside the
+supported subset.
+
 ### WinHTTP synchronous cleartext subset
 
 `winhttp.dll` has a partial, synchronous object and cleartext HTTP/1.1

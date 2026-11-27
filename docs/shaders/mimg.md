@@ -73,7 +73,10 @@ Local unit tests cover the descriptor refusals and the sampling arithmetic.
 The validation suite runs six assembled fixtures (DMASK 1, 8, 5 and 15 at LOD
 0, plus `IMAGE_SAMPLE_L` at LOD 0 and 1) through the reference and the second
 interpreter, and the native Metal readback compares every destination VGPR of
-every case with hand-derived expectations. The fixtures are assembled with
-`llvm-mc` and compared with its disassembly, which also checks the
-single-component destination text. Local native verification is on Apple M4
-with Metal API and shader validation; independent acceptance is pending.
+every case with hand-derived expectations. The compiler tests pin the DMASK
+channel order and the level of the generated IR and MSL without a GPU, and a
+partially active sample keeps the prior destination value in the lanes the EXEC
+mask excludes. The fixtures are assembled with `llvm-mc` and compared with its
+disassembly, which also checks the single-component destination text. Local
+native verification is on Apple M4 with Metal API and shader validation;
+independent acceptance is pending.

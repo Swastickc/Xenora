@@ -675,6 +675,101 @@ mod tests {
         ]
     }
 
+    /// Hand-derived point-sampling results for a 4x4 mip 0 and a 2x2 mip 1
+    /// whose texel byte is `(level << 6) | (y << 4) | (x << 2) | channel`.
+    ///
+    /// The texel of a case is `clamp(floor(u * width), 0, width - 1)` and
+    /// `clamp(floor(v * height), 0, height - 1)` of the mip the LOD names, so:
+    ///
+    /// | u | v | lod | texel | bytes (R, G, B, A) |
+    /// | --- | --- | --- | --- | --- |
+    /// | 0.125 | 0.125 | 0 | (0, 0) | 0, 1, 2, 3 |
+    /// | 0.5 | 0.5 | 0 | (2, 2) | 40, 41, 42, 43 |
+    /// | -0.3 | 0.9 | 0 | (0, 3) | 48, 49, 50, 51 |
+    /// | 1.7 | 1.2 | 0 | (3, 3) | 60, 61, 62, 63 |
+    /// | 0.75 | 0.25 | 1 | (1, 0) | 68, 69, 70, 71 |
+    /// | 0.25 | 0.75 | 1 | (0, 1) | 80, 81, 82, 83 |
+    ///
+    /// The last two cases name the 2x2 mip 1, whose extent is 2, so
+    /// `0.75 * 2 = 1.5` floors to the second column and `0.25 * 2 = 0.5` floors
+    /// to the first. The third and fourth cases clamp to the border texels.
+    #[test]
+    fn hand_derived_point_sampling_results() {
+        let mut data = vec![0u8; 80];
+        for level in 0..2u32 {
+            let extent = 4usize >> level;
+            for y in 0..extent {
+                for x in 0..extent {
+                    let offset = (level as usize) * 64 + (y * extent + x) * 4;
+                    for channel in 0..4 {
+                        data[offset + channel] =
+                            ((level << 6) | ((y as u32) << 4) | ((x as u32) << 2) | channel as u32)
+                                as u8;
+                    }
+                }
+            }
+        }
+        let desc = Rgba8TextureDesc::new_packed(4, 4, 2).unwrap();
+        // (u, v, mip, RGBA bytes, RGBA binary32 bits of byte / 255), worked
+        // out by hand.
+        type Case = (f32, f32, u32, [u8; 4], [u32; 4]);
+        let cases: [Case; 6] = [
+            (
+                0.125,
+                0.125,
+                0,
+                [0, 1, 2, 3],
+                [0x0000_0000, 0x3b80_8081, 0x3c00_8081, 0x3c40_c0c1],
+            ),
+            (
+                0.5,
+                0.5,
+                0,
+                [40, 41, 42, 43],
+                [0x3e20_a0a1, 0x3e24_a4a5, 0x3e28_a8a9, 0x3e2c_acad],
+            ),
+            (
+                -0.3,
+                0.9,
+                0,
+                [48, 49, 50, 51],
+                [0x3e40_c0c1, 0x3e44_c4c5, 0x3e48_c8c9, 0x3e4c_cccd],
+            ),
+            (
+                1.7,
+                1.2,
+                0,
+                [60, 61, 62, 63],
+                [0x3e70_f0f1, 0x3e74_f4f5, 0x3e78_f8f9, 0x3e7c_fcfd],
+            ),
+            (
+                0.75,
+                0.25,
+                1,
+                [68, 69, 70, 71],
+                [0x3e88_8889, 0x3e8a_8a8b, 0x3e8c_8c8d, 0x3e8e_8e8f],
+            ),
+            (
+                0.25,
+                0.75,
+                1,
+                [80, 81, 82, 83],
+                [0x3ea0_a0a1, 0x3ea2_a2a3, 0x3ea4_a4a5, 0x3ea6_a6a7],
+            ),
+        ];
+        for (u, v, mip, bytes, bits) in cases {
+            let texel = sample_rgba8_2d(&data, &desc, mip, u, v).expect("sample");
+            assert_eq!(texel, bytes, "the texel of ({u}, {v}) at mip {mip}");
+            for channel in 0..4 {
+                assert_eq!(
+                    (f32::from(texel[channel]) / 255.0).to_bits(),
+                    bits[channel],
+                    "the {channel} channel of ({u}, {v}) at mip {mip}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn resource_descriptor_base_field_is_a_256_byte_unit() {
         let (desc, base) = parse_resource_descriptor(resource_words(4, 4, 2, 1)).unwrap();

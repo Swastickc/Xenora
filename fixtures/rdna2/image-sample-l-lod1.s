@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Wave32 MIMG 2D RGBA8 sampling grid: IMAGE_SAMPLE_L at explicit LOD 1.0
-// (the 2x2 mip), DMASK 0xF. The T# (s[8:15]) and S# (s[16:19]) come from the
+// Wave32 MIMG 2D RGBA8 sampling grid: IMAGE_SAMPLE_L at explicit LOD 1.0 (the
+// 2x2 mip), DMASK 0xF. The T# (s[8:15]) and S# (s[16:19]) come from the
 // synthetic input's first twelve words. Each lane's packed coordinate word is
-// input[lane]; lanes 0-11 carry descriptor words and are masked off, so lane 12
-// starts the grid.
+// input[lane]; lanes 0-11 carry the descriptor words and sample from them as
+// well, so the whole wave stays active and the twenty cases start at lane 12.
 .text
 s_mov_b32 s8, 0
 s_mov_b32 s9, 0

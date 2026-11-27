@@ -2683,6 +2683,65 @@ mod tests {
         assert_ne!(output, image_sample_expected(&input, 0, 0));
     }
 
+    /// The image-sample program with a partial EXEC mask: the masked lanes
+    /// sample and the rest keep the value their destination already held.
+    /// The words match the assembled fixture, with `s_mov_b32 exec_lo, mask`
+    /// between the destination initialisation and the sample.
+    fn image_sample_program(mask: u32) -> Vec<u8> {
+        let mut words: Vec<u32> = (0..12).map(|index| 0xbe88_0380 + (index << 16)).collect();
+        words.extend([
+            0xf428_0200,
+            0xfa00_0000, // s_buffer_load_dwordx4 s[8:11], s[0:3], 0x0
+            0xf428_0300,
+            0xfa00_0010, // s_buffer_load_dwordx4 s[12:15], s[0:3], 0x10
+            0xf428_0400,
+            0xfa00_0020, // s_buffer_load_dwordx4 s[16:19], s[0:3], 0x20
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xe030_2000,
+            0x8000_0100, // buffer_load_dword v1, v0, s[0:3], 0 idxen
+            0xbf8c_3f70, // s_waitcnt vmcnt(0)
+            0x7e16_0290, // v_mov_b32_e32 v11, 16
+            0x3404_030b, // v_lshlrev_b32_e32 v2, v11, v1
+            0x7e14_02ff,
+            0xffff_0000,        // v_mov_b32_e32 v10, 0xffff0000
+            0x3606_030a,        // v_and_b32_e32 v3, v10, v1
+            0x7e0a_0290,        // v_mov_b32_e32 v5, 16: the prior destination value
+            0xbefe_0380 | mask, // s_mov_b32 exec_lo, mask
+            0xf09c_0108,
+            0x0082_0502, // image_sample_lz v5, v[2:3], s[8:15], s[16:19] dmask:0x1
+            0xbefe_03c1, // s_mov_b32 exec_lo, -1: the store needs a full wave
+            0xe070_2000,
+            0x8001_0500, // buffer_store_dword v5, v0, s[4:7], 0 idxen
+            0xbbfd_0000, // s_waitcnt_vscnt null, 0
+            0xbf81_0000, // s_endpgm
+        ]);
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    /// An inactive lane keeps the value its destination already held: the
+    /// sample writes only the lanes the EXEC mask selects.
+    #[test]
+    fn image_sample_keeps_the_prior_destination_in_inactive_lanes() {
+        let input = image_sample_input();
+        let sampled = image_sample_expected(&input, 0, 0);
+        // Lanes 0 and 2 of every wave sample; the rest keep the sixteen the
+        // destination was initialised with.
+        let expected: Vec<u32> = sampled
+            .iter()
+            .enumerate()
+            .map(|(index, value)| match index % 32 {
+                0 | 2 => *value,
+                _ => 16,
+            })
+            .collect();
+        let output = execute(&image_sample_program(0b101), &input).expect("execute");
+        assert_eq!(output, expected);
+        // An active lane holds the sample and an inactive one its prior value.
+        assert_eq!(output[0], sampled[0]);
+        assert_eq!(output[1], 16);
+        assert_eq!(output[3], 16);
+    }
+
     #[test]
     fn image_sample_lz_rejects_invalid_descriptors() {
         let rejects = |input: Vec<u32>, detail: &str| {

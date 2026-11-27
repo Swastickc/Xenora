@@ -876,8 +876,9 @@ fn formatted_output_reaches_the_captured_standard_streams() {
 
     // The option bits that concern floating point. With the three-digit
     // exponent bit the e style has three; without the standard rounding bit
-    // no floating point is printed and the guest stops, while a call that
-    // formats none is unaffected.
+    // the conversion still prints, rounding ties away from zero instead of
+    // to the even digit - and 1.5 at six fractional digits is exact, so the
+    // two modes agree here.
     let (mut fresh, [_, out, _]) = stdio_guest();
     let slots = [1.5f64.to_bits()];
     let (count, exit) = print_with(&mut fresh, MINGW_OPTIONS | 0x10, out, b"%e", &slots);
@@ -886,10 +887,13 @@ fn formatted_output_reaches_the_captured_standard_streams() {
     for options in [0x04, 0x00, 0x14] {
         let (count, exit) = print_with(&mut fresh, options, out, b" %d", &[7]);
         assert_eq!((count, exit), (2, ExitReason::Halt), "{options:#x}");
-        let (_, exit) = print_with(&mut fresh, options, out, b"%f", &slots);
-        assert_eq!(exit, LIMIT, "{options:#x}");
+        let (count, exit) = print_with(&mut fresh, options, out, b"%f", &slots);
+        assert_eq!((count, exit), (8, ExitReason::Halt), "{options:#x}");
     }
-    assert_eq!(fresh.state.standard_output(), b"1.500000e+000 7 7 7");
+    assert_eq!(
+        fresh.state.standard_output(),
+        b"1.500000e+000 71.500000 71.500000 71.500000"
+    );
 
     // Several line feeds in one call, text with none, and an empty format.
     let (mut guest, [_, out, _]) = stdio_guest();

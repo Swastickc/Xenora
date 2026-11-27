@@ -16,8 +16,10 @@
 use super::crt::set_errno;
 use super::crt_files::EINVAL;
 use super::crt_streams::{c_string, fault};
+use super::threads::MAX_THREADS;
 use crate::cpu::ExitReason;
-use crate::memory::{GuestMemory, PROCESS_HEAP};
+use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
+use std::collections::BTreeMap;
 
 /// Seconds in a day; the conversions count in days.
 const SECONDS_PER_DAY: i64 = 86_400;
@@ -25,6 +27,11 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// The last second `_gmtime64` accepts: 23:59:59, December 31, 3000 UTC,
 /// per the Microsoft page.
 const MAX_CRT_TIME: i64 = 32_535_215_999;
+
+/// The main TEB plus the scheduler's fixed pool of 2 * MAX_THREADS worker TEBs.
+/// Worker slots reuse their TEB addresses, so this bounds retained storage
+/// over the lifetime of the process, not just for simultaneously live threads.
+const MAX_TM_BUFFERS: usize = 1 + 2 * MAX_THREADS;
 
 /// The nine fields of `struct tm`, in the order the CRT lays them out.
 #[derive(Clone, Copy, Default)]
@@ -196,22 +203,30 @@ fn ascii_time(tm: &Tm) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// State the time services keep: the static storage the CRT shares between
-/// calls. `tm` is one buffer for both `gmtime` and `localtime`, and the
-/// string one for both `asctime` and `ctime`, exactly as the CRT reuses
-/// them.
+/// The CRT time conversion buffers. The broken-down time is shared by
+/// gmtime and localtime within a guest thread. The asctime/ctime text buffer
+/// retains Xenora's process-wide behavior.
 #[derive(Default)]
 pub(crate) struct ClockServices {
-    tm_static: u64,
+    tm_by_teb: BTreeMap<u64, u64>,
     ascii_static: u64,
 }
 
 impl ClockServices {
-    fn tm_static(&mut self, memory: &mut GuestMemory) -> Result<u64, crate::memory::MemoryError> {
-        if self.tm_static == 0 {
-            self.tm_static = memory.map_heap_allocation(PROCESS_HEAP, 36)?;
+    fn tm_static(&mut self, memory: &mut GuestMemory, teb: u64) -> Result<u64, MemoryError> {
+        if let Some(&address) = self.tm_by_teb.get(&teb) {
+            return Ok(address);
         }
-        Ok(self.tm_static)
+        if self.tm_by_teb.len() >= MAX_TM_BUFFERS {
+            return Err(MemoryError::AllocationFailed);
+        }
+
+        // The heap buffer belongs to the process and stays available when
+        // the scheduler reuses a TEB. Conversion replaces all nine fields
+        // before the new caller receives the address.
+        let address = memory.map_heap_allocation(PROCESS_HEAP, 36)?;
+        self.tm_by_teb.insert(teb, address);
+        Ok(address)
     }
 
     fn ascii_static(
@@ -243,7 +258,7 @@ impl ClockServices {
             return Ok(0);
         }
         let tm = break_down(time);
-        let buffer = self.tm_static(memory).map_err(fault)?;
+        let buffer = self.tm_static(memory, teb).map_err(fault)?;
         tm.write(memory, buffer).map_err(fault)?;
         Ok(buffer)
     }
@@ -320,18 +335,10 @@ impl ClockServices {
         teb: u64,
         time_address: u64,
     ) -> Result<u64, ExitReason> {
-        if time_address == 0 {
-            let _ = set_errno(memory, teb, EINVAL);
+        let buffer = self.break_time(memory, teb, time_address)?;
+        if buffer == 0 {
             return Ok(0);
         }
-        let time = memory.read_u64(time_address).map_err(fault)? as i64;
-        if !(0..=MAX_CRT_TIME).contains(&time) {
-            let _ = set_errno(memory, teb, EINVAL);
-            return Ok(0);
-        }
-        let tm = break_down(time);
-        let buffer = self.tm_static(memory).map_err(fault)?;
-        tm.write(memory, buffer).map_err(fault)?;
         self.ascii_time(memory, teb, buffer)
     }
 
@@ -372,18 +379,10 @@ impl ClockServices {
         size: u64,
         time_address: u64,
     ) -> Result<u64, ExitReason> {
-        if time_address == 0 {
-            let _ = set_errno(memory, teb, EINVAL);
+        let scratch = self.break_time(memory, teb, time_address)?;
+        if scratch == 0 {
             return Ok(u64::from(EINVAL));
         }
-        let time = memory.read_u64(time_address).map_err(fault)? as i64;
-        if !(0..=MAX_CRT_TIME).contains(&time) {
-            let _ = set_errno(memory, teb, EINVAL);
-            return Ok(u64::from(EINVAL));
-        }
-        let tm = break_down(time);
-        let scratch = self.tm_static(memory).map_err(fault)?;
-        tm.write(memory, scratch).map_err(fault)?;
         self.ascii_time_s(memory, teb, buffer, size, scratch)
     }
 

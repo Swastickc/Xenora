@@ -34,9 +34,9 @@
 //! planned `SizeOfImage`. They are not ownership tokens. Only headers and
 //! sections are committed; holes inside an image span are not inaccessible
 //! guard reservations, and this layer does not prevent a later unrelated
-//! mapping from using one. It performs no relocation, import or IAT binding,
-//! API-set resolution, service registration, exception or TLS initialization,
-//! unloading, reference counting or guest execution.
+//! mapping from using one. Batch mapping performs no relocation, import or IAT
+//! binding, API-set resolution, service registration, exception or TLS
+//! initialization, unloading, reference counting or guest execution.
 
 use std::fmt;
 
@@ -188,6 +188,9 @@ pub enum ModuleReservationError {
         used_preferred_base: bool,
         expected_used_preferred_base: bool,
     },
+    /// The entry RVA is nonzero but its address is not representable at the
+    /// reservation base.
+    EntryPointOverflow { base: u64, entry_rva: u32 },
 }
 
 impl fmt::Display for ModuleReservationError {
@@ -227,6 +230,10 @@ impl fmt::Display for ModuleReservationError {
             } => write!(
                 f,
                 "reservation preferred-base marker {used_preferred_base} does not match expected {expected_used_preferred_base}"
+            ),
+            Self::EntryPointOverflow { base, entry_rva } => write!(
+                f,
+                "reservation base {base:#x} plus entry RVA {entry_rva:#x} overflows the guest address space"
             ),
         }
     }
@@ -368,6 +375,9 @@ pub fn relocate_module_batch(
     memory: &mut GuestMemory,
 ) -> Result<Vec<RelocationReport>, ModuleRelocationError> {
     let ordered = validate_reservations(images, reservations)?;
+    if images.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut image_base_fields = Vec::with_capacity(images.len());
     for (image_index, image) in images.iter().enumerate() {
         let reservation = ordered[image_index];
@@ -481,8 +491,21 @@ fn validate_reservation(
             expected_end,
         }));
     }
-    let expected_entry_point = (image.pe.entry_point_rva != 0)
-        .then_some(reservation.base + u64::from(image.pe.entry_point_rva));
+    let expected_entry_point = if image.pe.entry_point_rva == 0 {
+        None
+    } else {
+        Some(
+            reservation
+                .base
+                .checked_add(u64::from(image.pe.entry_point_rva))
+                .ok_or_else(|| {
+                    inconsistent(ModuleReservationError::EntryPointOverflow {
+                        base: reservation.base,
+                        entry_rva: image.pe.entry_point_rva,
+                    })
+                })?,
+        )
+    };
     if reservation.entry_point != expected_entry_point {
         return Err(inconsistent(ModuleReservationError::WrongEntryPoint {
             entry_point: reservation.entry_point,

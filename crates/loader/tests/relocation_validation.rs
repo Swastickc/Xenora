@@ -436,6 +436,75 @@ fn target_outside_image_is_rejected_even_if_mapped() {
 }
 
 #[test]
+fn target_in_an_image_hole_is_rejected_even_if_memory_was_reused() {
+    // .text ends at RVA 0x1200 and .reloc begins at 0x2000. RVA 0x1800 is
+    // inside SizeOfImage but is a hole rather than image-owned backing.
+    let table = block(0x1000, &[0xA800, 0x0000]);
+    let bytes = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1000;
+    let (pe, mut memory) = load(&bytes, base);
+    memory
+        .map_region(
+            base + 0x1800,
+            0x100,
+            xenora_loader::MemoryPermissions::READ_WRITE,
+        )
+        .expect("unrelated hole mapping");
+    memory.write_u64_bypass(base + 0x1800, 0x55).unwrap();
+
+    let result = apply_relocations(&pe, &bytes, base, &mut memory);
+
+    assert_eq!(
+        result.unwrap_err(),
+        RelocationError::TargetNotImageBacked {
+            target_rva: 0x1800,
+            target_va: base + 0x1800,
+        }
+    );
+    assert_eq!(memory.read_u64_bypass(base + 0x1800).unwrap(), 0x55);
+}
+
+#[test]
+fn header_target_is_image_backed() {
+    let table = block(0, &[0xA1F0, 0x0000]);
+    let bytes = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1000;
+    let pe = ParsedPe::parse(&bytes).expect("parse");
+    let mut memory = GuestMemory::new();
+    pe.map_into_memory(&bytes, &mut memory, base).expect("map");
+    let target = base + 0x1F0;
+    let original = memory.read_u64_bypass(target).unwrap();
+
+    let report = apply_relocations(&pe, &bytes, base, &mut memory).expect("relocate");
+
+    assert_eq!(report.applied_dir64, 1);
+    assert_eq!(
+        memory.read_u64_bypass(target).unwrap(),
+        original.wrapping_add(report.delta as u64)
+    );
+}
+
+#[test]
+fn target_crossing_adjacent_header_and_section_backing_is_accepted() {
+    let table = block(0, &[0xAFFC, 0x0000]);
+    let bytes = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1000;
+    let pe = ParsedPe::parse(&bytes).expect("parse");
+    let mut memory = GuestMemory::new();
+    pe.map_into_memory(&bytes, &mut memory, base).expect("map");
+    let target = base + 0xFFC;
+    let original = memory.read_u64_bypass(target).unwrap();
+
+    let report = apply_relocations(&pe, &bytes, base, &mut memory).expect("relocate");
+
+    assert_eq!(report.applied_dir64, 1);
+    assert_eq!(
+        memory.read_u64_bypass(target).unwrap(),
+        original.wrapping_add(report.delta as u64)
+    );
+}
+
+#[test]
 fn target_rva_at_top_of_address_space_is_rejected() {
     let table = block(0xFFFF_F000, &[0xAFFC, 0x0000]);
     let bytes = build(16, &table, table.len() as u32);

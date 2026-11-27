@@ -145,16 +145,20 @@ The separate explicit-module loader infrastructure can plan and map a batch of
 caller-supplied in-memory PE32+ images without host file search. Batch mapping
 returns logical reservations rather than ownership tokens. Batch relocation
 requires exactly one reservation per input image and validates its index,
-64 KiB-aligned base, `SizeOfImage` extent and entry metadata before mutation.
-It then applies the existing DIR64 relocation engine at each reserved base and
-writes each mapped optional-header `ImageBase` field. Any validation or
+64 KiB-aligned base, `SizeOfImage` extent, entry and preferred-base metadata
+and overlap shape before mutation. It then applies the existing DIR64
+relocation engine at each reserved base and writes each mapped optional-header
+`ImageBase` field. A DIR64 target must be continuously backed by committed
+image headers or sections; a target in a logical `SizeOfImage` hole is refused
+even when unrelated memory was later mapped there. Any validation or
 relocation failure restores the exact pre-relocation address space, including
 fixups already applied to earlier images. The implementation uses a whole
 `GuestMemory` snapshot for that transaction; this is correct but deliberately
-expensive and is not the final memory-ownership design. Import/IAT binding,
-delayed imports, service registration, exception-directory registration, TLS
-callbacks, unloading, reference counting and module execution remain separate
-unsupported steps.
+expensive and is not the final memory-ownership design. Relocation itself
+performs no import or IAT write. Ordinary-IAT binding is a separate implemented
+step, while delayed imports, service registration, exception-directory
+registration, TLS callbacks, unloading, reference counting and module execution
+remain unsupported.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,

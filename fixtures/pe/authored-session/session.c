@@ -16,6 +16,8 @@ IMPORT int ReadFile(u64 file, void *bytes, u32 size, u32 *read, void *overlapped
 IMPORT int SetFilePointerEx(u64 file, long long distance, u64 *position, u32 origin);
 IMPORT int CloseHandle(u64 handle);
 IMPORT void Sleep(u32 milliseconds);
+IMPORT u64 GetTickCount64(void);
+IMPORT void GetSystemTimeAsFileTime(u64 *filetime);
 IMPORT __declspec(noreturn) void ExitProcess(u32 status);
 
 IMPORT int XenoraCreateDevice(u64 *out);
@@ -38,7 +40,7 @@ IMPORT int XenoraDestroyCommandQueue(u64 queue);
 IMPORT int XenoraDestroyDevice(u64 device);
 
 enum { WIDTH = 4, HEIGHT = 3, MAX_FRAMES = 64 };
-enum session_mode { NORMAL, MISSING_PRESENT, EXTRA_PRESENT, LEAK_FILE, STALL_FRAME };
+enum session_mode { NORMAL, MISSING_PRESENT, EXTRA_PRESENT, LEAK_FILE, STALL_FRAME, DETERMINISTIC_CLOCK };
 
 struct journal_entry {
     u32 sequence;
@@ -76,9 +78,9 @@ static void set_up(struct graphics *graphics) {
     CHECK(XenoraCreateRenderTarget(graphics->device, WIDTH, HEIGHT, &graphics->target) == 0, 14);
 }
 
-static void draw_frame(const struct graphics *graphics, u32 input, u32 sequence) {
+static void draw_frame(const struct graphics *graphics, u32 input, u32 sequence, u32 blue) {
     const u32 side = input & 1;
-    const u32 clear = 0xff3c0000u | (sequence << 8) | (input & 255);
+    const u32 clear = 0xff000000u | ((blue & 255) << 16) | (sequence << 8) | (input & 255);
     u64 list;
     CHECK(XenoraCreateCommandList(graphics->device, graphics->allocator, 0, &list) == 0, 20);
     CHECK(XenoraSetVertexBuffer(list, 0, graphics->buffer, side * sizeof(vertices[0]), sizeof(vertices[0][0])) == 0, 21);
@@ -101,11 +103,21 @@ static void tear_down(const struct graphics *graphics) {
     CHECK(XenoraDestroyDevice(graphics->device) == 0, 44);
 }
 
+static u32 clock_milliseconds(void) {
+    u64 filetime;
+    GetSystemTimeAsFileTime(&filetime);
+    const u64 milliseconds = GetTickCount64();
+    CHECK(filetime == 116444736000000000ull + milliseconds * 10000, 47);
+    return (u32)milliseconds;
+}
+
 static void run_session(enum session_mode mode) {
     const u64 file = CreateFileW(journal_path, 0xc0000000u, 0, 0, 2, 0, 0);
     CHECK(file != 0 && file != ~0ull, 1);
     struct graphics graphics;
     set_up(&graphics);
+    if (mode == DETERMINISTIC_CLOCK)
+        CHECK(clock_milliseconds() == 0, 48);
 
     u32 frames = 0;
     for (;;) {
@@ -121,7 +133,8 @@ static void run_session(enum session_mode mode) {
         record->input = input;
         u32 count;
         CHECK(WriteFile(file, record, sizeof(*record), &count, 0) && count == sizeof(*record), 3);
-        draw_frame(&graphics, input, frames);
+        const u32 blue = mode == DETERMINISTIC_CLOCK ? clock_milliseconds() : 0x3c;
+        draw_frame(&graphics, input, frames, blue);
 
         if (mode == MISSING_PRESENT) {
             (void)XenoraSessionNextInput(&input);
@@ -132,7 +145,11 @@ static void run_session(enum session_mode mode) {
             (void)XenoraSessionPresent();
             ExitProcess(72);
         }
+        if (mode == DETERMINISTIC_CLOCK)
+            Sleep(5);
     }
+    if (mode == DETERMINISTIC_CLOCK)
+        CHECK(clock_milliseconds() == frames * 21, 49);
 
     CHECK(SetFilePointerEx(file, 0, 0, 0), 30);
     u32 count;
@@ -155,3 +172,4 @@ void missing_present_entry(void) { run_session(MISSING_PRESENT); }
 void extra_present_entry(void) { run_session(EXTRA_PRESENT); }
 void leak_entry(void) { run_session(LEAK_FILE); }
 void stall_frame_entry(void) { run_session(STALL_FRAME); }
+void deterministic_clock_entry(void) { run_session(DETERMINISTIC_CLOCK); }

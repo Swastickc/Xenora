@@ -35,6 +35,13 @@ session, with a default of 2,000,000. The launcher accepts up to 64 inputs
 and frame sizes up to 256×256. Exit code 2 indicates a rejected command
 line, 124 a phase deadline and 125 a session failure.
 
+`--deterministic-clock` sets the guest UTC clock to 1970-01-01 00:00:00 and
+starts guest monotonic time at zero. Both advance by 16 ms just before the
+guest receives each input. Guest sleeps and scheduler timeout waits also
+advance this clock. Host idle time and Stop add no time. The launcher still
+uses real wall time for phase deadlines. The default uses the system clock.
+This mode stabilizes programs whose timing comes from the guest clock.
+
 ## Guest contract
 
 Link against the Win64 C ABI from `xenora-session-v1.dll`. The

@@ -154,6 +154,10 @@ impl Drop for Session {
 }
 
 fn expected_frame(sequence: u8, input: u32, pixels: bool) -> String {
+    expected_frame_with_blue(sequence, input, 0x3c, pixels)
+}
+
+fn expected_frame_with_blue(sequence: u8, input: u32, blue: u8, pixels: bool) -> String {
     let red_column = if input.is_multiple_of(2) { 0 } else { 3 };
     let mut rgba = Vec::new();
     for _ in 0..3 {
@@ -161,7 +165,7 @@ fn expected_frame(sequence: u8, input: u32, pixels: bool) -> String {
             let pixel = if column == red_column {
                 [255, 0, 0, 255]
             } else {
-                [input as u8, sequence, 0x3c, 0xff]
+                [input as u8, sequence, blue, 0xff]
             };
             rgba.extend_from_slice(&pixel);
         }
@@ -201,6 +205,34 @@ fn live_requests_keep_guest_state_until_clean_eof() {
     let completed = session.finish();
     completed.assert_code(0);
     assert_eq!(completed.lines, ["done frames=3"]);
+}
+
+#[test]
+fn deterministic_clock_advances_for_inputs_and_guest_sleep_but_not_host_idle() {
+    let path = fixture("authored-session-deterministic-clock");
+    for host_idle in [false, true] {
+        let mut session =
+            Session::start(command(&path, None).args(["--deterministic-clock", "--pixels"]));
+        assert_eq!(session.next_line(), "ready");
+        // The first input advances by 16 ms. Between frames the guest sleeps
+        // for 5 ms, and each next input advances by another 16 ms.
+        for (sequence, milliseconds) in [(1, 16), (2, 37), (3, 58)] {
+            if host_idle {
+                assert_eq!(
+                    session.lines.recv_timeout(Duration::from_millis(125)),
+                    Err(RecvTimeoutError::Timeout),
+                );
+            }
+            session.send(10);
+            assert_eq!(
+                session.next_line(),
+                expected_frame_with_blue(sequence, 10, milliseconds, true),
+            );
+        }
+        let completed = session.finish();
+        completed.assert_code(0);
+        assert_eq!(completed.lines, ["done frames=3"]);
+    }
 }
 
 #[test]

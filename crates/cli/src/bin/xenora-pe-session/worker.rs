@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use xenora_loader::graphics::{FramePresentation, GraphicsBackendId};
 use xenora_loader::startup::{StartupEvent, StartupLayout, run_synthetic_startup_scheduled};
 use xenora_loader::{
-    ExitReason, ImportRegistry, ServicesState, SystemClock, register_standard_services,
+    Clock, ExitReason, ImportRegistry, MockClock, ServicesState, SystemClock,
+    register_standard_services,
 };
 
 use super::wire::{MAX_FRAMES, Reply, Request, frame_len, read_request, write_reply};
@@ -17,6 +18,8 @@ use super::wire::{MAX_FRAMES, Reply, Request, frame_len, read_request, write_rep
 const MODULE: &str = "xenora-session-v1.dll";
 const MAX_EXECUTABLE_BYTES: u64 = 64 * 1024 * 1024;
 const QUANTUM: usize = 64;
+const REPLAY_FILETIME: u64 = 116_444_736_000_000_000; // 1970-01-01 00:00:00 UTC
+const TICKS_PER_INPUT: u64 = 160_000; // 16 milliseconds in 100 ns ticks
 const LAYOUT: StartupLayout = StartupLayout {
     image_base: 0x150000000,
     stack_top: 0x200010000,
@@ -25,13 +28,23 @@ const LAYOUT: StartupLayout = StartupLayout {
 // Scheduled startup maps the main TEB 64 KiB above its TLS pointer array.
 const MAIN_TEB: u64 = LAYOUT.tls_base + 0x10000;
 
-pub(super) fn run(path: &Path, digest: [u8; 32], steps: usize) -> Result<(), String> {
+pub(super) fn run(
+    path: &Path,
+    digest: [u8; 32],
+    steps: usize,
+    deterministic_clock: bool,
+) -> Result<(), String> {
     let bytes = snapshot(path, digest)?;
     let image_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or("the guest PE file name must be UTF-8")?;
-    let services = Arc::new(ServicesState::new(Arc::new(SystemClock)));
+    let replay_clock = deterministic_clock.then(|| Arc::new(MockClock::new(REPLAY_FILETIME)));
+    let clock: Arc<dyn Clock> = match &replay_clock {
+        Some(clock) => clock.clone(),
+        None => Arc::new(SystemClock),
+    };
+    let services = Arc::new(ServicesState::new(clock));
     services
         .set_program_arguments(&[image_name])
         .map_err(|error| format!("could not set guest program arguments: {error}"))?;
@@ -44,7 +57,7 @@ pub(super) fn run(path: &Path, digest: [u8; 32], steps: usize) -> Result<(), Str
     let phase = Arc::new(Mutex::new(Session::default()));
     let mut imports = ImportRegistry::new();
     register_standard_services(&mut imports, Arc::clone(&services));
-    register_protocol(&mut imports, &phase, &presentation, &services);
+    register_protocol(&mut imports, &phase, &presentation, &services, replay_clock);
 
     let result = run_synthetic_startup_scheduled(
         &bytes,
@@ -187,6 +200,7 @@ fn register_protocol(
     session: &Arc<Mutex<Session>>,
     presentation: &Arc<Mutex<FramePresentation>>,
     services: &Arc<ServicesState>,
+    replay_clock: Option<Arc<MockClock>>,
 ) {
     let next = Arc::clone(session);
     let current = Arc::clone(presentation);
@@ -213,6 +227,9 @@ fn register_protocol(
                         memory.write_u32(args.rcx, input).map_err(|error| {
                             format!("invalid NextInput output address: {error}")
                         })?;
+                        if let Some(clock) = &replay_clock {
+                            clock.advance(TICKS_PER_INPUT);
+                        }
                         session.phase = Phase::Present;
                         Ok(1)
                     }

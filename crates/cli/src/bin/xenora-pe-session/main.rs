@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-const USAGE: &str = "usage: xenora-pe-session --pe <executable> --sha256 <64 hex digits> --experimental [--phase-seconds <1..=60>] [--max-steps <1..=10000000>] [--pixels]";
+const USAGE: &str = "usage: xenora-pe-session --pe <executable> --sha256 <64 hex digits> --experimental [--phase-seconds <1..=60>] [--max-steps <1..=10000000>] [--pixels] [--deterministic-clock]";
 const DEFAULT_STEPS: usize = 2_000_000;
 const MAX_STEPS: usize = 10_000_000;
 const DEFAULT_SECONDS: u64 = 15;
@@ -21,6 +21,7 @@ struct Options {
     phase_limit: Duration,
     steps: usize,
     pixels: bool,
+    deterministic_clock: bool,
     worker: bool,
 }
 
@@ -29,6 +30,7 @@ impl Options {
         let mut args = args.into_iter();
         let (mut path, mut digest, mut seconds, mut steps) = (None, None, None, None);
         let (mut experimental, mut pixels, mut worker) = (false, false, false);
+        let mut deterministic_clock = false;
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--pe") if path.is_none() => {
@@ -65,6 +67,7 @@ impl Options {
                 }
                 Some("--experimental") if !experimental => experimental = true,
                 Some("--pixels") if !pixels => pixels = true,
+                Some("--deterministic-clock") if !deterministic_clock => deterministic_clock = true,
                 Some("--worker") if !worker => worker = true,
                 _ => return Err(format!("unknown or repeated session argument {arg:?}")),
             }
@@ -78,6 +81,7 @@ impl Options {
             phase_limit: Duration::from_secs(seconds.unwrap_or(DEFAULT_SECONDS)),
             steps: steps.unwrap_or(DEFAULT_STEPS),
             pixels,
+            deterministic_clock,
             worker,
         })
     }
@@ -104,8 +108,13 @@ fn main() -> ExitCode {
         }
     };
     let result = if options.worker {
-        worker::run(&options.path, options.digest, options.steps)
-            .map_err(supervisor::Failure::Session)
+        worker::run(
+            &options.path,
+            options.digest,
+            options.steps,
+            options.deterministic_clock,
+        )
+        .map_err(supervisor::Failure::Session)
     } else {
         supervisor::run(&options)
     };

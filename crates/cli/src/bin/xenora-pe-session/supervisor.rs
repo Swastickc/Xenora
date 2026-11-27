@@ -38,14 +38,18 @@ impl WorkerProcess {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        let mut child = Command::new(std::env::current_exe()?)
+        let mut command = Command::new(std::env::current_exe()?);
+        command
             .args(["--experimental", "--worker", "--pe"])
             .arg(&options.path)
             .args(["--sha256", &digest, "--max-steps"])
             .arg(options.steps.to_string())
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()?;
+            .stdout(Stdio::piped());
+        if options.deterministic_clock {
+            command.arg("--deterministic-clock");
+        }
+        let mut child = command.spawn()?;
         let requests = child.stdin.take().expect("worker stdin was piped");
         let stdout = child.stdout.take().expect("worker stdout was piped");
         let (send, replies) = sync_channel(1);

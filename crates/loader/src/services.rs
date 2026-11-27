@@ -57,6 +57,7 @@ use crate::runtime::HResult;
 pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
 pub use crt_streams::MAX_CAPTURED_OUTPUT;
 pub use startup_info::{ProcessStartupInfo, StartupInfoError};
+pub use xinput::XInputControllerState;
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
@@ -288,6 +289,7 @@ pub struct ServicesState {
     exit_status: Mutex<Option<u32>>,
     crt_startup: Mutex<crt_startup::CrtStartup>,
     winhttp: Mutex<winhttp::WinHttpHandles>,
+    xinput: Mutex<xinput::Slots>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -366,6 +368,7 @@ impl ServicesState {
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
+            xinput: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -828,7 +831,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     registry::register(registry, &state);
     file_mapping::register(registry, &state);
     user32::register(registry, &state);
-    xinput::register(registry);
+    xinput::register(registry, &state);
     advapi::register(registry, &state);
     advapi::register_tokens(registry, &state);
     advapi::register_safer(registry, &state);

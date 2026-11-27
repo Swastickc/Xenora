@@ -434,18 +434,29 @@ them. Nothing was compared with Windows.
 
 `XInputGetState` resolves through `xinput1_4.dll`, `xinput9_1_0.dll` and
 `xinputuap.dll`. The public structure layout is 16 bytes: a 32-bit packet
-number followed by the packed 12-byte gamepad state. Xenora does not yet bridge
-host controllers into the guest, so slots zero through three honestly return
-`ERROR_DEVICE_NOT_CONNECTED` and leave the output bytes unchanged. Indexes
-outside zero through three return `ERROR_BAD_ARGUMENTS`. Null, unwritable or
-truncated output ranges also return `ERROR_BAD_ARGUMENTS` before any mutation;
-Microsoft does not document that pointer-validation case, so this is Xenora's
-memory-safety boundary rather than Windows comparison evidence.
+number followed by the packed 12-byte gamepad state. A host may install one explicit snapshot per slot through
+`ServicesState::set_xinput_controller`. The runtime applies no deadzones and
+stores the documented units directly: the XInput button bitmask, triggers from
+0 through 255 and signed thumb axes from -32768 through 32767. A connected
+snapshot returns `ERROR_SUCCESS` and writes the exact 16-byte layout: packet
+number, buttons, triggers, then left X/Y and right X/Y in little-endian order.
+The packet number starts at one for a newly connected snapshot and increments
+only when a supplied snapshot changes or a disconnected slot reconnects.
+Supplying the same snapshot repeatedly leaves it unchanged. Disconnecting a
+slot makes later calls return `ERROR_DEVICE_NOT_CONNECTED` without mutating
+output. Slots start disconnected, so the honest default is that error.
 
-Vibration, capabilities, keystrokes, headset and battery interfaces, controller
-hotplugging and any actual host-input bridge remain unsupported. The current
-negative result is ABI and error-path evidence only; it is not gamepad input
-support and was not compared with Windows or Xbox hardware.
+Indexes outside zero through three return `ERROR_BAD_ARGUMENTS`. Null,
+unwritable or truncated output ranges also return `ERROR_BAD_ARGUMENTS` before
+any mutation; Microsoft does not document that pointer-validation case, so
+this is Xenora's memory-safety boundary rather than Windows comparison
+evidence.
+
+Vibration, capabilities, keystrokes, headset and battery interfaces,
+physical-controller discovery/hotplugging, FFI/Swift wiring and native host
+input delivery remain unsupported. The explicit snapshot path is ABI and
+serialization evidence only; it does not prove physical gamepad compatibility
+and was not compared with Windows or Xbox hardware.
 
 ### Guest heaps
 

@@ -527,6 +527,11 @@ fn spawnve(
     child.set_standard_input(&[]);
     let mut imports = ImportRegistry::new();
     crate::services::register_standard_services(&mut imports, Arc::clone(&child));
+    // Shared-memory hand-off: the suspended parent's writes live in its own
+    // views, so they copy out to the backing stores before the child maps
+    // them, and the views the child leaves behind drop with its memory.
+    super::file_mapping::sync_views_to_backings(state, memory);
+    let parent_views = super::file_mapping::live_view_addresses(state);
     let run = crate::startup::run_synthetic_startup_scheduled_with_budget(
         &image,
         crate::startup::StartupLayout {
@@ -541,6 +546,7 @@ fn spawnve(
         crate::pe::DEFAULT_MAPPED_IMAGE_BUDGET,
         |_| {},
     );
+    super::file_mapping::drop_views_except(state, &parent_views);
     let startup = match run {
         Ok(startup) => startup,
         Err(_) => {

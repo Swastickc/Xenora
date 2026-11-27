@@ -1,28 +1,35 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Memory-mapped files, honestly scoped to shared memory.
+//! Memory-mapped files, honestly scoped to paging-file-backed shared memory.
 //!
 //! Documented (Microsoft Learn, "CreateFileMappingA", "MapViewOfFile",
 //! "UnmapViewOfFile"): a file mapping object describes a region of memory
 //! backed by a file or by the paging file, a view of it is memory the
 //! program can use, and closing the object's last handle destroys it once
 //! every view is gone. A fresh view of paging-file-backed memory reads as
-//! zero.
+//! zero, and every view of one object shares the same content.
 //!
 //! Xenora's choice, because there is no host file content to share
 //! coherently: only paging-file-backed mappings - `INVALID_HANDLE_VALUE`
-//! as the file - are supported, and they are shared memory in name only,
-//! as nothing else can open them in this process-only world. Mapping a
-//! real file fails honestly with ERROR_NOT_SUPPORTED rather than serving
-//! content that writes could not reach. Views are zero-filled memory, as
-//! documented for fresh paging-file-backed pages.
+//! as the file - are supported. Mapping a real file fails honestly with
+//! ERROR_NOT_SUPPORTED rather than serving content that writes could not
+//! reach. Each object carries one backing byte store shared across the
+//! machine, so a child process mapping the same handle - the numeric
+//! handles being machine-wide here, as inherited handles are on Windows -
+//! reads what the parent wrote. Because guest memory is private to each
+//! process and only one process executes at a time, the backing store and
+//! the views reconcile at the synchronization points a suspended parent
+//! can observe: mapping copies the backing in, unmapping and flushing copy
+//! the view out, and spawning a child copies every live view out first.
+//! Writes a process makes while another process's view of the same object
+//! stays mapped do not propagate until those points, which is exact for
+//! the spawn-then-wait hand-off shells use and documented as the limit.
 
 use super::{GuestObject, KERNEL32, ServicesState};
 use crate::cpu::ExitReason;
 use crate::imports::ImportRegistry;
-use crate::memory::PROCESS_HEAP;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use crate::memory::{GuestMemory, PROCESS_HEAP};
+use std::sync::Arc;
 
 const MAPPING_API: &str = "api-ms-win-core-memory-l1-1-0.dll";
 const ERROR_INVALID_HANDLE: u32 = 6;
@@ -32,17 +39,78 @@ const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
 const INVALID_HANDLE_VALUE_FILE: u64 = u64::MAX;
 const PAGE_PROTECTIONS: u32 = 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40;
+/// Paging-file-backed memory commits lazily on Windows; Xenora allocates
+/// the backing eagerly, so an upper bound keeps a hostile size from
+/// exhausting the host. 256 MiB is far beyond any shared-memory hand-off.
+const MAX_BACKING_SIZE: u64 = 256 * 1024 * 1024;
 
-/// The live views: their base address, size and owning object, so that
-/// unmapping releases the memory and closing the object stays honest.
-#[derive(Default)]
-struct Views {
-    by_address: BTreeMap<u64, u64>,
+fn backing_of(
+    state: &Arc<ServicesState>,
+    object: u64,
+) -> Option<(u64, Arc<std::sync::Mutex<Vec<u8>>>)> {
+    let objects = state.objects.lock().expect("guest object state");
+    match objects.handles.get(&object) {
+        Some(GuestObject::FileMapping { size, backing }) => Some((*size, Arc::clone(backing))),
+        _ => None,
+    }
+}
+
+/// Copy the view's guest bytes back into its backing store. A view whose
+/// memory is gone - the process that owned it has exited - is skipped.
+fn copy_view_to_backing(
+    memory: &GuestMemory,
+    base: u64,
+    length: u64,
+    backing: &Arc<std::sync::Mutex<Vec<u8>>>,
+) {
+    let mut bytes = vec![0u8; length as usize];
+    if memory.read_bytes(base, &mut bytes).is_err() {
+        return;
+    }
+    let mut backing = backing.lock().expect("file mapping backing");
+    let count = backing.len().min(bytes.len());
+    backing[..count].copy_from_slice(&bytes[..count]);
+}
+
+/// Every live view belongs to the running process, since only one process
+/// executes at a time: copy them all out before a spawn suspends it.
+pub(super) fn sync_views_to_backings(state: &Arc<ServicesState>, memory: &GuestMemory) {
+    let views: Vec<(u64, u64, Arc<std::sync::Mutex<Vec<u8>>>)> = {
+        let objects = state.objects.lock().expect("guest object state");
+        objects
+            .mapping_views
+            .iter()
+            .map(|(&base, (length, backing))| (base, *length, Arc::clone(backing)))
+            .collect()
+    };
+    for (base, length, backing) in views {
+        copy_view_to_backing(memory, base, length, &backing);
+    }
+}
+
+/// The addresses of the live views, for a spawn to tell apart what the
+/// child creates from what the parent already held.
+pub(super) fn live_view_addresses(state: &Arc<ServicesState>) -> Vec<u64> {
+    state
+        .objects
+        .lock()
+        .expect("guest object state")
+        .mapping_views
+        .keys()
+        .copied()
+        .collect()
+}
+
+/// Drop every live view whose address is not in `keep`. A finished child
+/// never unmaps cleanly - its shell memory is sticky - and its guest
+/// memory no longer exists, so its entries would only collide with the
+/// next process's allocations.
+pub(super) fn drop_views_except(state: &Arc<ServicesState>, keep: &[u64]) {
+    let mut objects = state.objects.lock().expect("guest object state");
+    objects.mapping_views.retain(|base, _| keep.contains(base));
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
-    let views = Arc::new(Mutex::new(Views::default()));
-
     for (symbol, _wide) in [("CreateFileMappingA", false), ("CreateFileMappingW", true)] {
         let state = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |args, cpu, memory| {
@@ -61,28 +129,32 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             if size == 0 {
                 return state.fail(cpu.gs_base, ERROR_FILE_INVALID, 0);
             }
+            if size > MAX_BACKING_SIZE {
+                return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+            }
             let mut objects = state.objects.lock().expect("guest object state");
             let Some(handle) = objects.next_handle() else {
                 return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
             };
-            objects.insert_handle(handle, GuestObject::FileMapping { size });
+            objects.insert_handle(
+                handle,
+                GuestObject::FileMapping {
+                    size,
+                    backing: Arc::new(std::sync::Mutex::new(vec![0u8; size as usize])),
+                },
+            );
             Ok(handle)
         });
     }
 
     for (symbol, all_access) in [("MapViewOfFile", false), ("MapViewOfFileEx", true)] {
         let state = Arc::clone(state);
-        let views = Arc::clone(&views);
         registry.register(KERNEL32, symbol, move |args, cpu, memory| {
             let (object, _access, offset_high, offset_low) =
                 (args.rcx, args.rdx, args.r8 as u32, args.r9 as u32);
             let requested = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
-            let size = {
-                let objects = state.objects.lock().expect("guest object state");
-                match objects.handles.get(&object) {
-                    Some(GuestObject::FileMapping { size }) => *size,
-                    _ => return state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
-                }
+            let Some((size, backing)) = backing_of(&state, object) else {
+                return state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
             };
             let offset = (u64::from(offset_high) << 32) | u64::from(offset_low);
             if offset != 0
@@ -100,35 +172,46 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Ok(address) = address else {
                 return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
             };
-            views
+            // The view opens with the backing store's content, as shared
+            // memory the process is only now joining would.
+            {
+                let backing = backing.lock().expect("file mapping backing");
+                let count = backing.len().min(length as usize);
+                if count > 0 && memory.write_bytes(address, &backing[..count]).is_err() {
+                    memory.release_heap_allocation(PROCESS_HEAP, address);
+                    return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+                }
+            }
+            state
+                .objects
                 .lock()
-                .expect("mapped views")
-                .by_address
-                .insert(address, length);
+                .expect("guest object state")
+                .mapping_views
+                .insert(address, (length, backing));
             Ok(address)
         });
     }
 
-    let state_unmap = Arc::clone(state);
-    let views_unmap = Arc::clone(&views);
-    // Paging-file-backed views have no file to write back. Check the range
-    // against its containing view, with zero length meaning through its end.
-    let views_flush = Arc::clone(&views);
+    // Paging-file-backed views have no file to write back, but the backing
+    // store must observe the flush: copy the containing view out.
     let flush_state = Arc::clone(state);
-    registry.register(KERNEL32, "FlushViewOfFile", move |args, cpu, _memory| {
-        let in_view = views_flush
-            .lock()
-            .expect("file mapping views")
-            .by_address
-            .range(..=args.rcx)
-            .next_back()
-            .is_some_and(|(&base, &length)| {
-                let offset = args.rcx - base;
-                offset < length && args.rdx <= length - offset
-            });
-        if !in_view {
+    registry.register(KERNEL32, "FlushViewOfFile", move |args, cpu, memory| {
+        let found = {
+            let objects = flush_state.objects.lock().expect("guest object state");
+            objects
+                .mapping_views
+                .range(..=args.rcx)
+                .next_back()
+                .and_then(|(&base, (length, backing))| {
+                    let offset = args.rcx - base;
+                    (offset < *length && args.rdx <= length - offset)
+                        .then(|| (base, *length, Arc::clone(backing)))
+                })
+        };
+        let Some((base, length, backing)) = found else {
             return flush_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
-        }
+        };
+        copy_view_to_backing(memory, base, length, &backing);
         Ok(1)
     });
     registry.set_status(
@@ -137,16 +220,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         crate::imports::ServiceStatus::Partial,
     );
 
+    let state_unmap = Arc::clone(state);
     registry.register(KERNEL32, "UnmapViewOfFile", move |args, cpu, memory| {
         let address = args.rcx;
-        let length = views_unmap
+        let view = state_unmap
+            .objects
             .lock()
-            .expect("mapped views")
-            .by_address
+            .expect("guest object state")
+            .mapping_views
             .remove(&address);
-        match length {
-            Some(_) if memory.release_heap_allocation(PROCESS_HEAP, address) => Ok(1),
-            Some(_) => Ok(1),
+        match view {
+            Some((length, backing)) => {
+                copy_view_to_backing(memory, address, length, &backing);
+                memory.release_heap_allocation(PROCESS_HEAP, address);
+                Ok(1)
+            }
             None => state_unmap.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
         }
     });

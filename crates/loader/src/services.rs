@@ -201,6 +201,7 @@ enum GuestObject {
     },
     FileMapping {
         size: u64,
+        backing: Arc<Mutex<Vec<u8>>>,
     },
     Pipe {
         state: Arc<Mutex<files::PipeState>>,
@@ -212,6 +213,14 @@ enum GuestObject {
     ConsoleBuffer(Arc<Mutex<console::ScreenBuffer>>),
     /// A handle to the machine's one process, opened through OpenProcess.
     Process,
+    /// A spawned child, already exited in the synchronous spawn world: its
+    /// status is final, and its signal is set for good, as a terminated
+    /// process handle is on Windows. The handle value doubles as the
+    /// process id - both are unique machine-wide integers here.
+    ChildProcess {
+        status: u32,
+        signal: Arc<Mutex<events::Waitable>>,
+    },
 }
 
 #[derive(Default)]
@@ -227,6 +236,10 @@ struct ObjectState {
     /// Files the CRT `_wchmod` made read-only. Writes, truncation and
     /// deletion of one fail; `_wstat` and `_access` report the mode.
     readonly: BTreeSet<String>,
+    /// Live views of file mappings: guest base address to (length, backing
+    /// store). Machine-wide because only one process executes at a time,
+    /// so the running process owns every live view.
+    mapping_views: BTreeMap<u64, (u64, Arc<Mutex<Vec<u8>>>)>,
     next_temp: u32,
 }
 
@@ -458,12 +471,21 @@ impl ServicesState {
     /// Register a finished `_P_NOWAIT` child, returning its synthetic
     /// process handle.
     pub(crate) fn finish_spawn_child(&self, status: u32) -> u64 {
-        let mut children = self.spawn_children.lock().expect("spawn children");
-        let mut handle = 0x5100u64;
-        while children.contains_key(&handle) {
-            handle += 4;
-        }
-        children.insert(handle, status);
+        // The child becomes a real object-table handle: waitable, closeable
+        // and re-openable through OpenProcess like any Windows process.
+        let signal = Arc::new(Mutex::new(events::Waitable::Event {
+            manual_reset: true,
+            signaled: true,
+        }));
+        let mut objects = self.objects.lock().expect("guest object state");
+        // At the object-table cap the fallback number keeps the CRT wait
+        // working, one machine-limit over the documented count.
+        let handle = objects.next_handle().unwrap_or(0x5100);
+        objects.insert_handle(handle, GuestObject::ChildProcess { status, signal });
+        self.spawn_children
+            .lock()
+            .expect("spawn children")
+            .insert(handle, status);
         handle
     }
 
@@ -900,6 +922,13 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                         write: *write,
                     },
                 ),
+                Some(GuestObject::ChildProcess { status, signal }) => (
+                    0,
+                    GuestObject::ChildProcess {
+                        status: *status,
+                        signal: Arc::clone(signal),
+                    },
+                ),
                 Some(
                     GuestObject::Search(_)
                     | GuestObject::FileMapping { .. }
@@ -930,8 +959,10 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             }
             GuestObject::File(file) => file.access = access,
             // A pipe end's rights are positional: its read or write end decides
-            // what the handle can do, not the duplication rights.
-            GuestObject::Pipe { .. } => {}
+            // what the handle can do, not the duplication rights. An exited
+            // child's rights are as fixed: terminated processes stay waitable
+            // and readable however the handle is duplicated.
+            GuestObject::Pipe { .. } | GuestObject::ChildProcess { .. } => {}
             GuestObject::Search(_)
             | GuestObject::FileMapping { .. }
             | GuestObject::Snapshot
@@ -1272,11 +1303,20 @@ pub(crate) mod handlers {
     }
 
     pub fn get_process_id(context: &mut ServiceContext<'_>, process: u64) -> Outcome<u32> {
-        Ok(if context.state.is_current_process(context.teb, process) {
-            context.state.process_id
-        } else {
-            0
-        })
+        if context.state.is_current_process(context.teb, process) {
+            return Ok(context.state.process_id);
+        }
+        // A spawned child's process id is the value its process handle was
+        // created with: both namespaces are machine-wide integers here.
+        let is_child = context
+            .state
+            .objects
+            .lock()
+            .expect("guest object state")
+            .handles
+            .get(&process)
+            .is_some_and(|object| matches!(object, GuestObject::ChildProcess { .. }));
+        Ok(if is_child { process as u32 } else { 0 })
     }
 
     pub fn get_current_thread(_: &mut ServiceContext<'_>) -> Outcome<u64> {

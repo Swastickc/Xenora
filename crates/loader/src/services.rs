@@ -12,6 +12,7 @@
 mod advapi;
 mod codepages;
 mod com;
+pub mod com_fixture;
 mod compare;
 mod console;
 mod crt;
@@ -265,6 +266,7 @@ pub struct ServicesState {
     console: Mutex<ConsoleState>,
     /// The COM apartment of each guest thread and the task allocator.
     com: Mutex<com::Com>,
+    com_fixture: Mutex<com_fixture::Fixture>,
     startup: Mutex<startup_info::StartupState>,
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
@@ -359,6 +361,7 @@ impl ServicesState {
             crt_directory: Mutex::new(String::new()),
             console: Mutex::default(),
             com: Mutex::default(),
+            com_fixture: Mutex::default(),
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
@@ -1075,8 +1078,9 @@ pub(crate) mod handlers {
     // The COM base surface lives in `services/com.rs` so its state and its
     // handlers stay together; the generated adapters still reach them here.
     pub(crate) use super::com::{
-        clsid_from_string, co_create_guid, co_create_instance, co_initialize_ex, co_task_mem_alloc,
-        co_task_mem_free, co_task_mem_realloc, co_uninitialize, prop_variant_clear,
+        clsid_from_string, co_create_guid, co_create_instance, co_create_instance_ex,
+        co_get_class_object, co_initialize, co_initialize_ex, co_task_mem_alloc, co_task_mem_free,
+        co_task_mem_realloc, co_uninitialize, iid_from_string, prop_variant_clear,
         string_from_guid2,
     };
 

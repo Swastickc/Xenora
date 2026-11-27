@@ -34,6 +34,7 @@ typedef struct {
     union {
         u64 value;
         void *pointer;
+        u64 storage[2];
     } payload;
 } PROPVARIANT;
 
@@ -173,11 +174,13 @@ void entry(void) {
     CoTaskMemFree(0);
 
     // 24..26: no class is registered, and a failed call nulls the out pointer.
+    REQUIRE(35, CoInitializeEx(0, COINIT_MULTITHREADED) == S_OK);
     object = (void *)1;
     REQUIRE(24, CoCreateInstance(&parsed, 0, 1, &parsed, &object) == REGDB_E_CLASSNOTREG);
     REQUIRE(25, object == 0);
     REQUIRE(26, CoCreateInstance(&parsed, 0, 1, &parsed, 0) == E_POINTER);
     REQUIRE(27, CoCreateInstance(0, 0, 1, &parsed, &object) == E_INVALIDARG);
+    CoUninitialize();
 
     // 28..31: a task-allocated string is released and the variant cleared.
     block = (u8 *)CoTaskMemAlloc(8);

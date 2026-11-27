@@ -94,7 +94,10 @@ pub fn get_api_sets_for_canonical(canonical: &str) -> &'static [&'static str] {
         // Microsoft's "Windows API sets" page lists the COM base set as
         // forwarding to combase.dll, the module that has carried the COM base
         // entry points since Windows 8.
-        "combase.dll" => &["api-ms-win-core-com-l1-1-0.dll"],
+        "combase.dll" => &[
+            "api-ms-win-core-com-l1-1-0.dll",
+            "api-ms-win-core-com-l1-1-1.dll",
+        ],
         _ => &[],
     }
 }
@@ -110,10 +113,8 @@ pub fn get_api_sets_for_canonical(canonical: &str) -> &'static [&'static str] {
 /// legacy module keep running. Where a real divergence is found, the entry
 /// point must grow its own implementation instead of relying on this mapping.
 ///
-/// `ole32.dll` is the one entry that is not an approximation: it was the home
-/// of the COM base entry points before Windows 8 and forwards them to
-/// `combase.dll` there, so a guest importing either name reaches the same
-/// implementation, as it does on Windows.
+/// `ole32.dll` is accepted as a compatibility module for individually listed
+/// COM entries; this does not mean that its entire export set matches combase.
 pub fn get_compat_modules_for_canonical(canonical: &str) -> &'static [&'static str] {
     match canonical {
         "ucrtbase.dll" => &["msvcrt.dll"],

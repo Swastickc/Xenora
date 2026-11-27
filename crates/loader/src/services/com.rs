@@ -9,11 +9,10 @@
 //! `CoTaskMemFree`, `CoTaskMemRealloc`), the `COINIT` enumeration, and
 //! `propidl.h` for the `PROPVARIANT` layout and `PropVariantClear`.
 //!
-//! The runtime has no COM object model and no class registry, so
-//! `CoCreateInstance` answers the documented "class not registered" failure
-//! rather than inventing an object. `PropVariantClear` serves the value types
-//! and the two task-allocated string types and refuses the reference-counted
-//! ones, because `Release` and `SysFreeString` are not modelled.
+//! The normal runtime has no class registry. An explicitly enabled synthetic
+//! fixture supplies one class for local host-vtable tests. `PropVariantClear`
+//! serves value types and task-allocated strings and refuses interface and
+//! BSTR ownership, whose release paths are not modelled.
 
 use super::ServicesState;
 use crate::cpu::ExitReason;
@@ -38,6 +37,8 @@ pub(crate) const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
 pub(crate) const CO_E_CLASSSTRING: i32 = 0x8004_01F3u32 as i32;
 /// `REGDB_E_CLASSNOTREG`: no class is registered under the CLSID.
 pub(crate) const REGDB_E_CLASSNOTREG: i32 = 0x8004_0154u32 as i32;
+/// COM has not been initialized on the calling thread.
+pub(crate) const CO_E_NOTINITIALIZED: i32 = 0x8004_01f0u32 as i32;
 
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
@@ -80,9 +81,6 @@ const VT_LPSTR: u16 = 30;
 const VT_LPWSTR: u16 = 31;
 const VT_FILETIME: u16 = 64;
 const VT_TYPEMASK: u16 = 0x0fff;
-const VT_VECTOR: u16 = 0x1000;
-const VT_ARRAY: u16 = 0x2000;
-const VT_BYREF: u16 = 0x4000;
 
 /// The exit for a request the runtime does not model.
 const NOT_MODELLED: ExitReason = ExitReason::IllegalInstruction(0xFE);
@@ -114,6 +112,10 @@ pub(crate) struct Com {
 }
 
 impl Com {
+    pub(super) fn retire_thread(&mut self, teb: u64) {
+        self.apartments.remove(&teb);
+    }
+
     fn task_heap(&self, memory: &GuestMemory) -> Option<u64> {
         self.task_heap.filter(|heap| memory.has_heap(*heap))
     }
@@ -133,7 +135,7 @@ pub(crate) fn co_initialize_ex(
     let mut com = context.state.com();
     match com.apartments.get_mut(&context.teb) {
         Some(apartment) if apartment.single_threaded == single_threaded => {
-            apartment.references = apartment.references.saturating_add(1);
+            apartment.references = apartment.references.checked_add(1).ok_or(NOT_MODELLED)?;
             Ok(S_FALSE)
         }
         Some(_) => Ok(RPC_E_CHANGED_MODE),
@@ -150,6 +152,10 @@ pub(crate) fn co_initialize_ex(
     }
 }
 
+pub(crate) fn co_initialize(context: &mut ServiceContext<'_>, reserved: u64) -> Outcome<i32> {
+    co_initialize_ex(context, reserved, COINIT_APARTMENTTHREADED)
+}
+
 /// `CoUninitialize`: release one initialization of the calling thread.
 pub(crate) fn co_uninitialize(context: &mut ServiceContext<'_>) -> Outcome<()> {
     let mut com = context.state.com();
@@ -164,14 +170,13 @@ pub(crate) fn co_uninitialize(context: &mut ServiceContext<'_>) -> Outcome<()> {
 
 /// `CoCreateGuid`: a version 4 (random) GUID.
 ///
-/// Windows generates the identifier from a random source as well; the version
-/// and variant bits below are the RFC 4122 form the Windows GUID uses.
+/// Xenora chooses the version-4 layout and obtains randomness from the host.
 pub(crate) fn co_create_guid(context: &mut ServiceContext<'_>, guid: OutPtr<16>) -> Outcome<i32> {
     let mut bytes = [0u8; 16];
     if !host_entropy(&mut bytes) {
         return Ok(E_UNEXPECTED);
     }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[7] = (bytes[7] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     guid.store(context.memory, bytes).map_err(fault)?;
     Ok(S_OK)
@@ -224,7 +229,8 @@ pub(crate) fn clsid_from_string(
     clsid: OutPtr<16>,
 ) -> Outcome<i32> {
     if text == 0 {
-        return Ok(CO_E_CLASSSTRING);
+        clsid.store(context.memory, [0; 16]).map_err(fault)?;
+        return Ok(S_OK);
     }
     let mut units = Vec::new();
     let mut at = text;
@@ -252,6 +258,21 @@ pub(crate) fn clsid_from_string(
     }
 }
 
+/// Parse IID text using the same bounded GUID decoder; malformed text returns
+/// E_INVALIDARG as a Xenora policy pending independent Windows comparison.
+pub(crate) fn iid_from_string(
+    context: &mut ServiceContext<'_>,
+    text: u64,
+    iid: OutPtr<16>,
+) -> Outcome<i32> {
+    let result = clsid_from_string(context, text, iid)?;
+    Ok(if result == CO_E_CLASSSTRING {
+        E_INVALIDARG
+    } else {
+        result
+    })
+}
+
 /// `CoTaskMemAlloc`: a block from the task allocator.
 pub(crate) fn co_task_mem_alloc(context: &mut ServiceContext<'_>, size: u64) -> Outcome<u64> {
     let Some(heap) = task_heap(context.state, context.memory) else {
@@ -266,8 +287,8 @@ pub(crate) fn co_task_mem_alloc(context: &mut ServiceContext<'_>, size: u64) -> 
 /// `CoTaskMemFree`: release a block the task allocator handed out.
 ///
 /// Freeing the null pointer is the documented no-op. A block the task
-/// allocator does not own ends the guest, which is what a mismatched free does
-/// to a real process.
+/// allocator does not own ends the guest as a Xenora policy; behavior for a
+/// mismatched free is not claimed to match Windows.
 pub(crate) fn co_task_mem_free(context: &mut ServiceContext<'_>, address: u64) -> Outcome<()> {
     if address == 0 {
         return Ok(());
@@ -317,8 +338,8 @@ pub(crate) fn co_task_mem_realloc(
 pub(crate) fn co_create_instance(
     context: &mut ServiceContext<'_>,
     clsid: u64,
-    _outer: u64,
-    _class_context: u32,
+    outer: u64,
+    class_context: u32,
     iid: u64,
     object: u64,
 ) -> Outcome<i32> {
@@ -330,33 +351,178 @@ pub(crate) fn co_create_instance(
     if clsid == 0 || iid == 0 {
         return Ok(E_INVALIDARG);
     }
-    let mut scratch = [0u8; 16];
-    context.memory.read_bytes(clsid, &mut scratch).map_err(fault)?;
-    context.memory.read_bytes(iid, &mut scratch).map_err(fault)?;
-    // An outer object would be refused with CLASS_E_NOAGGREGATION, but only
-    // after the class is found, and no class exists here.
+    if !context.state.com().apartments.contains_key(&context.teb) {
+        return Ok(CO_E_NOTINITIALIZED);
+    }
+    let mut class = [0u8; 16];
+    let mut interface = [0u8; 16];
+    context
+        .memory
+        .read_bytes(clsid, &mut class)
+        .map_err(fault)?;
+    context
+        .memory
+        .read_bytes(iid, &mut interface)
+        .map_err(fault)?;
+    if let Some(result) = super::com_fixture::activate(
+        context.state,
+        context.memory,
+        super::com_fixture::Activation {
+            clsid: &class,
+            iid: &interface,
+            outer,
+            output: object,
+            factory: false,
+            class_context,
+        },
+    )? {
+        return Ok(result);
+    }
+    // An outer object is refused only after a class is found.
+    Ok(REGDB_E_CLASSNOTREG)
+}
+
+/// Class lookup has the same local class-registry boundary as activation.
+pub(crate) fn co_get_class_object(
+    context: &mut ServiceContext<'_>,
+    clsid: u64,
+    class_context: u32,
+    server_info: u64,
+    iid: u64,
+    object: u64,
+) -> Outcome<i32> {
+    if server_info != 0 {
+        return Err(NOT_MODELLED);
+    }
+    if object == 0 {
+        return Ok(E_POINTER);
+    }
+    context.memory.write_u64(object, 0).map_err(fault)?;
+    if clsid == 0 || iid == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    if !context.state.com().apartments.contains_key(&context.teb) {
+        return Ok(CO_E_NOTINITIALIZED);
+    }
+    let mut class = [0u8; 16];
+    let mut interface = [0u8; 16];
+    context
+        .memory
+        .read_bytes(clsid, &mut class)
+        .map_err(fault)?;
+    context
+        .memory
+        .read_bytes(iid, &mut interface)
+        .map_err(fault)?;
+    if let Some(result) = super::com_fixture::activate(
+        context.state,
+        context.memory,
+        super::com_fixture::Activation {
+            clsid: &class,
+            iid: &interface,
+            outer: 0,
+            output: object,
+            factory: true,
+            class_context,
+        },
+    )? {
+        return Ok(result);
+    }
+    Ok(REGDB_E_CLASSNOTREG)
+}
+
+/// Local activation is limited to the opt-in fixture class. Remote activation
+/// and requests larger than the bounded guest interface array are unsupported.
+pub(crate) fn co_create_instance_ex(
+    context: &mut ServiceContext<'_>,
+    clsid: u64,
+    outer: u64,
+    class_context: u32,
+    server_info: u64,
+    count: u32,
+    results: u64,
+) -> Outcome<i32> {
+    if clsid == 0 || count == 0 || results == 0 {
+        return Ok(E_INVALIDARG);
+    }
+    if server_info != 0 || count > 64 {
+        return Err(NOT_MODELLED);
+    }
+    if !context.state.com().apartments.contains_key(&context.teb) {
+        return Ok(CO_E_NOTINITIALIZED);
+    }
+    let mut class = [0u8; 16];
+    context
+        .memory
+        .read_bytes(clsid, &mut class)
+        .map_err(fault)?;
+    let length = count as usize * 24;
+    context.memory.check_write(results, length).map_err(fault)?;
+    let mut records = vec![0; length];
+    context
+        .memory
+        .read_bytes(results, &mut records)
+        .map_err(fault)?;
+    let mut iids = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let entry = results
+            .checked_add(u64::from(index) * 24)
+            .ok_or_else(|| fault(MemoryError::Overflow))?;
+        let iid = context.memory.read_u64(entry).map_err(fault)?;
+        let interface = context.memory.read_u64(entry + 8).map_err(fault)?;
+        let result = context.memory.read_u32(entry + 16).map_err(fault)?;
+        if iid == 0 || interface != 0 || result != 0 {
+            return Ok(E_INVALIDARG);
+        }
+        let mut guid = [0u8; 16];
+        context.memory.read_bytes(iid, &mut guid).map_err(fault)?;
+        iids.push(guid);
+    }
+    if let Some(result) = super::com_fixture::activate_multiple(
+        context.state,
+        context.memory,
+        super::com_fixture::MultiActivation {
+            clsid: &class,
+            outer,
+            class_context,
+            output: results,
+            records,
+            iids,
+        },
+    )? {
+        return Ok(result);
+    }
+    // No QueryInterface occurs when class lookup fails. The exact Windows
+    // output-array behavior for this failure has not been established.
     Ok(REGDB_E_CLASSNOTREG)
 }
 
 /// `PropVariantClear`: release what the variant owns and clear it to
 /// `VT_EMPTY`.
-pub(crate) fn prop_variant_clear(
-    context: &mut ServiceContext<'_>,
-    variant: u64,
-) -> Outcome<i32> {
+pub(crate) fn prop_variant_clear(context: &mut ServiceContext<'_>, variant: u64) -> Outcome<i32> {
     if variant == 0 {
-        return Ok(S_OK);
+        // The public contract requires a pointer and does not specify the
+        // result for NULL. Do not invent a successful clear.
+        return Err(NOT_MODELLED);
     }
     let vt = context.memory.read_u16(variant).map_err(fault)?;
     // Arrays, vectors and by-reference forms own storage this runtime does not
     // model; refuse rather than leak or free something else's memory.
-    if vt & (VT_VECTOR | VT_ARRAY | VT_BYREF) != 0 {
+    if vt & !VT_TYPEMASK != 0 {
         return Err(NOT_MODELLED);
     }
+    // Do not release owned storage if the result cannot be written back.
+    context
+        .memory
+        .check_write(variant, PROPVARIANT_BYTES)
+        .map_err(fault)?;
     match vt & VT_TYPEMASK {
         VT_EMPTY | VT_NULL => {}
         VT_LPSTR | VT_LPWSTR => {
-            let pointer = context.memory.read_u64(variant + 8).map_err(fault)?;
+            let pointer_address = variant
+                .checked_add(8)
+                .ok_or_else(|| fault(MemoryError::Overflow))?;
+            let pointer = context.memory.read_u64(pointer_address).map_err(fault)?;
             if pointer != 0 {
                 let Some(heap) = context.state.com().task_heap(context.memory) else {
                     return Err(fault(MemoryError::UnmappedAddress(pointer)));
@@ -447,7 +613,7 @@ fn parse_guid(units: &[u16]) -> Option<[u8; 16]> {
         return None;
     }
     let mut fields = [0u8; 16];
-    for (index, pair) in digits.chunks_exact(2).enumerate() {
+    for (index, pair) in digits.as_chunks::<2>().0.iter().enumerate() {
         fields[index] = (pair[0] << 4) | pair[1];
     }
     let mut guid = [0u8; 16];

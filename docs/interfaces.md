@@ -183,6 +183,54 @@ do not remain visible. Language-specific variable-sized handler data is not full
 does not execute module code, change unwind semantics, implement dynamic
 function-table APIs or provide unloading.
 
+Batch TLS preparation uses the same exact-one reservation validation. For
+each image it reads PE data directory 9, rebases preferred-image virtual
+addresses to the reservation base, and validates the complete declared
+directory, the four-byte index location, the template bytes and the callback
+array including its terminator against committed image backing. Callback
+targets must be inside executable committed image code, but they are only
+reported; this layer never executes them. An absent directory is an honest
+no-op.
+
+The caller selects one thread's TLS pointer array by its eight-byte-aligned
+base. If that array is absent it is created as bounded thread-owned memory;
+if it already exists it must be writable. Zero slots are Xenora's free-slot
+markers for this batch layer. Preparation never overwrites a nonzero slot and
+assigns the first free slots in input order to modules that have TLS
+directories. It writes each module's index, copies its template in bounded
+chunks into independently owned thread-dynamic storage and leaves the declared
+zero-fill bytes zero. Reports therefore distinguish no directory, prepared
+storage ownership and callbacks discovered without execution. The caller must
+supply the batch in dependency order; this layer treats input order as the
+initialization-order contract. Dependency sorting and module initialization
+execution remain separate responsibilities.
+
+All TLS metadata is validated before mutation. A later allocation, backing or
+copy failure restores the exact pre-preparation memory through the same
+deliberately expensive whole-memory snapshot used by the other batch seams.
+This is not a general memory transaction API. TLS callbacks, `DllMain`, thread
+creation policy, dynamic TLS APIs, unloading and reference counting remain
+unsupported. A directory with no template bytes and no zero-fill receives a
+batch-local index but has no storage pointer with which later independent
+batches could retain that slot; that edge is part of the unresolved storage
+ownership design rather than silent Windows-compatible behavior.
+
+Module initialization-order planning is also non-executing metadata. The
+planner requires positional agreement between logical package inputs, parsed
+explicit images and reservations. It can run before TLS preparation; when TLS
+reports are supplied it validates and carries them through the same image
+indexes. It rebuilds the module dependency graph from the supplied bytes and
+rejects a stale or mismatched caller-supplied graph before using it. The resulting components keep
+the graph's provider-before-consumer condensation order and annotate each
+module with its file name, actual reserved entry-point address and TLS callback
+addresses. DLL entries are distinguished as potential `DllMain` work from
+non-DLL process entries; neither kind is executed. Circular strongly connected
+components remain grouped without an invented member order, and incomplete
+import or export table inspection is reported as ordering uncertainty because
+hidden dependencies could change the correct order. Loader-lock behavior,
+thread policy, initialization execution, unloading and reference counting
+remain unsupported.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys
@@ -615,12 +663,19 @@ fabricated and the output buffer is not mutated for an empty result.
 reduced `xinput9_1_0.dll`. It validates the two-byte output range and accepts
 only the documented gamepad/headset device-type values. A disconnected slot or
 the unsupported headset reports `BATTERY_TYPE_DISCONNECTED` with empty level.
-A connected virtual gamepad reports `BATTERY_TYPE_UNKNOWN` with empty level:
-Xenora does not know the host controller's chemistry, wired/wireless class or
-charge and does not invent those properties. Public documentation says the
-level is meaningful only for wireless devices with a known battery type, so
-the empty byte is a serialization placeholder rather than measured charge.
-Physical battery integration remains future host work.
+A connected gamepad always reports `BATTERY_TYPE_UNKNOWN`: Apple
+GameController exposes charge state and an approximate fraction but no battery
+chemistry or wired/wireless XInput class, so Xenora must not invent
+`ALKALINE`, `NIMH` or `WIRED`. Public XInput documentation says the level is
+meaningful only for wireless devices with a known battery type. Xenora makes
+an explicit compatibility policy rather than claiming Windows behavior: when
+the host supplies a real percentage, it is published beside the unknown type
+using Xenora's coarse quantization (`0...10` empty, `11...40` low, `41...70`
+medium and `71...100` full). A missing battery object or an object with no
+trustworthy level leaves the level empty, where empty means no valid evidence
+rather than a measured drained pack. Charging/discharging/full evidence is
+transported through the additive host FFI and retained internally; it is not
+misrepresented as XInput chemistry.
 
 `XInputGetAudioDeviceIds` is available only on `xinput1_4.dll` and
 `xinputuap.dll`; it is absent from `xinput1_3.dll` and reduced
@@ -657,8 +712,8 @@ voice, plug-in module or physical force-feedback properties are known.
 Disconnected slots return `ERROR_DEVICE_NOT_CONNECTED`, and invalid slots,
 flags or output ranges return `ERROR_BAD_ARGUMENTS` before mutation.
 
-Hardware-verified vibration output, keystroke event capture, physical battery
-metadata, actual headset/audio endpoints and audio render/capture,
+Hardware-verified vibration output, keystroke event capture,
+hardware-verified physical battery behavior, actual headset/audio endpoints and audio render/capture,
 physical-controller hotplug policy beyond the app's existing
 polling, ordinal 101/102/103 guide-wait/poweroff functions,
 arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery

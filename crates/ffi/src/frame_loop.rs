@@ -11,7 +11,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 
 use xenora_loader::graphics::{FramePresentation, GraphicsBackendId, GraphicsError};
-use xenora_loader::services::XInputControllerState;
+use xenora_loader::services::{
+    XInputBatteryChargeState, XInputBatteryState, XInputControllerState,
+};
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
 use xenora_loader::{
     ExitReason, ImportRegistry, MockClock, ServicesState, register_standard_services,
@@ -116,6 +118,52 @@ pub struct XInputVibration {
 }
 
 pub const XINPUT_FEATURE_VIBRATION: u8 = 0x01;
+
+pub const XINPUT_BATTERY_STATE_UNKNOWN: u8 = 0;
+pub const XINPUT_BATTERY_STATE_DISCHARGING: u8 = 1;
+pub const XINPUT_BATTERY_STATE_CHARGING: u8 = 2;
+pub const XINPUT_BATTERY_STATE_FULL: u8 = 3;
+pub const XINPUT_BATTERY_LEVEL_UNKNOWN: u8 = u8::MAX;
+
+/// Host battery evidence for one XInput controller. `present=0` means the host
+/// exposed no battery object and requires the canonical zero state/level. For
+/// a present object, level is 0 through 100 or XINPUT_BATTERY_LEVEL_UNKNOWN.
+/// Charging state is evidence for host/internal use only; it is never treated
+/// as battery chemistry.
+#[derive(Default, Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct XInputBattery {
+    pub present: u8,
+    pub state: u8,
+    pub level: u8,
+    pub reserved: u8,
+}
+
+impl XInputBattery {
+    pub(crate) fn valid_wire_shape(self) -> bool {
+        self.present <= 1
+            && self.state <= XINPUT_BATTERY_STATE_FULL
+            && self.reserved == 0
+            && (self.level <= 100 || self.level == XINPUT_BATTERY_LEVEL_UNKNOWN)
+            && (self.present != 0 || (self.state == 0 && self.level == 0))
+    }
+
+    fn battery_state(self) -> Option<XInputBatteryState> {
+        if self.present == 0 {
+            return None;
+        }
+        let charge_state = match self.state {
+            XINPUT_BATTERY_STATE_DISCHARGING => XInputBatteryChargeState::Discharging,
+            XINPUT_BATTERY_STATE_CHARGING => XInputBatteryChargeState::Charging,
+            XINPUT_BATTERY_STATE_FULL => XInputBatteryChargeState::Full,
+            _ => XInputBatteryChargeState::Unknown,
+        };
+        Some(XInputBatteryState {
+            charge_state,
+            level_percent: (self.level != XINPUT_BATTERY_LEVEL_UNKNOWN).then_some(self.level),
+        })
+    }
+}
 
 impl XInputSnapshot {
     fn controller_state(self) -> Option<XInputControllerState> {
@@ -264,6 +312,26 @@ impl FrameLoop {
                 user_index,
                 input.controller_state(),
                 vibration_supported,
+            )
+    }
+
+    /// Atomically install a controller snapshot and its latest battery
+    /// evidence. The two inputs are validated before the slot lock is taken.
+    pub fn send_xinput_with_battery(
+        &self,
+        user_index: u32,
+        input: XInputSnapshot,
+        battery: XInputBattery,
+    ) -> bool {
+        let vibration_supported =
+            input.connected != 0 && input.features & XINPUT_FEATURE_VIBRATION != 0;
+        input.valid_wire_shape()
+            && battery.valid_wire_shape()
+            && self.services.set_xinput_controller_with_details(
+                user_index,
+                input.controller_state(),
+                vibration_supported,
+                battery.battery_state(),
             )
     }
 

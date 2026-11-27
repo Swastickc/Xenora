@@ -28,6 +28,41 @@ struct XInputSnapshotValues: Equatable {
     }
 }
 
+
+struct XInputBatteryValues: Equatable {
+    var present = false
+    var state: UInt8 = UInt8(XENORA_XINPUT_BATTERY_STATE_UNKNOWN)
+    var level: UInt8 = 0
+
+    func ffi() -> xenora_xinput_battery {
+        xenora_xinput_battery(
+            present: present ? 1 : 0,
+            state: present ? state : 0,
+            level: present ? level : 0,
+            reserved: 0
+        )
+    }
+
+    static func hostValues(_ battery: GCDeviceBattery?) -> XInputBatteryValues {
+        guard let battery else { return XInputBatteryValues() }
+        return hostEvidence(state: battery.batteryState, level: battery.batteryLevel)
+    }
+
+    static func hostEvidence(state hostState: GCDeviceBattery.State, level rawLevel: Float) -> XInputBatteryValues {
+        let state: UInt8
+        switch hostState {
+        case .discharging: state = UInt8(XENORA_XINPUT_BATTERY_STATE_DISCHARGING)
+        case .charging: state = UInt8(XENORA_XINPUT_BATTERY_STATE_CHARGING)
+        case .full: state = UInt8(XENORA_XINPUT_BATTERY_STATE_FULL)
+        default: state = UInt8(XENORA_XINPUT_BATTERY_STATE_UNKNOWN)
+        }
+        let level: UInt8 = rawLevel.isFinite && rawLevel >= 0 && rawLevel <= 1
+            ? UInt8((rawLevel * 100).rounded())
+            : UInt8(XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN)
+        return XInputBatteryValues(present: true, state: state, level: level)
+    }
+}
+
 struct ControllerSnapshot: Equatable {
     let buttons: UInt32
     let x: Int16
@@ -98,6 +133,7 @@ struct DetectedController: Equatable {
     let name: String
     let supportsHaptics: Bool
     let snapshot: ControllerSnapshot
+    let battery: XInputBatteryValues
     let haptics: GCDeviceHaptics?
 
     init(
@@ -105,12 +141,14 @@ struct DetectedController: Equatable {
         name: String,
         supportsHaptics: Bool,
         snapshot: ControllerSnapshot,
+        battery: XInputBatteryValues = XInputBatteryValues(),
         haptics: GCDeviceHaptics? = nil
     ) {
         self.identity = identity
         self.name = name
         self.supportsHaptics = supportsHaptics
         self.snapshot = snapshot
+        self.battery = battery
         self.haptics = haptics
     }
 
@@ -121,7 +159,8 @@ struct DetectedController: Equatable {
         default: false
         }
         return lhs.identity == rhs.identity && lhs.name == rhs.name
-            && lhs.supportsHaptics == rhs.supportsHaptics && lhs.snapshot == rhs.snapshot && sameHaptics
+            && lhs.supportsHaptics == rhs.supportsHaptics && lhs.snapshot == rhs.snapshot
+            && lhs.battery == rhs.battery && sameHaptics
     }
 }
 
@@ -190,6 +229,7 @@ private func detectController(_ controller: GCController) -> DetectedController?
         name: controller.vendorName ?? controller.productCategory,
         supportsHaptics: controller.haptics != nil,
         snapshot: snapshot,
+        battery: XInputBatteryValues.hostValues(controller.battery),
         haptics: controller.haptics
     )
 }

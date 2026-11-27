@@ -215,6 +215,22 @@ batch-local index but has no storage pointer with which later independent
 batches could retain that slot; that edge is part of the unresolved storage
 ownership design rather than silent Windows-compatible behavior.
 
+Module initialization-order planning is also non-executing metadata. The
+planner requires positional agreement between logical package inputs, parsed
+explicit images and reservations. It can run before TLS preparation; when TLS
+reports are supplied it validates and carries them through the same image
+indexes. It rebuilds the module dependency graph from the supplied bytes and
+rejects a stale or mismatched caller-supplied graph before using it. The resulting components keep
+the graph's provider-before-consumer condensation order and annotate each
+module with its file name, actual reserved entry-point address and TLS callback
+addresses. DLL entries are distinguished as potential `DllMain` work from
+non-DLL process entries; neither kind is executed. Circular strongly connected
+components remain grouped without an invented member order, and incomplete
+import or export table inspection is reported as ordering uncertainty because
+hidden dependencies could change the correct order. Loader-lock behavior,
+thread policy, initialization execution, unloading and reference counting
+remain unsupported.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys

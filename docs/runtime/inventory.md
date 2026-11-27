@@ -12,11 +12,11 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 862 |
+| Canonical services | 864 |
 | Typed registry services | 293 |
-| Manual code registrations | 569 |
+| Manual code registrations | 571 |
 | Canonical libraries | 21 |
-| Implemented | 235 |
+| Implemented | 237 |
 | Partial | 625 |
 | Stub | 2 |
 | Data-import services | 7 |
@@ -36,7 +36,7 @@ independent acceptance or compatibility claims.
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 274 | 2 | 26 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
-| <code>libstdc++-6.dll</code> | <code>c++-support</code> | 9 | 0 | 9 | 0 | 9 | 0 | 0 | 0 |
+| <code>libstdc++-6.dll</code> | <code>c++-support</code> | 11 | 0 | 11 | 0 | 11 | 0 | 0 | 0 |
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
 | <code>msvcrt.dll</code> | <code>c-runtime</code> | 39 | 13 | 26 | 7 | 14 | 25 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |

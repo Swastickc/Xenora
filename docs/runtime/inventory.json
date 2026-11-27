@@ -13226,7 +13226,27 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "_ZdaPv"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "_ZdlPvy"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "_Znay"
     },
     {
       "data_import": false,
@@ -18232,13 +18252,13 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 862,
+    "canonical_services": 864,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 235,
+    "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 569,
+    "manual_services": 571,
     "ordinal_aliases": 0,
     "partial": 625,
     "structural_consistency_findings": 0,

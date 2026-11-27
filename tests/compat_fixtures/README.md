@@ -147,6 +147,22 @@ mingw-built fixtures, the script requires the compiler driver, the compiler
 proper, the assembler and the linker, and every library they load that is a
 file on disk, to be ARM64, and checks each with `file` and `lipo -archs`.
 
+## C++ array allocation program
+
+`cxx_array.cpp` is an original no-CRT C++ program for the public Itanium ABI
+array allocation operators (#936). Runtime-sized `new[]` expressions make the
+compiler emit `_Znay` and `_ZdaPv` itself; the program allocates two live
+arrays, verifies that their bytes are distinct, frees them, then repeats with
+zero-length arrays. It reports the observed addresses and values through a
+`.gate` section and exits with zero only when every check passes.
+
+`build-cxx-array.sh [output directory]` builds x86-64 PE32+ variants at `-O0`,
+`-O1`, `-O2` and `-Os` with native clang++ and LLD, using generated import
+libraries and no C or C++ runtime. It checks that host tools and the libraries
+they load are ARM64. `cargo test -p xenora-loader --test
+guest_cpp_array_allocation` builds, runs and checks those four executables and
+fails, rather than skips, when the native tools are absent.
+
 ## A C++ program that throws
 
 `guest_cpp_exceptions.cpp` is an original C++ program that throws and

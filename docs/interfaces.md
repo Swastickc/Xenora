@@ -1664,11 +1664,15 @@ threads through it. A guest that exits the process still reports its own exit
 status.
 
 A hosted C++ guest additionally needs the C++ runtime services. `libstdc++-6.dll`
-provides `operator new` and `operator delete`, which reuse the same guest heap
-the C runtime's `malloc` and `free` use, `std::string`'s out-of-line
-`_M_dispose` and `_S_copy`, and libstdc++'s error paths. Those error paths are
-noreturn functions: Xenora implements no C++ exception machinery, so they stop
-the guest with the runtime-limit fault instead of returning.
+provides the scalar and array `operator new` and `operator delete` imports,
+which reuse the same guest heap the C runtime's `malloc` and `free` use,
+`std::string`'s out-of-line `_M_dispose` and `_S_copy`, and libstdc++'s error
+paths. On the 64-bit Windows target the public Itanium C++ ABI names the array
+forms `_Znay` and `_ZdaPv`; Xenora implements their allocation and release
+contract, while any array cookie for a non-trivially destructible element type
+is emitted by the compiler. Those error paths are noreturn functions: Xenora
+implements no C++ exception machinery, so they stop the guest with the
+runtime-limit fault instead of returning.
 
 `libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
 thread-local storage. The compiler emits a descriptor holding one variable's

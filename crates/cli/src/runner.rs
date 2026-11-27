@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 use xenora_loader::scheduler::DEFAULT_QUANTUM;
 use xenora_loader::startup::{
-    StartupEvent, StartupLayout, run_synthetic_startup_scheduled,
+    StartupEvent, StartupLayout, run_synthetic_startup_scheduled_with_budget,
     run_synthetic_startup_with_observer,
 };
 use xenora_loader::{
@@ -43,6 +43,8 @@ const EXPECTED_PIXEL: [u8; 4] = [255, 0, 0, 255];
 /// The longest wall deadline a program may be given with `--wall-seconds`.
 /// Its default is `WALL_LIMIT`, and it has no step limit unless one is given.
 const MAX_WALL_SECONDS: u64 = 3600;
+/// Default host memory budget for the executable snapshot.
+const DEFAULT_EXECUTABLE_BUDGET: u64 = 1024 * 1024 * 1024;
 /// How long the supervisor waits past a program's deadline for the worker to
 /// show the program's output and stop on its own.
 const DEADLINE_GRACE: Duration = Duration::from_secs(2);
@@ -51,7 +53,7 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
        a hosted export copies up to 16 MiB from the synthetic C: drive to a new UTF-8 filename in an existing directory
        an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
 
@@ -70,6 +72,8 @@ struct Options {
     path: PathBuf,
     max_steps: Option<usize>,
     wall_seconds: Option<u64>,
+    executable_budget: u64,
+    mapped_image_budget: u64,
     worker: bool,
     /// Set by the supervisor for its worker: run the file as a program, not
     /// as an embedded fixture.
@@ -123,6 +127,8 @@ impl Options {
         let mut report_fd = None;
         let mut export = None;
         let mut wall_seconds = None;
+        let mut executable_budget = None;
+        let mut mapped_image_budget = None;
         while let Some(arg) = args.next() {
             match arg.to_str() {
                 Some("--pe") if path.is_none() => {
@@ -140,6 +146,22 @@ impl Options {
                         args.next()
                             .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
                             .ok_or("--wall-seconds needs a number")?,
+                    );
+                }
+                Some("--max-executable-bytes") if executable_budget.is_none() => {
+                    executable_budget = Some(
+                        args.next()
+                            .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
+                            .filter(|&value| value > 0 && value < u64::MAX)
+                            .ok_or("--max-executable-bytes needs a positive byte count")?,
+                    );
+                }
+                Some("--max-mapped-image-bytes") if mapped_image_budget.is_none() => {
+                    mapped_image_budget = Some(
+                        args.next()
+                            .and_then(|arg| arg.to_str()?.parse::<u64>().ok())
+                            .filter(|&value| value > 0)
+                            .ok_or("--max-mapped-image-bytes needs a positive byte count")?,
                     );
                 }
                 Some("--sha256") if digest.is_none() => {
@@ -214,6 +236,9 @@ impl Options {
             path: path.ok_or("missing --pe path")?,
             max_steps,
             wall_seconds,
+            executable_budget: executable_budget.unwrap_or(DEFAULT_EXECUTABLE_BUDGET),
+            mapped_image_budget: mapped_image_budget
+                .unwrap_or(xenora_loader::pe::DEFAULT_MAPPED_IMAGE_BUDGET),
             worker,
             program,
             trace,
@@ -347,6 +372,12 @@ fn launch_worker(
         // A program's own output is the run's output: no read-outs unless
         // they were asked for.
         command.arg("--program");
+        command
+            .arg("--max-mapped-image-bytes")
+            .arg(options.mapped_image_budget.to_string());
+        command
+            .arg("--max-executable-bytes")
+            .arg(options.executable_budget.to_string());
         if options.trace {
             command.arg("--trace");
         }
@@ -545,21 +576,51 @@ fn start_deadline(
 /// its bytes have it; the bytes that were hashed are the bytes that run, so a
 /// change to the file afterwards cannot matter.
 ///
-/// The file's size is not capped here. The whole file is read into memory, and
-/// the loader still refuses an image that maps to more than its own limit
-/// (`MAX_MAPPED_IMAGE_BYTES` in `crates/loader/src/pe.rs`).
-fn read_program(path: &Path, digest: Option<[u8; 32]>) -> Result<Vec<u8>, Box<dyn Error>> {
+/// The snapshot is bounded even if the file grows after its metadata is read.
+fn read_program(
+    path: &Path,
+    digest: Option<[u8; 32]>,
+    budget: u64,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut file = open_regular(
         path,
         None,
         "execution denied: a program must be a regular file",
     )?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    if file.metadata()?.len() > budget {
+        return Err(
+            format!("execution denied: executable exceeds the {budget} byte budget").into(),
+        );
+    }
+    let bytes = read_program_snapshot(&mut file, budget)?;
     if let Some(expected) = digest
         && Sha256::digest(&bytes).as_slice() != expected
     {
         return Err("execution denied: the file's SHA-256 is not the one given".into());
+    }
+    Ok(bytes)
+}
+
+fn read_program_snapshot(file: &mut impl Read, budget: u64) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        let next = (bytes.len() as u64)
+            .checked_add(n as u64)
+            .ok_or("execution denied: executable size overflow")?;
+        if next > budget {
+            return Err(
+                format!("execution denied: executable exceeds the {budget} byte budget").into(),
+            );
+        }
+        bytes
+            .try_reserve_exact(n)
+            .map_err(|_| "execution denied: cannot allocate executable snapshot")?;
+        bytes.extend_from_slice(&chunk[..n]);
     }
     Ok(bytes)
 }
@@ -605,7 +666,7 @@ fn run_program(
         Some((Arc::clone(&state), Arc::clone(&finishing))),
         reporter.clone(),
     )?;
-    let bytes = read_program(&options.path, options.digest)
+    let bytes = read_program(&options.path, options.digest, options.executable_budget)
         .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?;
     let name = options
         .path
@@ -655,7 +716,7 @@ fn run_program(
     // so a program that creates threads with CreateThread runs them all,
     // one guest thread at a time. A program that creates none behaves as
     // before: its main thread takes every turn.
-    let startup = run_synthetic_startup_scheduled(
+    let startup = run_synthetic_startup_scheduled_with_budget(
         &bytes,
         StartupLayout {
             image_base: IMAGE_BASE,
@@ -666,6 +727,7 @@ fn run_program(
         Arc::clone(&state),
         steps,
         DEFAULT_QUANTUM,
+        options.mapped_image_budget,
         |event| {
             entered |= matches!(event, StartupEvent::Entering { .. });
             reporter.observed(&event);
@@ -941,7 +1003,10 @@ fn draw() -> Result<Frame, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GuestExport, Options, hex, host_exit_code, parse_sha256};
+    use super::{
+        GuestExport, Options, hex, host_exit_code, parse_sha256, read_program,
+        read_program_snapshot,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -1009,6 +1074,62 @@ mod tests {
         let guest = parse(&["--", "--export-guest-file", "source", "output"]).unwrap();
         assert!(guest.export.is_none());
         assert_eq!(guest.arguments, ["--export-guest-file", "source", "output"]);
+    }
+
+    #[test]
+    fn program_budget_options_are_checked() {
+        let args = |extra: &[&str]| {
+            Options::parse(
+                ["--pe", "test.exe", "--experimental"]
+                    .into_iter()
+                    .chain(extra.iter().copied())
+                    .map(OsString::from),
+            )
+        };
+        let options = args(&[
+            "--max-executable-bytes",
+            "700000000",
+            "--max-mapped-image-bytes",
+            "400000000",
+        ])
+        .unwrap();
+        assert_eq!(options.executable_budget, 700_000_000);
+        assert_eq!(options.mapped_image_budget, 400_000_000);
+        assert!(args(&["--max-mapped-image-bytes", "0"]).is_err());
+        assert!(args(&["--max-executable-bytes", "0"]).is_err());
+        assert!(
+            args(&[
+                "--max-mapped-image-bytes",
+                "1",
+                "--max-mapped-image-bytes",
+                "2"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn executable_snapshot_respects_budget_for_sparse_files() {
+        let path = std::env::temp_dir().join(format!("xenora-budget-{}", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(1024 * 1024 + 1).unwrap();
+        drop(file);
+        assert!(read_program(&path, None, 1024 * 1024).is_err());
+        let bytes = read_program(&path, None, 1024 * 1024 + 1).unwrap();
+        assert_eq!(bytes.len(), 1024 * 1024 + 1);
+        assert!(bytes.iter().all(|&byte| byte == 0));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn executable_snapshot_rejects_growth_past_budget() {
+        let mut source = std::io::Cursor::new(vec![7; 65_537]);
+        assert!(read_program_snapshot(&mut source, 65_536).is_err());
+        let mut source = std::io::Cursor::new(vec![7; 65_536]);
+        assert_eq!(
+            read_program_snapshot(&mut source, 65_536).unwrap().len(),
+            65_536
+        );
     }
 
     #[test]

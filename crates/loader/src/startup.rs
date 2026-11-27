@@ -87,6 +87,7 @@ pub fn run_synthetic_startup_with_observer(
         layout,
         imports,
         entry_budget,
+        crate::pe::DEFAULT_MAPPED_IMAGE_BUDGET,
         observe,
         #[cfg(test)]
         |_| {},
@@ -113,11 +114,36 @@ pub fn run_synthetic_startup_scheduled(
     quantum: usize,
     observe: impl FnMut(StartupEvent),
 ) -> Result<StartupResult, Box<dyn std::error::Error>> {
+    run_synthetic_startup_scheduled_with_budget(
+        bytes,
+        layout,
+        imports,
+        state,
+        entry_budget,
+        quantum,
+        crate::pe::DEFAULT_MAPPED_IMAGE_BUDGET,
+        observe,
+    )
+}
+
+/// Run scheduled startup with a caller-selected budget for mapped PE bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn run_synthetic_startup_scheduled_with_budget(
+    bytes: &[u8],
+    layout: StartupLayout,
+    imports: ImportRegistry,
+    state: std::sync::Arc<crate::services::ServicesState>,
+    entry_budget: usize,
+    quantum: usize,
+    mapped_image_budget: u64,
+    observe: impl FnMut(StartupEvent),
+) -> Result<StartupResult, Box<dyn std::error::Error>> {
     run_startup_with(
         bytes,
         layout,
         imports,
         entry_budget,
+        mapped_image_budget,
         observe,
         #[cfg(test)]
         |_| {},
@@ -169,11 +195,13 @@ enum StartupStage {
 }
 
 /// The shared startup, with the entry point left to the caller to run.
+#[cfg_attr(test, allow(clippy::too_many_arguments))]
 fn run_startup_with(
     bytes: &[u8],
     layout: StartupLayout,
     mut imports: ImportRegistry,
     entry_budget: usize,
+    mapped_image_budget: u64,
     mut observe: impl FnMut(StartupEvent),
     #[cfg(test)] mut stage_finished: impl FnMut(StartupStage),
     run_entry: impl FnOnce(
@@ -201,7 +229,7 @@ fn run_startup_with(
         sections: pe.sections.len(),
         entry_rva: pe.entry_point_rva,
     });
-    let mut image = pe.load_at_base(bytes, layout.image_base)?;
+    let mut image = pe.load_at_base(bytes, layout.image_base, mapped_image_budget)?;
     let pe = &image.pe;
     let image_base_field = image.image_base_field;
     let memory = &mut image.memory;
@@ -565,6 +593,7 @@ mod tests {
                     },
                     imports,
                     1_000,
+                    crate::pe::DEFAULT_MAPPED_IMAGE_BUDGET,
                     |_| {},
                     |stage| {
                         let now = Instant::now();

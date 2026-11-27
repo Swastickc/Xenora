@@ -27,6 +27,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var calls: [Operation] = []
     private var sentInputs: [(handle: xenora_session, input: xenora_controller_input)] = []
     private var sentXInputs: [(handle: xenora_session, userIndex: UInt32, input: xenora_xinput_state)] = []
+    private var sentXInputBatteries: [(userIndex: UInt32, battery: xenora_xinput_battery)] = []
     private var vibrations = [xenora_xinput_vibration](repeating: xenora_xinput_vibration(), count: 4)
     private var vibrationPolls: [UInt32] = []
     private var invalidCalls = 0
@@ -59,6 +60,10 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
 
     var xinputs: [(userIndex: UInt32, input: xenora_xinput_state)] {
         lock.withLock { sentXInputs.map { ($0.userIndex, $0.input) } }
+    }
+
+    var xinputBatteries: [(userIndex: UInt32, battery: xenora_xinput_battery)] {
+        lock.withLock { sentXInputBatteries }
     }
 
     var polledVibrationSlots: [UInt32] { lock.withLock { vibrationPolls } }
@@ -131,6 +136,19 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32 {
         lock.withLock {
             sentXInputs.append((handle, userIndex, input))
+            return call(.sendXInput, handle)
+        }
+    }
+
+    func sendXInputWithBattery(
+        _ handle: xenora_session,
+        _ userIndex: UInt32,
+        _ input: inout xenora_xinput_state,
+        _ battery: inout xenora_xinput_battery
+    ) -> Int32 {
+        lock.withLock {
+            sentXInputs.append((handle, userIndex, input))
+            sentXInputBatteries.append((userIndex, battery))
             return call(.sendXInput, handle)
         }
     }
@@ -665,7 +683,10 @@ private func checkMultiplayerSlots() -> [String] {
     let secondToken = Token()
     let thirdToken = Token()
     func controller(
-        _ token: NSObject, _ buttons: UInt16, supportsHaptics: Bool = false
+        _ token: NSObject,
+        _ buttons: UInt16,
+        supportsHaptics: Bool = false,
+        battery: XInputBatteryValues = XInputBatteryValues()
     ) -> DetectedController {
         DetectedController(
             identity: ObjectIdentifier(token),
@@ -674,11 +695,17 @@ private func checkMultiplayerSlots() -> [String] {
             snapshot: ControllerSnapshot(
                 buttons: 0, x: 0, y: 0, leftTrigger: 0, rightTrigger: 0,
                 xinput: XInputSnapshotValues(buttons: buttons)
-            )
+            ),
+            battery: battery
         )
     }
 
-    let first = controller(firstToken, XInputButtonBits.a)
+    let firstBattery = XInputBatteryValues(
+        present: true,
+        state: UInt8(XENORA_XINPUT_BATTERY_STATE_DISCHARGING),
+        level: 55
+    )
+    let first = controller(firstToken, XInputButtonBits.a, battery: firstBattery)
     let second = controller(secondToken, XInputButtonBits.b, supportsHaptics: true)
     let third = controller(thirdToken, XInputButtonBits.x)
     var detected: [DetectedController] = []
@@ -703,6 +730,16 @@ private func checkMultiplayerSlots() -> [String] {
     }
     expect(model.controller == first && model.controllers == [first, second],
            "multiplayer publication did not expose slot order with the first controller as primary")
+    let batteries = api.xinputBatteries
+    expect(batteries.count == 2 && batteries[0].userIndex == 0
+           && batteries[0].battery.present == 1
+           && batteries[0].battery.state == UInt8(XENORA_XINPUT_BATTERY_STATE_DISCHARGING)
+           && batteries[0].battery.level == 55
+           && batteries[0].battery.reserved == 0,
+           "the first controller battery evidence was not transported atomically with its XInput slot")
+    expect(batteries.count == 2 && batteries[1].userIndex == 1 && batteries[1].battery.present == 0
+           && batteries[1].battery.state == 0 && batteries[1].battery.level == 0,
+           "a controller without battery evidence did not use the canonical absent battery shape")
 
     detected = [second]
     model.pause()

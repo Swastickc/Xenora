@@ -141,6 +141,96 @@ pages count toward the 256 MiB mapping budget of one image, which is checked
 before anything is mapped. `ParsedPe::parse` does not make these checks, so
 static inspection of a file is unchanged.
 
+The separate explicit-module loader infrastructure can plan and map a batch of
+caller-supplied in-memory PE32+ images without host file search. Batch mapping
+returns half-open reservation records and also retains those complete image
+spans in `GuestMemory` as lightweight ownership records. Only headers and
+sections are committed; holes remain unmapped. A batch is rejected before
+mutation when memory already exists anywhere in a planned span, and later
+unrelated mappings or dynamic allocations cannot reuse those holes. The records
+do not implement unloading,
+per-section ownership or host operating-system guard pages. Batch relocation
+requires exactly one reservation per input image and validates its index,
+64 KiB-aligned base, `SizeOfImage` extent, entry and preferred-base metadata
+and overlap shape before mutation. It then applies the existing DIR64
+relocation engine at each reserved base and writes each mapped optional-header
+`ImageBase` field. A DIR64 target must be continuously backed by committed
+image headers or sections; a target in a `SizeOfImage` hole is refused even
+if inconsistent memory state contains unrelated bytes there. Any validation or
+relocation failure restores the exact pre-relocation address space, including
+fixups already applied to earlier images. The implementation uses a whole
+`GuestMemory` snapshot for that transaction; this is correct but deliberately
+expensive and is not the final memory-ownership design. Relocation itself
+performs no import or IAT write. Ordinary-IAT binding is a separate implemented
+step, while delayed imports, service registration, exception-directory
+registration, TLS callbacks, unloading, reference counting and module execution
+remain unsupported. Before ordinary-IAT writes, the binder also requires
+fixed-base images to occupy their preferred reservations and each image/base
+pair to satisfy the same nonmutating mapping validation that produces legitimate
+reservations.
+step, while delayed imports, service registration, TLS callbacks, unloading,
+reference counting and module execution remain unsupported.
+
+Batch exception-directory registration uses the same exact-one reservation
+validation. For each image it reads PE data directory 3, requires whole aligned
+`RUNTIME_FUNCTION` entries in ascending order inside `SizeOfImage`, and requires
+the directory, function ranges and fixed unwind-data bytes to be backed by
+committed image headers or sections. Valid tables are registered in input order
+for the existing x64 exception lookup path, while an absent directory is an
+honest no-op. Registration writes no guest bytes; if a later image fails, the
+function-table list is truncated to its original length so earlier registrations
+do not remain visible. Language-specific variable-sized handler data is not fully bounded here. This
+does not execute module code, change unwind semantics, implement dynamic
+function-table APIs or provide unloading.
+
+Batch TLS preparation uses the same exact-one reservation validation. For
+each image it reads PE data directory 9, rebases preferred-image virtual
+addresses to the reservation base, and validates the complete declared
+directory, the four-byte index location, the template bytes and the callback
+array including its terminator against committed image backing. Callback
+targets must be inside executable committed image code, but they are only
+reported; this layer never executes them. An absent directory is an honest
+no-op.
+
+The caller selects one thread's TLS pointer array by its eight-byte-aligned
+base. If that array is absent it is created as bounded thread-owned memory;
+if it already exists it must be writable. Zero slots are Xenora's free-slot
+markers for this batch layer. Preparation never overwrites a nonzero slot and
+assigns the first free slots in input order to modules that have TLS
+directories. It writes each module's index, copies its template in bounded
+chunks into independently owned thread-dynamic storage and leaves the declared
+zero-fill bytes zero. Reports therefore distinguish no directory, prepared
+storage ownership and callbacks discovered without execution. The caller must
+supply the batch in dependency order; this layer treats input order as the
+initialization-order contract. Dependency sorting and module initialization
+execution remain separate responsibilities.
+
+All TLS metadata is validated before mutation. A later allocation, backing or
+copy failure restores the exact pre-preparation memory through the same
+deliberately expensive whole-memory snapshot used by the other batch seams.
+This is not a general memory transaction API. TLS callbacks, `DllMain`, thread
+creation policy, dynamic TLS APIs, unloading and reference counting remain
+unsupported. A directory with no template bytes and no zero-fill receives a
+batch-local index but has no storage pointer with which later independent
+batches could retain that slot; that edge is part of the unresolved storage
+ownership design rather than silent Windows-compatible behavior.
+
+Module initialization-order planning is also non-executing metadata. The
+planner requires positional agreement between logical package inputs, parsed
+explicit images and reservations. It can run before TLS preparation; when TLS
+reports are supplied it validates and carries them through the same image
+indexes. It rebuilds the module dependency graph from the supplied bytes and
+rejects a stale or mismatched caller-supplied graph before using it. The resulting components keep
+the graph's provider-before-consumer condensation order and annotate each
+module with its file name, actual reserved entry-point address and TLS callback
+addresses. DLL entries are distinguished as potential `DllMain` work from
+non-DLL process entries; neither kind is executed. Circular strongly connected
+components remain grouped without an invented member order, and incomplete
+import or export table inspection is reported as ordering uncertainty because
+hidden dependencies could change the correct order. Loader-lock behavior,
+thread policy, initialization execution, unloading and reference counting
+remain unsupported.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys
@@ -573,12 +663,19 @@ fabricated and the output buffer is not mutated for an empty result.
 reduced `xinput9_1_0.dll`. It validates the two-byte output range and accepts
 only the documented gamepad/headset device-type values. A disconnected slot or
 the unsupported headset reports `BATTERY_TYPE_DISCONNECTED` with empty level.
-A connected virtual gamepad reports `BATTERY_TYPE_UNKNOWN` with empty level:
-Xenora does not know the host controller's chemistry, wired/wireless class or
-charge and does not invent those properties. Public documentation says the
-level is meaningful only for wireless devices with a known battery type, so
-the empty byte is a serialization placeholder rather than measured charge.
-Physical battery integration remains future host work.
+A connected gamepad always reports `BATTERY_TYPE_UNKNOWN`: Apple
+GameController exposes charge state and an approximate fraction but no battery
+chemistry or wired/wireless XInput class, so Xenora must not invent
+`ALKALINE`, `NIMH` or `WIRED`. Public XInput documentation says the level is
+meaningful only for wireless devices with a known battery type. Xenora makes
+an explicit compatibility policy rather than claiming Windows behavior: when
+the host supplies a real percentage, it is published beside the unknown type
+using Xenora's coarse quantization (`0...10` empty, `11...40` low, `41...70`
+medium and `71...100` full). A missing battery object or an object with no
+trustworthy level leaves the level empty, where empty means no valid evidence
+rather than a measured drained pack. Charging/discharging/full evidence is
+transported through the additive host FFI and retained internally; it is not
+misrepresented as XInput chemistry.
 
 `XInputGetAudioDeviceIds` is available only on `xinput1_4.dll` and
 `xinputuap.dll`; it is absent from `xinput1_3.dll` and reduced
@@ -615,8 +712,8 @@ voice, plug-in module or physical force-feedback properties are known.
 Disconnected slots return `ERROR_DEVICE_NOT_CONNECTED`, and invalid slots,
 flags or output ranges return `ERROR_BAD_ARGUMENTS` before mutation.
 
-Hardware-verified vibration output, keystroke event capture, physical battery
-metadata, actual headset/audio endpoints and audio render/capture,
+Hardware-verified vibration output, keystroke event capture,
+hardware-verified physical battery behavior, actual headset/audio endpoints and audio render/capture,
 physical-controller hotplug policy beyond the app's existing
 polling, ordinal 101/102/103 guide-wait/poweroff functions,
 arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery
@@ -985,12 +1082,33 @@ additional-header block. Xenora emits `Connection: close`; there is no
 connection reuse or keep-alive pool. `dwTotalLength` must equal the optional
 body length because `WinHttpWriteData` streaming is not implemented. The
 pre-send copy is bounded at 16 MiB; larger inline bodies fail with
-`ERROR_OUTOFMEMORY`. The
-public default timeout values are applied as an initial 60-second connect
-timeout and 30-second send/receive timeouts. Resolution uses the host system
-resolver, and a request may connect to whatever address that resolver returns;
-loopback tests are evidence of the transport mechanics only, not of general
-Internet reachability.
+`ERROR_OUTOFMEMORY`.
+
+`WinHttpSetTimeouts` accepts session and not-yet-sent request handles. Its
+signed millisecond values follow the public contract: zero or minus one means
+no API-level timeout, positive values are finite timeouts and other negative
+values fail with `ERROR_INVALID_PARAMETER`. Sessions start with the documented
+defaults: infinite resolution, 60-second connect, 30-second send and 30-second
+receive timeouts. A request inherits a snapshot of the session values when it
+is created; later session changes do not rewrite that request, while a request
+override applies only to that request. Connect, send and receive timeouts are
+applied to the blocking TCP operations. Rust's host resolver is blocking and
+cannot be cancelled once entered, so a finite resolution timeout is enforced
+with a detached helper thread: the caller fails with `ERROR_WINHTTP_TIMEOUT`,
+while a late resolver result is discarded. Resolution therefore has the
+documented helper-thread cost and is not true cancellation of the operating
+system resolver. A request may connect to whatever address the resolver
+returns; loopback tests are evidence of the transport mechanics only, not of
+general Internet reachability.
+
+`WinHttpQueryOption` supports only the four DWORD timeout options matching
+those stored values: resolve, connect, send and receive on session or request
+handles. Infinite values are returned as unsigned `0xffffffff` DWORD bits. It
+implements the documented required-size contract by writing four to
+`lpdwBufferLength` when the output buffer is null or too small and failing
+with `ERROR_INSUFFICIENT_BUFFER`; success writes exactly four bytes. Connection
+handles fail with the incorrect-handle-type error, unknown options fail with
+`ERROR_WINHTTP_INVALID_OPTION`, and arbitrary other options remain unsupported.
 
 `WinHttpReceiveResponse` parses HTTP/1.0 and HTTP/1.1 status lines and a
 bounded response header block. It preserves the status line and headers for
@@ -1036,7 +1154,7 @@ not reuse them but does not give a complete parent-close cascade contract.
 Handles are process-local opaque values and are also discarded when the guest
 process exits.
 
-TLS certificate validation, HTTPS, asynchronous callbacks, cancellation,
+TLS certificate validation, HTTPS, asynchronous callbacks, in-flight cancellation,
 redirects, authentication, proxy resolution, request streaming, connection
 reuse, custom/raw response-header queries, duplicate-header enumeration,
 non-chunked or combined transfer codings and libcurl-compatible interfaces

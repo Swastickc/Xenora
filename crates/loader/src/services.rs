@@ -57,7 +57,7 @@ use crate::runtime::HResult;
 pub use crt_arguments::{MAX_PROGRAM_ARGUMENT_BYTES, ProgramArgumentsError};
 pub use crt_streams::MAX_CAPTURED_OUTPUT;
 pub use startup_info::{ProcessStartupInfo, StartupInfoError};
-pub use xinput::XInputControllerState;
+pub use xinput::{XInputBatteryChargeState, XInputBatteryState, XInputControllerState};
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};

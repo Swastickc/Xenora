@@ -67,7 +67,13 @@ pub const XENORA_XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
 pub use frame_loop::ControllerInput as xenora_controller_input;
 pub use frame_loop::InputState as xenora_input_state;
+pub use frame_loop::XINPUT_BATTERY_LEVEL_UNKNOWN as XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN;
+pub use frame_loop::XINPUT_BATTERY_STATE_CHARGING as XENORA_XINPUT_BATTERY_STATE_CHARGING;
+pub use frame_loop::XINPUT_BATTERY_STATE_DISCHARGING as XENORA_XINPUT_BATTERY_STATE_DISCHARGING;
+pub use frame_loop::XINPUT_BATTERY_STATE_FULL as XENORA_XINPUT_BATTERY_STATE_FULL;
+pub use frame_loop::XINPUT_BATTERY_STATE_UNKNOWN as XENORA_XINPUT_BATTERY_STATE_UNKNOWN;
 pub use frame_loop::XINPUT_FEATURE_VIBRATION as XENORA_XINPUT_FEATURE_VIBRATION;
+pub use frame_loop::XInputBattery as xenora_xinput_battery;
 pub use frame_loop::XInputSnapshot as xenora_xinput_state;
 pub use frame_loop::XInputVibration as xenora_xinput_vibration;
 
@@ -494,6 +500,36 @@ pub unsafe extern "C" fn xenora_session_send_xinput_state(
         }
         match session_loop(session) {
             Ok(Some(running)) if running.send_xinput(user_index, input) => XENORA_OK,
+            Ok(_) => XENORA_INVALID_STATE,
+            Err(status) => status,
+        }
+    })
+}
+
+/// Atomically replace one XInput snapshot and its host battery evidence.
+///
+/// # Safety
+/// `input` and `battery` must be valid pointers to initialized structures.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_send_xinput_state_with_battery(
+    session: u64,
+    user_index: u32,
+    input: *const frame_loop::XInputSnapshot,
+    battery: *const frame_loop::XInputBattery,
+) -> i32 {
+    guarded(|| {
+        if input.is_null() || battery.is_null() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        let input = unsafe { *input };
+        let battery = unsafe { *battery };
+        if user_index >= 4 || !input.valid_wire_shape() || !battery.valid_wire_shape() {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        match session_loop(session) {
+            Ok(Some(running)) if running.send_xinput_with_battery(user_index, input, battery) => {
+                XENORA_OK
+            }
             Ok(_) => XENORA_INVALID_STATE,
             Err(status) => status,
         }
@@ -2226,6 +2262,46 @@ mod tests {
         };
         assert_eq!(
             unsafe { xenora_session_send_xinput_state(0, 0, &bad_features) },
+            XENORA_INVALID_ARGUMENT
+        );
+        let battery = xenora_xinput_battery {
+            present: 1,
+            state: XENORA_XINPUT_BATTERY_STATE_DISCHARGING,
+            level: 55,
+            reserved: 0,
+        };
+        for bad in [
+            xenora_xinput_battery {
+                present: 2,
+                ..battery
+            },
+            xenora_xinput_battery {
+                state: 4,
+                ..battery
+            },
+            xenora_xinput_battery {
+                level: 101,
+                ..battery
+            },
+            xenora_xinput_battery {
+                reserved: 1,
+                ..battery
+            },
+            xenora_xinput_battery {
+                present: 0,
+                level: 55,
+                ..battery
+            },
+        ] {
+            assert_eq!(
+                unsafe { xenora_session_send_xinput_state_with_battery(0, 0, &input, &bad) },
+                XENORA_INVALID_ARGUMENT
+            );
+        }
+        assert_eq!(
+            unsafe {
+                xenora_session_send_xinput_state_with_battery(0, 0, &input, std::ptr::null())
+            },
             XENORA_INVALID_ARGUMENT
         );
         let mut vibration = xenora_xinput_vibration::default();

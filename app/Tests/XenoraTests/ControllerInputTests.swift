@@ -32,6 +32,28 @@ struct ControllerInputTests {
         #expect(released.snapshot.xinput.buttons == 0)
     }
 
+
+    @Test func batteryEvidenceDistinguishesAbsenceUnknownAndRealValues() {
+        #expect(XInputBatteryValues.hostValues(nil) == XInputBatteryValues())
+        #expect(XInputBatteryValues().ffi().present == 0)
+
+        let charging = XInputBatteryValues.hostEvidence(state: .charging, level: 0.555)
+        #expect(charging.present)
+        #expect(charging.state == UInt8(XENORA_XINPUT_BATTERY_STATE_CHARGING))
+        #expect(charging.level == 56)
+        let wire = charging.ffi()
+        #expect(wire.present == 1 && wire.reserved == 0)
+
+        #expect(XInputBatteryValues.hostEvidence(state: .full, level: 1).state ==
+                UInt8(XENORA_XINPUT_BATTERY_STATE_FULL))
+        #expect(XInputBatteryValues.hostEvidence(state: .discharging, level: 0).state ==
+                UInt8(XENORA_XINPUT_BATTERY_STATE_DISCHARGING))
+        #expect(XInputBatteryValues.hostEvidence(state: .unknown, level: .nan).level ==
+                UInt8(XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN))
+        #expect(XInputBatteryValues.hostEvidence(state: .unknown, level: 1.1).level ==
+                UInt8(XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN))
+    }
+
     @Test func pollPrefersExtendedControllersThenTheCurrentMicroController() {
         let micro = GCController.withMicroGamepad()
         let otherMicro = GCController.withMicroGamepad()

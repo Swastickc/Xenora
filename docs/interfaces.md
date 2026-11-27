@@ -183,6 +183,38 @@ do not remain visible. Language-specific variable-sized handler data is not full
 does not execute module code, change unwind semantics, implement dynamic
 function-table APIs or provide unloading.
 
+Batch TLS preparation uses the same exact-one reservation validation. For
+each image it reads PE data directory 9, rebases preferred-image virtual
+addresses to the reservation base, and validates the complete declared
+directory, the four-byte index location, the template bytes and the callback
+array including its terminator against committed image backing. Callback
+targets must be inside executable committed image code, but they are only
+reported; this layer never executes them. An absent directory is an honest
+no-op.
+
+The caller selects one thread's TLS pointer array by its eight-byte-aligned
+base. If that array is absent it is created as bounded thread-owned memory;
+if it already exists it must be writable. Zero slots are Xenora's free-slot
+markers for this batch layer. Preparation never overwrites a nonzero slot and
+assigns the first free slots in input order to modules that have TLS
+directories. It writes each module's index, copies its template in bounded
+chunks into independently owned thread-dynamic storage and leaves the declared
+zero-fill bytes zero. Reports therefore distinguish no directory, prepared
+storage ownership and callbacks discovered without execution. The caller must
+supply the batch in dependency order; this layer treats input order as the
+initialization-order contract. Dependency sorting and module initialization
+execution remain separate responsibilities.
+
+All TLS metadata is validated before mutation. A later allocation, backing or
+copy failure restores the exact pre-preparation memory through the same
+deliberately expensive whole-memory snapshot used by the other batch seams.
+This is not a general memory transaction API. TLS callbacks, `DllMain`, thread
+creation policy, dynamic TLS APIs, unloading and reference counting remain
+unsupported. A directory with no template bytes and no zero-fill receives a
+batch-local index but has no storage pointer with which later independent
+batches could retain that slot; that edge is part of the unresolved storage
+ownership design rather than silent Windows-compatible behavior.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys

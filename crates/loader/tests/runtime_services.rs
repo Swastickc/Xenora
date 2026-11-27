@@ -7318,6 +7318,29 @@ fn dup2_over_a_standard_descriptor_rewires_the_table() {
     assert_eq!(guest.call("_write", &[2, buf, 1]) & 0xFFFF_FFFF, 1);
 }
 
+/// The exact sequence a shell runs for output redirection: save stdout,
+/// rewire it onto the file, close the file's own descriptor, then write
+/// through stdout. The close of the original hands the stream to the
+/// duplication - the write still reaches the file.
+#[test]
+fn closing_the_original_descriptor_keeps_the_rewired_stdout() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    guest.memory.write_bytes(NAME, b"redir2.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    assert_eq!(guest.call("_dup2", &[fd, 1]) & 0xFFFF_FFFF, 1);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"redirected").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 10]) & 0xFFFF_FFFF, 10);
+    // and the bytes prove they took the file path, position shared.
+    assert_eq!(guest.call("_lseeki64", &[1, 0, 0]), 0);
+    let mut bytes = [0u8; 10];
+    assert_eq!(guest.call("_read", &[1, buf, 10]) & 0xFFFF_FFFF, 10);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"redirected");
+}
+
 #[test]
 fn legacy_strdup_and_ldexp_run() {
     let mut guest = Guest::new();

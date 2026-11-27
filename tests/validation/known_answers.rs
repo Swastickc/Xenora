@@ -466,6 +466,202 @@ mod review {
         assert_eq!(xenora_ref::execute(FIXTURE, input).unwrap(), expected);
     }
 
+    const IMAGE_SAMPLE_LZ_DMASK1: &[u8] =
+        include_bytes!("../../fixtures/rdna2/image-sample-lz-dmask1.bin");
+    const IMAGE_SAMPLE_LZ_DMASK8: &[u8] =
+        include_bytes!("../../fixtures/rdna2/image-sample-lz-dmask8.bin");
+    const IMAGE_SAMPLE_LZ_DMASK5: &[u8] =
+        include_bytes!("../../fixtures/rdna2/image-sample-lz-dmask5.bin");
+    const IMAGE_SAMPLE_LZ_DMASKF: &[u8] =
+        include_bytes!("../../fixtures/rdna2/image-sample-lz-dmaskf.bin");
+    const IMAGE_SAMPLE_L_LOD0: &[u8] =
+        include_bytes!("../../fixtures/rdna2/image-sample-l-lod0.bin");
+    const IMAGE_SAMPLE_L_LOD1: &[u8] =
+        include_bytes!("../../fixtures/rdna2/image-sample-l-lod1.bin");
+
+    /// The 20 per-lane (u, v) cases. Every value has a zero low 16-bit half so
+    /// the fixture can pack both into one word (see `packed`).
+    const IMAGE_SAMPLE_CASES: [(f32, f32); 20] = [
+        (0.125, 0.125), // mip 0 texel (0, 0) centre
+        (0.375, 0.125), // texel (1, 0)
+        (0.625, 0.125), // texel (2, 0)
+        (0.875, 0.125), // texel (3, 0)
+        (0.125, 0.375), // texel (0, 1)
+        (0.125, 0.625), // texel (0, 2)
+        (0.125, 0.875), // texel (0, 3)
+        (0.875, 0.875), // texel (3, 3)
+        (0.25, 0.25),   // exactly on the edge: 0.25 * 4 = 1.0
+        (0.5, 0.5),     // exactly on the edge: 0.5 * 4 = 2.0
+        (-0.5, 0.125),  // u < 0 clamps to x = 0
+        (1.5, 0.125),   // u > 1 clamps to x = 3
+        (0.125, 1.5),   // v > 1 clamps to y = 3
+        (-0.5, -0.5),   // both clamp to the first texel
+        (1.5, 1.5),     // both clamp to the last texel
+        (0.0, 0.0),     // first texel
+        (1.0, 1.0),     // last texel
+        (0.75, 0.25),   // texel (3, 1)
+        (0.25, 0.75),   // texel (1, 3)
+        (0.5, 0.25),    // texel (2, 1)
+    ];
+
+    fn packed(u: f32, v: f32) -> u32 {
+        (u.to_bits() >> 16) | (v.to_bits() & 0xffff_0000)
+    }
+
+    /// Texel byte `(level << 6) | (y << 4) | (x << 2) | channel` makes every
+    /// channel of every texel distinct.
+    fn texel_byte(level: u32, x: usize, y: usize, channel: usize) -> u8 {
+        ((level << 6) | ((y as u32) << 4) | ((x as u32) << 2) | channel as u32) as u8
+    }
+
+    fn image_sample_texels() -> Vec<u32> {
+        let mut bytes = Vec::new();
+        for level in 0..2u32 {
+            let extent = 4usize >> level;
+            for y in 0..extent {
+                for x in 0..extent {
+                    for channel in 0..4 {
+                        bytes.push(texel_byte(level, x, y, channel));
+                    }
+                }
+            }
+        }
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect()
+    }
+
+    /// The synthetic input: a 4x4 RGBA8 unorm T# with two levels (base field 1
+    /// = byte offset 0x100), an S# with point mip filtering and a 1.0 maximum
+    /// LOD, the 20 packed coordinate cases at words 12..32, and the texels at
+    /// word 64.
+    fn image_sample_input() -> Vec<u32> {
+        let mut input = vec![
+            0x0000_0001, // T# base-address field 1 -> byte offset 0x100
+            0xC380_0000, // min lod 0, format 56, width-1 3 high bits
+            0x8000_C000, // width-1 3 low bits, height-1 3, resource level 1
+            0x9001_0fac, // dst_sel RGBA, base 0, last 1, type 9 (2D)
+            0,
+            0,
+            0,
+            0,           // 256-bit extension words (zero for a 2D texture)
+            0x0000_0092, // S# clamp_x/y/z = ClampLastTexel (2)
+            0x0010_0000, // S# max lod 0x100 = 1.0 (4.8 fixed point)
+            0x0400_0000, // S# mip filter point (1) at 91:90
+            0,
+        ];
+        input.extend(IMAGE_SAMPLE_CASES.map(|(u, v)| packed(u, v)));
+        input.resize(64, 0);
+        input.extend(image_sample_texels());
+        input
+    }
+
+    fn texel_index(u: f32, v: f32, mip: u32) -> (usize, usize) {
+        let extent = 4usize >> mip;
+        let x = ((u.clamp(0.0, 1.0) * extent as f32).floor() as usize).min(extent - 1);
+        let y = ((v.clamp(0.0, 1.0) * extent as f32).floor() as usize).min(extent - 1);
+        (x, y)
+    }
+
+    /// One output word per dispatch index. Every lane loads its packed coordinate
+    /// word `input[lane]`, splits it into u and v, and samples `component` of the
+    /// mip. The non-case words (descriptors and texel bytes) are still finite
+    /// coordinates and follow the same formula.
+    fn image_sample_expected(input: &[u32], mip: u32, component: usize) -> Vec<u32> {
+        input
+            .iter()
+            .map(|&word| {
+                let u = f32::from_bits((word & 0xffff) << 16);
+                let v = f32::from_bits(word & 0xffff_0000);
+                let (x, y) = texel_index(u, v, mip);
+                (f32::from(texel_byte(mip, x, y, component)) / 255.0).to_bits()
+            })
+            .collect()
+    }
+
+    /// The destination VGPR of every DMASK-selected component, in R, G, B, A
+    /// order of the set bits. VDATA is v5.
+    fn image_sample_destinations(dmask: u8) -> Vec<(u8, usize)> {
+        let mut destinations = Vec::new();
+        let mut slot = 5u8;
+        for component in 0..4 {
+            if dmask & (1 << component) != 0 {
+                destinations.push((slot, component));
+                slot += 1;
+            }
+        }
+        destinations
+    }
+
+    /// Rewrite the single output store to read a different destination VGPR, so
+    /// every component the sample wrote can be observed. The store is the third
+    /// instruction from the end (store, vscnt wait, endpgm).
+    fn store_destination(code: &[u8], vgpr: u8) -> Vec<u8> {
+        let mut code = code.to_vec();
+        let store = code.len() - 16;
+        assert_eq!(code[store + 7], 0x80, "buffer_store encoding");
+        code[store + 5] = vgpr;
+        code
+    }
+
+    #[test]
+    fn image_sample_lz_dmask_matrix_matches_independent_reference() {
+        let input = image_sample_input();
+        let fixtures: [(&[u8], u8); 4] = [
+            (IMAGE_SAMPLE_LZ_DMASK1, 0x1),
+            (IMAGE_SAMPLE_LZ_DMASK8, 0x8),
+            (IMAGE_SAMPLE_LZ_DMASK5, 0x5),
+            (IMAGE_SAMPLE_LZ_DMASKF, 0xf),
+        ];
+        for (fixture, dmask) in fixtures {
+            for (destination, component) in image_sample_destinations(dmask) {
+                let code = store_destination(fixture, destination);
+                let expected = image_sample_expected(&input, 0, component);
+                verify(&code, &input, Some(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn image_sample_l_reads_lod_zero_and_one() {
+        let input = image_sample_input();
+        for (fixture, mip) in [(IMAGE_SAMPLE_L_LOD0, 0u32), (IMAGE_SAMPLE_L_LOD1, 1)] {
+            for (destination, component) in image_sample_destinations(0xf) {
+                let code = store_destination(fixture, destination);
+                let expected = image_sample_expected(&input, mip, component);
+                verify(&code, &input, Some(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn image_sample_fixtures_carry_the_expected_mimg_form() {
+        for (fixture, dmask, explicit) in [
+            (IMAGE_SAMPLE_LZ_DMASK1, 0x1u8, false),
+            (IMAGE_SAMPLE_LZ_DMASK8, 0x8, false),
+            (IMAGE_SAMPLE_LZ_DMASK5, 0x5, false),
+            (IMAGE_SAMPLE_LZ_DMASKF, 0xf, false),
+            (IMAGE_SAMPLE_L_LOD0, 0xf, true),
+            (IMAGE_SAMPLE_L_LOD1, 0xf, true),
+        ] {
+            let program = xenora_ref::decode(fixture).expect("decode image sample fixture");
+            assert!(program.iter().any(|instruction| matches!(
+                instruction.op,
+                xenora_ref::Op::ImageSample {
+                    dst: 5,
+                    coord: 2,
+                    resource: 8,
+                    sampler: 16,
+                    dmask: actual,
+                    explicit_lod: actual_lod,
+                } if actual == dmask && actual_lod == explicit
+            )));
+        }
+    }
+
     #[test]
     fn independently_derived_addition_for_boundary_and_pseudorandom_inputs() {
         let wrap_at = 0xEDCB_A988;

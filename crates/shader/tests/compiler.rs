@@ -576,6 +576,244 @@ fn vop1_float_rounding_fixture_lowers_to_integer_bit_operations() {
 // RDNA2 guide / MSL templates in lib.rs, then checked against fold-on IR. Fold-off
 // (and default compile) must leave the op mnemonic in the IR.
 
+/// The three synthetic binding ABI descriptor loads of the image-sample
+/// fixtures: s[8:11] from offset 0x0, s[12:15] from 0x10, s[16:19] from 0x20.
+const IMAGE_SAMPLE_LOADS: [u32; 6] = [
+    0xf428_0200,
+    0xfa00_0000,
+    0xf428_0300,
+    0xfa00_0010,
+    0xf428_0400,
+    0xfa00_0020,
+];
+
+fn image_sample_program(loads: &[u32], extra: &[u32]) -> Vec<u8> {
+    let mut program: Vec<u32> = (0..12).map(|index| 0xbe88_0380 + (index << 16)).collect();
+    program.extend_from_slice(loads);
+    program.push(0xbf8c_c07f); // s_waitcnt lgkmcnt(0)
+    program.extend_from_slice(extra);
+    program.extend([
+        0x7e04_0280, // v_mov_b32_e32 v2, 0
+        0x7e06_0280, // v_mov_b32_e32 v3, 0
+        0xf09c_0108, // image_sample_lz v5, v[2:3], s[8:15], s[16:19]
+        0x0082_0502,
+        0xe070_2000, // buffer_store_dword v5, v0, s[4:7], 0 idxen
+        0x8001_0500,
+        0xbbfd_0000, // s_waitcnt_vscnt null, 0
+        0xbf81_0000, // s_endpgm
+    ]);
+    words(&program)
+}
+
+#[test]
+fn compiles_image_sample_with_the_three_descriptor_loads() {
+    compile(
+        Architecture::Gfx1030,
+        &image_sample_program(&IMAGE_SAMPLE_LOADS, &[]),
+    )
+    .expect("the synthetic descriptor loads satisfy the binding contract");
+}
+
+#[test]
+fn refuses_image_sample_without_descriptor_loads() {
+    let error = compile(Architecture::Gfx1030, &image_sample_program(&[], &[])).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance {
+                register: 8,
+                expected: "s_buffer_load_dwordx4 s[8:11], s[0:3], 0x0",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn refuses_image_sample_with_a_descriptor_load_at_the_wrong_offset() {
+    let mut loads = IMAGE_SAMPLE_LOADS;
+    loads[3] = 0xfa00_0000; // s[12:15] from offset 0x0 instead of 0x10
+    let error = compile(Architecture::Gfx1030, &image_sample_program(&loads, &[])).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance { register: 12, .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn refuses_image_sample_with_a_narrow_descriptor_load() {
+    let mut loads = IMAGE_SAMPLE_LOADS;
+    loads[4] = 0xf424_0400; // dwordx2 into s[16:17] instead of dwordx4
+    let error = compile(Architecture::Gfx1030, &image_sample_program(&loads, &[])).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance { register: 16, .. }
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn refuses_image_sample_after_a_later_descriptor_write() {
+    // s_mov_b32 s8, 0 after the completed descriptor loads.
+    let error = compile(
+        Architecture::Gfx1030,
+        &image_sample_program(&IMAGE_SAMPLE_LOADS, &[0xbe88_0380]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CompileError::DescriptorProvenance { register: 8, .. }
+        ),
+        "{error:?}"
+    );
+}
+
+/// The six assembled MIMG image-sample fixtures. Each writes a different DMASK
+/// component or an explicit LOD, so the compiled IR and MSL name the form, the
+/// sampled channels and the level.
+const IMAGE_SAMPLE_FIXTURES: [(&[u8], &str, &str, u32); 6] = [
+    (
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask1.bin"),
+        "sample_lz.2d.f32",
+        "r",
+        0x0000_0000,
+    ),
+    (
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask8.bin"),
+        "sample_lz.2d.f32",
+        "a",
+        0x0000_0000,
+    ),
+    (
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask5.bin"),
+        "sample_lz.2d.f32",
+        "rb",
+        0x0000_0000,
+    ),
+    (
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmaskf.bin"),
+        "sample_lz.2d.f32",
+        "rgba",
+        0x0000_0000,
+    ),
+    (
+        include_bytes!("../../../fixtures/rdna2/image-sample-l-lod0.bin"),
+        "sample_l.2d.f32",
+        "rgba",
+        0x0000_0000,
+    ),
+    (
+        include_bytes!("../../../fixtures/rdna2/image-sample-l-lod1.bin"),
+        "sample_l.2d.f32",
+        "rgba",
+        0x3f80_0000,
+    ),
+];
+
+/// The channel each DMASK-selected component selects in the generated MSL, in
+/// the order the components are written.
+fn sampled_channels(msl: &str) -> String {
+    msl.lines()
+        .filter(|line| line.contains("tex0.sample("))
+        .map(|line| {
+            let (_, tail) = line.rsplit_once('.').expect("a sampled channel");
+            tail.chars().next().expect("a sampled channel")
+        })
+        .collect()
+}
+
+/// The MSL operand of the sample's `level(...)` argument.
+fn sample_level_operand(msl: &str) -> String {
+    let line = msl
+        .lines()
+        .find(|line| line.contains("tex0.sample("))
+        .expect("a sampled texture");
+    let start = line
+        .find("level(as_type<float>(")
+        .expect("an explicit level")
+        + "level(as_type<float>(".len();
+    let tail = &line[start..];
+    tail[..tail.find("))").expect("the end of the level")].to_string()
+}
+
+/// The DMASK bit order is R, G, B, A (guide Table 41, printed page 69), so a
+/// masked sample reads exactly those channels of the texel, in that order, and
+/// an explicit LOD reaches the level the fixture asks for.
+#[test]
+fn image_sample_lowers_to_the_documented_channels_and_level() {
+    for (fixture, form, channels, level) in IMAGE_SAMPLE_FIXTURES {
+        let compiled = compile(Architecture::Gfx1030, fixture).expect("compile the fixture");
+        assert!(
+            compiled.ir.contains(form),
+            "the IR must name {form}: {}",
+            compiled.ir
+        );
+        assert_eq!(
+            sampled_channels(&compiled.msl),
+            channels,
+            "the MSL must sample the DMASK channels in R, G, B, A order: {}",
+            compiled.msl
+        );
+        let operand = sample_level_operand(&compiled.msl);
+        assert!(
+            compiled
+                .msl
+                .contains(&format!("uint {operand} = 0x{level:08x}u;")),
+            "the level must be the fixture's LOD: {}",
+            compiled.msl
+        );
+    }
+}
+
+/// The image-sample program with an initialised destination and a partial EXEC
+/// mask: the masked lanes sample and the rest keep the prior destination value.
+fn image_sample_program_with_exec(mask: u32) -> Vec<u8> {
+    let mut program: Vec<u32> = (0..12).map(|index| 0xbe88_0380 + (index << 16)).collect();
+    program.extend_from_slice(&IMAGE_SAMPLE_LOADS);
+    program.extend([
+        0xbf8c_c07f,        // s_waitcnt lgkmcnt(0)
+        0x7e04_0280,        // v_mov_b32_e32 v2, 0
+        0x7e06_0280,        // v_mov_b32_e32 v3, 0
+        0x7e0a_0280,        // v_mov_b32_e32 v5, 0
+        0xbefe_0380 | mask, // s_mov_b32 exec_lo, mask
+        0xf09c_0108,        // image_sample_lz v5, v[2:3], s[8:15], s[16:19] dmask:0x1
+        0x0082_0502,
+        0xbefe_03c1, // s_mov_b32 exec_lo, -1: the store needs a full wave
+        0xe070_2000, // buffer_store_dword v5, v0, s[4:7], 0 idxen
+        0x8001_0500,
+        0xbbfd_0000, // s_waitcnt_vscnt null, 0
+        0xbf81_0000, // s_endpgm
+    ]);
+    words(&program)
+}
+
+/// A partially active image sample writes only the lanes the EXEC mask selects
+/// and leaves the other lanes with the value their destination already held.
+#[test]
+fn image_sample_under_a_partial_exec_keeps_the_prior_destination() {
+    let compiled = compile(Architecture::Gfx1030, &image_sample_program_with_exec(5))
+        .expect("compile a partially active image sample");
+    assert!(
+        compiled.ir.contains("merge.lanes mask=0x00000005"),
+        "the IR must merge the sample with the prior destination: {}",
+        compiled.ir
+    );
+    assert!(
+        compiled
+            .msl
+            .contains("((0x00000005u >> (index & 31u)) & 1u) != 0u ?"),
+        "the sampled value must reach only the lanes the mask selects: {}",
+        compiled.msl
+    );
+}
+
 fn words(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }

@@ -120,6 +120,11 @@ pub enum Operation {
     RoundNearestEven,
     /// Binary32 rounding down to an integral value (guide 12.8).
     Floor,
+    /// MIMG `image_sample_lz`: sample a 2D texture at level of detail zero.
+    ImageSampleLz,
+    /// MIMG `image_sample_l`: sample a 2D texture at an explicit level of
+    /// detail read from the address tuple.
+    ImageSampleL,
 }
 
 /// Per-lane operation with one input and one result: integer and bit forms,
@@ -365,6 +370,12 @@ pub enum OperandRule {
     Vop2F32,
     /// VOP1 swap: VDST and SRC0 each read and write a VGPR.
     Vop1Swap,
+    /// MIMG 2D sample (IMAGE_SAMPLE_LZ and IMAGE_SAMPLE_L): VDATA is the first
+    /// destination VGPR, VADDR the first address VGPR, SRSRC the base of an
+    /// eight-aligned SGPR resource descriptor and SSAMP the base of a
+    /// four-aligned SGPR sampler descriptor. Non-NSA, DIM 2D, R128 clear,
+    /// DMASK 1-15; everything else is rejected as unsupported.
+    Mimg2D,
 }
 
 /// Evidence a form needs before it counts as verified.

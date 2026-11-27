@@ -12,6 +12,57 @@ use crate::CompareRelation;
 /// Registry schema of the generated tables.
 pub const GENERATED_SCHEMA: u32 = 1;
 
+/// MIMG image samples declared in the semantic registry (operand rule `mimg_2d`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageSampleOp {
+    /// `image_sample_lz` (MIMG opcode 39).
+    ImageSampleLz,
+    /// `image_sample_l` (MIMG opcode 36).
+    ImageSampleL,
+}
+
+impl ImageSampleOp {
+    /// Every operation, in registry order.
+    pub const ALL: [Self; 2] = [
+        Self::ImageSampleLz,
+        Self::ImageSampleL,
+    ];
+
+    /// Selects the operation from the first word of its MIMG encoding:
+    /// the encoding bits (mask 0xfc00_0000) and then the split OP field
+    /// (bits 18-24 for the low bits and bit
+    /// 0 for the high bit). `None` for undeclared opcodes. The DIM,
+    /// R128, NSA, DMASK and modifier flags are checked separately by the decoder.
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & 0xfc00_0000 != 0xf000_0000 {
+            return None;
+        }
+        let opcode = ((word >> 18) & 0x7f)
+            | ((word & 0x1) << 7);
+        match opcode {
+            36 => Some(Self::ImageSampleL),
+            39 => Some(Self::ImageSampleLz),
+            _ => None,
+        }
+    }
+
+    /// Lower-case mnemonic.
+    pub const fn mnemonic(self) -> &'static str {
+        match self {
+            Self::ImageSampleLz => "image_sample_lz",
+            Self::ImageSampleL => "image_sample_l",
+        }
+    }
+
+    /// The validated registry row.
+    pub fn semantics(self) -> &'static FormSemantics {
+        &FORMS[match self {
+            Self::ImageSampleLz => 201,
+            Self::ImageSampleL => 202,
+        }]
+    }
+}
+
 /// SOP1 operations declared in the semantic registry (operand rules `sop1_move`, `sop1_saveexec`, `sop1_sgpr`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScalarUnaryOp {
@@ -3935,8 +3986,10 @@ impl VectorAluVop3Op {
     }
 }
 
-/// Identity of every registry form and encoding variant, in registry order.
-pub const FORM_IDS: [(&str, EncodingFamily); 201] = [
+/// Identity of every registry form and encoding variant; a family named in
+/// append_after_variants follows the encoding variants to keep existing
+/// positions stable, and the rest keep registry order.
+pub const FORM_IDS: [(&str, EncodingFamily); 203] = [
     ("S_ADD_U32", EncodingFamily::Sop2),
     ("S_SUB_U32", EncodingFamily::Sop2),
     ("S_ADD_I32", EncodingFamily::Sop2),
@@ -4138,10 +4191,12 @@ pub const FORM_IDS: [(&str, EncodingFamily); 201] = [
     ("V_XNOR_B32", EncodingFamily::Vop3),
     ("V_SUB_NC_U32", EncodingFamily::Vop3),
     ("V_SUBREV_NC_U32", EncodingFamily::Vop3),
+    ("IMAGE_SAMPLE_LZ", EncodingFamily::Mimg),
+    ("IMAGE_SAMPLE_L", EncodingFamily::Mimg),
 ];
 
 /// One validated row per registry form, in registry order.
-pub static FORMS: [FormSemantics; 201] = [
+pub static FORMS: [FormSemantics; 203] = [
     FormSemantics {
         name: "S_ADD_U32",
         family: EncodingFamily::Sop2,
@@ -8361,6 +8416,48 @@ pub static FORMS: [FormSemantics; 201] = [
         wave: Wave::Any,
         operands: OperandRule::Vop3Vgpr2,
         spec: &[SpecRef { document: Document::Guide, section: "12.12", page: 167 }, SpecRef { document: Document::Guide, section: "12.7", page: 134 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "IMAGE_SAMPLE_LZ",
+        family: EncodingFamily::Mimg,
+        opcode: 39,
+        operation: Operation::ImageSampleLz,
+        signedness: Signedness::Float,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Wave32,
+        operands: OperandRule::Mimg2D,
+        spec: &[SpecRef { document: Document::Guide, section: "8.2", page: 67 }, SpecRef { document: Document::Guide, section: "12.16", page: 216 }],
+        verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
+    },
+    FormSemantics {
+        name: "IMAGE_SAMPLE_L",
+        family: EncodingFamily::Mimg,
+        opcode: 36,
+        operation: Operation::ImageSampleL,
+        signedness: Signedness::Float,
+        carry_in: CarryIn::None,
+        width: 32,
+        shift_count_bits: 0,
+        shift_amount: 0,
+        swap_sources: false,
+        source_bits: 32,
+        relation: None,
+        scc: SccEffect::Unchanged,
+        vcc: MaskEffect::Unchanged,
+        exec: MaskEffect::Unchanged,
+        wave: Wave::Wave32,
+        operands: OperandRule::Mimg2D,
+        spec: &[SpecRef { document: Document::Guide, section: "8.2", page: 67 }, SpecRef { document: Document::Guide, section: "12.16", page: 216 }],
         verify: &[Evidence::Reference, Evidence::Independent, Evidence::Metal, Evidence::LlvmEncoding],
     },
 ];

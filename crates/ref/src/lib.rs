@@ -97,6 +97,17 @@ pub enum Op {
     VectorUnary(VectorUnary, u8, CompareSource),
     /// VOP1 `v_swap_b32` (opcode 101): exchanges VDST and the SRC0 VGPR.
     Swap(u8, u8),
+    /// MIMG 2D image sample (IMAGE_SAMPLE_LZ or IMAGE_SAMPLE_L) writing one
+    /// VGPR per DMASK-selected component; `explicit_lod` reads the LOD from
+    /// `coord + 2` instead of level zero.
+    ImageSample {
+        dst: u8,
+        coord: u8,
+        resource: u8,
+        sampler: u8,
+        dmask: u8,
+        explicit_lod: bool,
+    },
     End,
 }
 
@@ -888,6 +899,77 @@ fn error(offset: usize, detail: &'static str) -> ReferenceError {
     ReferenceError { offset, detail }
 }
 
+/// Read the consecutive SGPRs of a validated image descriptor.
+fn read_descriptor_words(
+    scalars: &[Option<u32>; 128],
+    base: u8,
+    count: usize,
+    offset: usize,
+) -> Result<Vec<u32>, ReferenceError> {
+    (0..count)
+        .map(|index| {
+            scalars[usize::from(base) + index].ok_or_else(|| {
+                error(
+                    offset,
+                    "image sample reads an uninitialized descriptor SGPR",
+                )
+            })
+        })
+        .collect()
+}
+
+/// The reference detail string for a texture sampling failure.
+fn descriptor_detail(detail: texture_sampling::SamplingError) -> &'static str {
+    match detail {
+        texture_sampling::SamplingError::InvalidDimensions => "invalid texture dimensions",
+        texture_sampling::SamplingError::InvalidMipCount => "invalid mip count",
+        texture_sampling::SamplingError::MipOutOfBounds => "selected mip index is out of bounds",
+        texture_sampling::SamplingError::InvalidRowPitch => "invalid row pitch for mip level",
+        texture_sampling::SamplingError::InvalidOffset => "invalid buffer offset",
+        texture_sampling::SamplingError::BufferTooSmall => "buffer is too small for texture layout",
+        texture_sampling::SamplingError::NonFiniteCoordinates => "non-finite texture coordinates",
+        texture_sampling::SamplingError::InvalidResourceType => {
+            "resource descriptor is not a 2D image"
+        }
+        texture_sampling::SamplingError::InvalidResourceFormat => {
+            "resource descriptor is not RGBA8 unorm"
+        }
+        texture_sampling::SamplingError::InvalidResourceLevel => {
+            "unsupported resource level, channel select or base level"
+        }
+        texture_sampling::SamplingError::InvalidResourceExtent => {
+            "resource width or height sets a reserved high bit"
+        }
+        texture_sampling::SamplingError::UnsupportedSwizzleMode => {
+            "resource swizzle mode is not linear"
+        }
+        texture_sampling::SamplingError::InvalidResourceMinLod => "resource minimum LOD is nonzero",
+        texture_sampling::SamplingError::InvalidResourceLevelRange => {
+            "resource last level is below base level"
+        }
+        texture_sampling::SamplingError::ResourceExtensionNonzero => {
+            "nonzero 256-bit resource extension words"
+        }
+        texture_sampling::SamplingError::ResourceUnsupportedBits { .. } => {
+            "resource descriptor sets bits the validator does not support"
+        }
+        texture_sampling::SamplingError::SamplerAddressing => {
+            "sampler addressing is not clamp-to-last-texel with normalized coordinates"
+        }
+        texture_sampling::SamplingError::SamplerFilter => "sampler filtering is not point",
+        texture_sampling::SamplingError::SamplerMipFilter => "sampler mip filtering is not point",
+        texture_sampling::SamplingError::SamplerLodRange => {
+            "sampler LOD range does not cover the resource mip levels"
+        }
+        texture_sampling::SamplingError::SamplerUnsupportedBits { .. } => {
+            "sampler sets bits the validator does not support"
+        }
+        texture_sampling::SamplingError::InvalidLod => {
+            "explicit LOD is not a representable integer mip level"
+        }
+    }
+}
+
 /// An operation and its span in the original byte stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedInstruction {
@@ -1319,6 +1401,50 @@ pub fn decode(code: &[u8]) -> Result<Vec<DecodedInstruction>, ReferenceError> {
                     _ => return Err(error(offset, "unsupported VOP1 source")),
                 };
                 (Op::Move(dst, src), length)
+            }
+            // MIMG (guide 8.2 and 13.9 Table 100, printed page 277): byte 3
+            // carries the ENCODING 0b111100 and the opcode's high bit; byte 2
+            // its low six bits and byte 0 its low bit. Non-NSA is two dwords.
+            [low, flags, op_lo, 0xf0, vaddr, vdata, srsrc, ssamp, ..] => {
+                let opcode = u16::from(*low & 1) << 7 | u16::from(*op_lo >> 2);
+                let explicit_lod = match opcode {
+                    39 => false,
+                    36 => true,
+                    _ => return Err(error(offset, "unsupported MIMG opcode")),
+                };
+                // Bounded scope (guide Table 41, printed page 69): non-NSA, DIM
+                // 2D, DLC/UNORM/GLC/DA/R128/TFE/LWE clear, a nonzero DMASK, and
+                // clear reserved/A16/D16 bits.
+                if *low & 0xfe != 0x08
+                    || *flags & 0xf0 != 0
+                    || *op_lo & 0x3 != 0
+                    || *ssamp & 0xfc != 0
+                {
+                    return Err(error(offset, "unsupported MIMG encoding or data mask"));
+                }
+                let dmask = *flags & 0xf;
+                let resource = (*srsrc & 0x1f) * 4;
+                let sampler = ((*srsrc >> 5) | ((*ssamp & 0x3) << 3)) * 4;
+                if resource > 98 || sampler > 102 {
+                    return Err(error(offset, "unsupported MIMG descriptor registers"));
+                }
+                let components = u16::from(dmask.count_ones() as u8);
+                let address = if explicit_lod { 3 } else { 2 };
+                if u16::from(*vdata) + components - 1 > 255 || u16::from(*vaddr) + address - 1 > 255
+                {
+                    return Err(error(offset, "unsupported MIMG register span"));
+                }
+                (
+                    Op::ImageSample {
+                        dst: *vdata,
+                        coord: *vaddr,
+                        resource,
+                        sampler,
+                        dmask,
+                        explicit_lod,
+                    },
+                    8,
+                )
             }
             _ => {
                 return Err(error(
@@ -2110,6 +2236,79 @@ fn execute_wave(
                     })
                     .collect();
             }
+            Op::ImageSample {
+                dst,
+                coord,
+                resource,
+                sampler,
+                dmask,
+                explicit_lod,
+            } => {
+                // The T# and S# descriptors are wave-uniform: read and validate
+                // them once, then sample for each active lane.
+                let resource_words = read_descriptor_words(&scalars, resource, 8, offset)?;
+                let sampler_words = read_descriptor_words(&scalars, sampler, 4, offset)?;
+                let (desc, base) = texture_sampling::parse_resource_descriptor(
+                    resource_words[..8].try_into().unwrap(),
+                )
+                .map_err(|detail| error(offset, descriptor_detail(detail)))?;
+                texture_sampling::validate_sampler_descriptor(
+                    sampler_words.try_into().unwrap(),
+                    desc.mips - 1,
+                )
+                .map_err(|detail| error(offset, descriptor_detail(detail)))?;
+                let bytes = buffer
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect::<Vec<u8>>();
+                let required = desc
+                    .required_size()
+                    .map_err(|detail| error(offset, descriptor_detail(detail)))?;
+                let data = bytes
+                    .get(base..base.saturating_add(required))
+                    .ok_or_else(|| error(offset, "texture data outside the input buffer"))?;
+
+                // Active lanes sample and write one VGPR per DMASK component.
+                // All sources are read before any destination is written, so a
+                // destination may overlap a coordinate register.
+                let mut writes: Vec<(usize, u8, u32)> = Vec::new();
+                for lane in (0..lanes).filter(|&lane| executes(lane)) {
+                    let u = read(lane, coord)?;
+                    let v = read(lane, coord + 1)?;
+                    let mip = if explicit_lod {
+                        texture_sampling::lod_to_mip(read(lane, coord + 2)?, &desc)
+                            .map_err(|detail| error(offset, descriptor_detail(detail)))?
+                    } else {
+                        0
+                    };
+                    let texel = texture_sampling::sample_rgba8_2d(
+                        data,
+                        &desc,
+                        mip,
+                        f32::from_bits(u),
+                        f32::from_bits(v),
+                    )
+                    .map_err(|detail| error(offset, descriptor_detail(detail)))?;
+                    let mut slot = dst;
+                    for component in 0..4u8 {
+                        if dmask & (1 << component) == 0 {
+                            continue;
+                        }
+                        writes.push((
+                            lane,
+                            slot,
+                            (f32::from(texel[usize::from(component)]) / 255.0).to_bits(),
+                        ));
+                        slot += 1;
+                    }
+                }
+                for (lane, dst, value) in writes {
+                    if dst == 0 || pending_read == Some(dst) {
+                        return Err(error(offset, "write to immutable or pending VGPR"));
+                    }
+                    registers[lane][usize::from(dst)] = Some(value);
+                }
+            }
         }
         for (lane, result) in results.into_iter().enumerate() {
             if let Some((dst, value)) = result {
@@ -2348,6 +2547,278 @@ mod tests {
                     op: Op::End
                 },
             ])
+        );
+    }
+
+    const IMAGE_SAMPLE_LZ_FIXTURE: &[u8] =
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask1.bin");
+    const IMAGE_SAMPLE_L_LOD1_FIXTURE: &[u8] =
+        include_bytes!("../../../fixtures/rdna2/image-sample-l-lod1.bin");
+
+    /// The 20 per-lane (u, v) cases. Every value has a zero low 16-bit half so
+    /// the fixture can pack both into one word (see `packed`).
+    const IMAGE_SAMPLE_CASES: [(f32, f32); 20] = [
+        (0.125, 0.125), // mip 0 texel (0, 0) centre
+        (0.375, 0.125), // texel (1, 0)
+        (0.625, 0.125), // texel (2, 0)
+        (0.875, 0.125), // texel (3, 0)
+        (0.125, 0.375), // texel (0, 1)
+        (0.125, 0.625), // texel (0, 2)
+        (0.125, 0.875), // texel (0, 3)
+        (0.875, 0.875), // texel (3, 3)
+        (0.25, 0.25),   // exactly on the edge: 0.25 * 4 = 1.0
+        (0.5, 0.5),     // exactly on the edge: 0.5 * 4 = 2.0
+        (-0.5, 0.125),  // u < 0 clamps to x = 0
+        (1.5, 0.125),   // u > 1 clamps to x = 3
+        (0.125, 1.5),   // v > 1 clamps to y = 3
+        (-0.5, -0.5),   // both clamp to the first texel
+        (1.5, 1.5),     // both clamp to the last texel
+        (0.0, 0.0),     // first texel
+        (1.0, 1.0),     // last texel
+        (0.75, 0.25),   // texel (3, 1)
+        (0.25, 0.75),   // texel (1, 3)
+        (0.5, 0.25),    // texel (2, 1)
+    ];
+
+    fn packed(u: f32, v: f32) -> u32 {
+        (u.to_bits() >> 16) | (v.to_bits() & 0xffff_0000)
+    }
+
+    /// Texel byte `(level << 6) | (y << 4) | (x << 2) | channel` makes every
+    /// channel of every texel distinct.
+    fn texel_byte(level: u32, x: usize, y: usize, channel: usize) -> u8 {
+        ((level << 6) | ((y as u32) << 4) | ((x as u32) << 2) | channel as u32) as u8
+    }
+
+    /// The 4x4 mip 0 followed by the 2x2 mip 1, packed as little-endian words.
+    fn image_sample_texels() -> Vec<u32> {
+        let mut bytes = Vec::new();
+        for level in 0..2u32 {
+            let extent = 4usize >> level;
+            for y in 0..extent {
+                for x in 0..extent {
+                    for channel in 0..4 {
+                        bytes.push(texel_byte(level, x, y, channel));
+                    }
+                }
+            }
+        }
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect()
+    }
+
+    /// The synthetic input: a 4x4 RGBA8 unorm T# with two levels (base field 1
+    /// = byte offset 0x100), an S# with point mip filtering and a 1.0 maximum
+    /// LOD, the 20 packed coordinate cases at words 12..32, and the texels at
+    /// word 64.
+    fn image_sample_input() -> Vec<u32> {
+        let mut input = vec![
+            0x0000_0001, // T# base-address field 1 -> byte offset 0x100
+            0xC380_0000, // min lod 0, format 56, width-1 3 high bits
+            0x8000_C000, // width-1 3 low bits, height-1 3, resource level 1
+            0x9001_0fac, // dst_sel RGBA, base 0, last 1, type 9 (2D)
+            0,
+            0,
+            0,
+            0,           // 256-bit extension words (zero for a 2D texture)
+            0x0000_0092, // S# clamp_x/y/z = ClampLastTexel (2)
+            0x0010_0000, // S# max lod 0x100 = 1.0 (4.8 fixed point)
+            0x0400_0000, // S# mip filter point (1) at 91:90
+            0,
+        ];
+        input.extend(IMAGE_SAMPLE_CASES.map(|(u, v)| packed(u, v)));
+        input.resize(64, 0);
+        input.extend(image_sample_texels());
+        input
+    }
+
+    fn texel_index(u: f32, v: f32, mip: u32) -> (usize, usize) {
+        let extent = 4usize >> mip;
+        let x = ((u.clamp(0.0, 1.0) * extent as f32).floor() as usize).min(extent - 1);
+        let y = ((v.clamp(0.0, 1.0) * extent as f32).floor() as usize).min(extent - 1);
+        (x, y)
+    }
+
+    /// One output word per dispatch index. Every lane loads its packed coordinate
+    /// word `input[lane]`, splits it into u (low half shifted into the float's
+    /// high half) and v (high half), and samples `component` of the mip.
+    fn image_sample_expected(input: &[u32], mip: u32, component: usize) -> Vec<u32> {
+        input
+            .iter()
+            .map(|&word| {
+                let u = f32::from_bits((word & 0xffff) << 16);
+                let v = f32::from_bits(word & 0xffff_0000);
+                let (x, y) = texel_index(u, v, mip);
+                (f32::from(texel_byte(mip, x, y, component)) / 255.0).to_bits()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decodes_and_executes_image_sample_lz() {
+        let program = decode(IMAGE_SAMPLE_LZ_FIXTURE).expect("decode image-sample fixture");
+        assert!(program.iter().any(|instruction| matches!(
+            instruction.op,
+            Op::ImageSample {
+                explicit_lod: false,
+                ..
+            }
+        )));
+        let input = image_sample_input();
+        let output = execute(IMAGE_SAMPLE_LZ_FIXTURE, &input).expect("execute");
+        assert_eq!(output, image_sample_expected(&input, 0, 0));
+        // The selected red channel differs across the grid; the test would not
+        // pass with a single texel or a dropped coordinate.
+        assert!(output.windows(2).any(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn decodes_and_executes_image_sample_l_at_lod_one() {
+        let program = decode(IMAGE_SAMPLE_L_LOD1_FIXTURE).expect("decode image-sample_l fixture");
+        assert!(program.iter().any(|instruction| matches!(
+            instruction.op,
+            Op::ImageSample {
+                explicit_lod: true,
+                ..
+            }
+        )));
+        let input = image_sample_input();
+        let output = execute(IMAGE_SAMPLE_L_LOD1_FIXTURE, &input).expect("execute");
+        assert_eq!(output, image_sample_expected(&input, 1, 0));
+        assert_ne!(output, image_sample_expected(&input, 0, 0));
+    }
+
+    /// The image-sample program with a partial EXEC mask: the masked lanes
+    /// sample and the rest keep the value their destination already held.
+    /// The words match the assembled fixture, with `s_mov_b32 exec_lo, mask`
+    /// between the destination initialisation and the sample.
+    fn image_sample_program(mask: u32) -> Vec<u8> {
+        let mut words: Vec<u32> = (0..12).map(|index| 0xbe88_0380 + (index << 16)).collect();
+        words.extend([
+            0xf428_0200,
+            0xfa00_0000, // s_buffer_load_dwordx4 s[8:11], s[0:3], 0x0
+            0xf428_0300,
+            0xfa00_0010, // s_buffer_load_dwordx4 s[12:15], s[0:3], 0x10
+            0xf428_0400,
+            0xfa00_0020, // s_buffer_load_dwordx4 s[16:19], s[0:3], 0x20
+            0xbf8c_c07f, // s_waitcnt lgkmcnt(0)
+            0xe030_2000,
+            0x8000_0100, // buffer_load_dword v1, v0, s[0:3], 0 idxen
+            0xbf8c_3f70, // s_waitcnt vmcnt(0)
+            0x7e16_0290, // v_mov_b32_e32 v11, 16
+            0x3404_030b, // v_lshlrev_b32_e32 v2, v11, v1
+            0x7e14_02ff,
+            0xffff_0000,        // v_mov_b32_e32 v10, 0xffff0000
+            0x3606_030a,        // v_and_b32_e32 v3, v10, v1
+            0x7e0a_0290,        // v_mov_b32_e32 v5, 16: the prior destination value
+            0xbefe_0380 | mask, // s_mov_b32 exec_lo, mask
+            0xf09c_0108,
+            0x0082_0502, // image_sample_lz v5, v[2:3], s[8:15], s[16:19] dmask:0x1
+            0xbefe_03c1, // s_mov_b32 exec_lo, -1: the store needs a full wave
+            0xe070_2000,
+            0x8001_0500, // buffer_store_dword v5, v0, s[4:7], 0 idxen
+            0xbbfd_0000, // s_waitcnt_vscnt null, 0
+            0xbf81_0000, // s_endpgm
+        ]);
+        words.iter().flat_map(|word| word.to_le_bytes()).collect()
+    }
+
+    /// An inactive lane keeps the value its destination already held: the
+    /// sample writes only the lanes the EXEC mask selects.
+    #[test]
+    fn image_sample_keeps_the_prior_destination_in_inactive_lanes() {
+        let input = image_sample_input();
+        let sampled = image_sample_expected(&input, 0, 0);
+        // Lanes 0 and 2 of every wave sample; the rest keep the sixteen the
+        // destination was initialised with.
+        let expected: Vec<u32> = sampled
+            .iter()
+            .enumerate()
+            .map(|(index, value)| match index % 32 {
+                0 | 2 => *value,
+                _ => 16,
+            })
+            .collect();
+        let output = execute(&image_sample_program(0b101), &input).expect("execute");
+        assert_eq!(output, expected);
+        // An active lane holds the sample and an inactive one its prior value.
+        assert_eq!(output[0], sampled[0]);
+        assert_eq!(output[1], 16);
+        assert_eq!(output[3], 16);
+    }
+
+    #[test]
+    fn image_sample_lz_rejects_invalid_descriptors() {
+        let rejects = |input: Vec<u32>, detail: &str| {
+            assert_eq!(
+                execute(IMAGE_SAMPLE_LZ_FIXTURE, &input).unwrap_err().detail,
+                detail
+            );
+        };
+        // A nonzero 256-bit extension word is refused.
+        let mut input = image_sample_input();
+        input[4] = 1;
+        rejects(input, "nonzero 256-bit resource extension words");
+        // A sampler that is not point-and-clamp is refused.
+        let mut input = image_sample_input();
+        input[8] = 0; // clamp_x = Wrap (0), not ClampLastTexel (2)
+        rejects(
+            input,
+            "sampler addressing is not clamp-to-last-texel with normalized coordinates",
+        );
+        // A resource of the wrong type is refused.
+        let mut input = image_sample_input();
+        input[3] = 0x8000_0fac; // type 8 (1D), not 9 (2D)
+        rejects(input, "resource descriptor is not a 2D image");
+        // Reserved width and height bits are refused.
+        let mut input = image_sample_input();
+        input[2] |= 1 << 12;
+        rejects(input, "resource width or height sets a reserved high bit");
+        // A swizzled resource is refused.
+        let mut input = image_sample_input();
+        input[3] |= 1 << 20;
+        rejects(input, "resource swizzle mode is not linear");
+        // A nonzero resource minimum LOD is refused.
+        let mut input = image_sample_input();
+        input[1] |= 1 << 8;
+        rejects(input, "resource minimum LOD is nonzero");
+        // A last level below the base level is refused.
+        let mut input = image_sample_input();
+        input[3] = (input[3] & !(0xf << 16)) | (1 << 12);
+        rejects(input, "resource last level is below base level");
+        // A mip filter of none is refused.
+        let mut input = image_sample_input();
+        input[10] = 0;
+        rejects(input, "sampler mip filtering is not point");
+        // A nonzero z filter, a mismatched clamp z, a LOD bias, a nonzero
+        // minimum LOD and a maximum LOD below the last level are all refused.
+        let mut input = image_sample_input();
+        input[10] |= 1 << 24;
+        rejects(input, "sampler filtering is not point");
+        let mut input = image_sample_input();
+        input[8] = 0x12;
+        rejects(
+            input,
+            "sampler addressing is not clamp-to-last-texel with normalized coordinates",
+        );
+        let mut input = image_sample_input();
+        input[10] |= 1;
+        rejects(input, "sampler sets bits the validator does not support");
+        let mut input = image_sample_input();
+        input[9] = 1;
+        rejects(
+            input,
+            "sampler LOD range does not cover the resource mip levels",
+        );
+        let mut input = image_sample_input();
+        input[9] = 0;
+        rejects(
+            input,
+            "sampler LOD range does not cover the resource mip levels",
         );
     }
 }

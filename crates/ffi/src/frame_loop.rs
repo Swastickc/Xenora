@@ -11,6 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 
 use xenora_loader::graphics::{FramePresentation, GraphicsBackendId, GraphicsError};
+use xenora_loader::services::XInputControllerState;
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
 use xenora_loader::{
     ExitReason, ImportRegistry, MockClock, ServicesState, register_standard_services,
@@ -79,6 +80,42 @@ impl ControllerInput {
     }
 }
 
+/// A full controller snapshot in XInput units. Unlike the legacy fixture input
+/// above, triggers already use the public XInput range 0 through 255 and both
+/// thumbsticks are represented. `connected` must be 0 or 1 and reserved bytes
+/// must be zero.
+#[derive(Default, Copy, Clone)]
+#[repr(C)]
+pub struct XInputSnapshot {
+    pub buttons: u16,
+    pub left_trigger: u8,
+    pub right_trigger: u8,
+    pub left_x: i16,
+    pub left_y: i16,
+    pub right_x: i16,
+    pub right_y: i16,
+    pub connected: u8,
+    pub reserved: [u8; 3],
+}
+
+impl XInputSnapshot {
+    fn controller_state(self) -> Option<XInputControllerState> {
+        (self.connected != 0).then_some(XInputControllerState {
+            buttons: self.buttons,
+            left_trigger: self.left_trigger,
+            right_trigger: self.right_trigger,
+            left_x: self.left_x,
+            left_y: self.left_y,
+            right_x: self.right_x,
+            right_y: self.right_y,
+        })
+    }
+
+    pub(crate) fn valid_wire_shape(self) -> bool {
+        self.connected <= 1 && self.reserved == [0; 3]
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u64)]
 enum FrameCommand {
@@ -108,11 +145,22 @@ struct State {
     latest: Option<(u32, Vec<u8>)>,
 }
 
-#[derive(Default)]
 pub struct FrameLoop {
     state: Mutex<State>,
     wake: Condvar,
     thread: Mutex<Option<JoinHandle<()>>>,
+    services: Arc<ServicesState>,
+}
+
+impl Default for FrameLoop {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            wake: Condvar::new(),
+            thread: Mutex::default(),
+            services: Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
+        }
+    }
 }
 
 pub struct Snapshot {
@@ -184,6 +232,16 @@ impl FrameLoop {
         state.input = input;
     }
 
+    /// Install or remove one explicit XInput controller snapshot in the
+    /// session's runtime services. Returns false for a malformed wire shape or
+    /// a user index outside the documented XInput range.
+    pub fn send_xinput(&self, user_index: u32, input: XInputSnapshot) -> bool {
+        input.valid_wire_shape()
+            && self
+                .services
+                .set_xinput_controller(user_index, input.controller_state())
+    }
+
     pub fn queue_input(&self, input: InputState) {
         let mut state = self.lock();
         state.input_queue.push_back(input);
@@ -235,7 +293,7 @@ impl FrameLoop {
         .map_err(|e| format!("shader translation: {e}"))?
         .msl;
         let gpu = shared_gpu()?;
-        let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+        let services = Arc::clone(&self.services);
         let native_draws = Arc::new(AtomicU32::new(0));
         let draws = Arc::clone(&native_draws);
         services
@@ -256,15 +314,15 @@ impl FrameLoop {
                 draws.fetch_add(1, Ordering::Relaxed);
                 Ok(pixels)
             });
-        self.execute_guest(&services, GraphicsBackendId::MetalNative, &native_draws)
+        self.execute_guest(GraphicsBackendId::MetalNative, &native_draws)
     }
 
     fn execute_guest(
         self: &Arc<Self>,
-        services: &Arc<ServicesState>,
         backend: GraphicsBackendId,
         native_draws: &Arc<AtomicU32>,
     ) -> Result<Arc<[u8]>, String> {
+        let services = &self.services;
         let last_presentation = services
             .graphics
             .lock()
@@ -532,10 +590,8 @@ fn embedded_guest_renders_standard_and_queued_interactive_frames() {
                 ..InputState::default()
             });
         }
-        let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
         let journal = session
             .execute_guest(
-                &services,
                 GraphicsBackendId::SoftwareReference,
                 &Arc::new(AtomicU32::new(0)),
             )
@@ -566,7 +622,7 @@ fn embedded_guest_renders_standard_and_queued_interactive_frames() {
                 check_pixels(column as usize, pixels);
             }
         }
-        assert_eq!(services.open_handle_count(), 0);
+        assert_eq!(session.services.open_handle_count(), 0);
     }
 }
 
@@ -576,10 +632,8 @@ fn guest_journal_crosses_readback_chunk_boundary_and_isolates_sessions() {
     let run = |limit| {
         let session = Arc::new(FrameLoop::default());
         session.lock().limit = limit;
-        let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
         let journal = session
             .execute_guest(
-                &services,
                 GraphicsBackendId::SoftwareReference,
                 &Arc::new(AtomicU32::new(0)),
             )
@@ -616,12 +670,9 @@ fn embedded_guest_releases_resources_on_stop_before_first_draw() {
         state.status = PAUSED;
     }
     session.queue_input(InputState::default());
-    let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
     let worker_session = Arc::clone(&session);
-    let worker_services = Arc::clone(&services);
     let worker = std::thread::spawn(move || {
         worker_session.execute_guest(
-            &worker_services,
             GraphicsBackendId::SoftwareReference,
             &Arc::new(AtomicU32::new(0)),
         )
@@ -635,8 +686,8 @@ fn embedded_guest_releases_resources_on_stop_before_first_draw() {
         std::thread::sleep(Duration::from_millis(1));
     }
     let reached_gate = session.lock().input_queue.is_empty();
-    let open_handles = services.open_handle_count();
-    let file = services.file_contents(FRAME_JOURNAL);
+    let open_handles = session.services.open_handle_count();
+    let file = session.services.file_contents(FRAME_JOURNAL);
     let exposed = session.verified_journal();
     session.stop();
     let journal = worker.join().unwrap().unwrap();
@@ -650,7 +701,7 @@ fn embedded_guest_releases_resources_on_stop_before_first_draw() {
     assert_eq!(session.snapshot().completed, 0);
     assert!(session.snapshot().latest.is_none());
     assert_eq!(session.verified_journal().as_deref(), Some(&[][..]));
-    assert_eq!(services.open_handle_count(), 0);
+    assert_eq!(session.services.open_handle_count(), 0);
 }
 
 #[cfg(test)]
@@ -789,6 +840,68 @@ fn publication_requires_fresh_presentation_and_actual_native_draw() {
     assert!(matches!(publish(&frame, &readback, 1), Ok(1)));
     assert!(publish(&frame, &readback, 1).is_err());
     assert_eq!(session.snapshot().completed, 1);
+}
+
+#[cfg(test)]
+#[test]
+fn xinput_snapshots_reach_the_runtime_state_service() {
+    let session = FrameLoop::default();
+    let snapshot = XInputSnapshot {
+        buttons: 0x9011,
+        left_trigger: 17,
+        right_trigger: 240,
+        left_x: -32768,
+        left_y: 32767,
+        right_x: -1234,
+        right_y: 4321,
+        connected: 1,
+        reserved: [0; 3],
+    };
+    assert_eq!(std::mem::size_of::<XInputSnapshot>(), 16);
+    assert!(session.send_xinput(2, snapshot));
+
+    let mut registry = ImportRegistry::new();
+    register_standard_services(&mut registry, Arc::clone(&session.services));
+    let mut memory = xenora_loader::GuestMemory::new();
+    memory
+        .map_region(0x1000, 0x1000, xenora_loader::MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let mut cpu = xenora_loader::CpuState::default();
+    cpu.set(xenora_loader::Register::Rcx, 2);
+    cpu.set(xenora_loader::Register::Rdx, 0x1200);
+    let descriptor = registry
+        .resolve(
+            "xinput1_4.dll",
+            &xenora_loader::import_table::ImportName::Name("XInputGetState".to_owned()),
+        )
+        .unwrap();
+    let result =
+        (descriptor.handler)(&xenora_loader::Win64Args::new(&cpu), &mut cpu, &mut memory).unwrap();
+    assert_eq!(result, 0);
+    let mut output = [0; 16];
+    memory.read_bytes(0x1200, &mut output).unwrap();
+    assert_eq!(
+        output,
+        [
+            1, 0, 0, 0, 0x11, 0x90, 17, 240, 0, 0x80, 0xff, 0x7f, 0x2e, 0xfb, 0xe1, 0x10,
+        ]
+    );
+
+    assert!(!session.send_xinput(4, snapshot));
+    assert!(!session.send_xinput(
+        0,
+        XInputSnapshot {
+            connected: 2,
+            ..snapshot
+        },
+    ));
+    assert!(!session.send_xinput(
+        0,
+        XInputSnapshot {
+            reserved: [1, 0, 0],
+            ..snapshot
+        },
+    ));
 }
 
 #[cfg(test)]

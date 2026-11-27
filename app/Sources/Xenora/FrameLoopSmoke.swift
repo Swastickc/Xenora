@@ -14,7 +14,7 @@ private final class StopGate: Sendable {
 /// Scripted failure paths. This never opens a Metal device.
 private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     enum Operation: String {
-        case create, destroy, standard, interactive, sendInput, pause, resume, stop, status, journalSize
+        case create, destroy, standard, interactive, sendInput, sendXInput, pause, resume, stop, status, journalSize
     }
 
     // Deinitialization can call the API from outside the main actor.
@@ -24,6 +24,7 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var codes: [Operation: Int32] = [:]
     private var calls: [Operation] = []
     private var sentInputs: [(handle: xenora_session, input: xenora_controller_input)] = []
+    private var sentXInputs: [(handle: xenora_session, userIndex: UInt32, input: xenora_xinput_state)] = []
     private var invalidCalls = 0
     private var nextStopGate: StopGate?
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
@@ -47,6 +48,10 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     }
 
     var inputs: [xenora_controller_input] { lock.withLock { sentInputs.map(\.input) } }
+
+    var xinputs: [(userIndex: UInt32, input: xenora_xinput_state)] {
+        lock.withLock { sentXInputs.map { ($0.userIndex, $0.input) } }
+    }
 
     var lastInputHandle: xenora_session? { lock.withLock { sentInputs.last?.handle } }
 
@@ -89,6 +94,13 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
         lock.withLock {
             sentInputs.append((handle, input))
             return call(.sendInput, handle)
+        }
+    }
+
+    func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32 {
+        lock.withLock {
+            sentXInputs.append((handle, userIndex, input))
+            return call(.sendXInput, handle)
         }
     }
 
@@ -405,7 +417,14 @@ private func checkControllerComposition() -> [String] {
     let controller = DetectedController(
         identity: ObjectIdentifier(api), name: "Held controller", supportsHaptics: false,
         snapshot: ControllerSnapshot(
-            buttons: left | action, x: 1, y: -1, leftTrigger: 0.25, rightTrigger: 0.75
+            buttons: left | action, x: 1, y: -1, leftTrigger: 0.25, rightTrigger: 0.75,
+            xinput: XInputSnapshotValues(
+                buttons: XInputButtonBits.dpadLeft | XInputButtonBits.a,
+                leftTrigger: 64,
+                rightTrigger: 191,
+                leftX: 32767,
+                leftY: -32768
+            )
         )
     )
     let model = FrameLoopModel(api: api, readController: { controller })
@@ -427,6 +446,22 @@ private func checkControllerComposition() -> [String] {
             && input.left_trigger == 16384 && input.right_trigger == 49151
     }) {
         failures.append("screen direction or release replaced the connected controller's analog input")
+    }
+    let xinputs = api.xinputs
+    let xbuttons = xinputs.map(\.input.buttons)
+    let expectedXButtons = [
+        XInputButtonBits.dpadLeft | XInputButtonBits.a,
+        XInputButtonBits.dpadRight | XInputButtonBits.a,
+        XInputButtonBits.dpadLeft | XInputButtonBits.a,
+    ]
+    if xbuttons != expectedXButtons {
+        failures.append("controller composition sent XInput buttons \(xbuttons), expected \(expectedXButtons)")
+    }
+    if !xinputs.allSatisfy({ item in
+        item.userIndex == 0 && item.input.connected == 1 && item.input.left_x == 32767
+            && item.input.left_y == -32768 && item.input.left_trigger == 64 && item.input.right_trigger == 191
+    }) {
+        failures.append("screen direction or release replaced the connected controller's XInput analog state")
     }
     return failures
 }

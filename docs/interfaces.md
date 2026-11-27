@@ -452,11 +452,33 @@ any mutation; Microsoft does not document that pointer-validation case, so
 this is Xenora's memory-safety boundary rather than Windows comparison
 evidence.
 
-Vibration, capabilities, keystrokes, headset and battery interfaces,
-physical-controller discovery/hotplugging, FFI/Swift wiring and native host
-input delivery remain unsupported. The explicit snapshot path is ABI and
-serialization evidence only; it does not prove physical gamepad compatibility
-and was not compared with Windows or Xbox hardware.
+The native application interface carries one explicit host snapshot through
+`xenora_session_send_xinput_state`: a 16-byte wire structure with public XInput
+button bits, triggers already scaled to 0 through 255, both thumbstick axes, a
+connected flag constrained to 0 or 1 and zeroed reserved bytes. The interface
+accepts user slots zero through three and validates session state, null
+pointers, indexes, the connected flag and reserved bytes. The frame-loop
+session owns its `ServicesState`, so a snapshot accepted there is what a guest
+later reads through `XInputGetState`. The legacy fixture input structure stays
+separate: it is not reinterpreted as XInput and its mouse fields are not
+overloaded as stick axes.
+
+The macOS app's existing GameController polling maps extended and micro
+gamepads into those XInput units. Menu and options map to start and back where
+available; the documented face, shoulder, thumbstick-button and directional-pad
+bits map directly. Thumbsticks are scaled without applying the legacy fixture
+deadzone, with -1 reaching -32768 and +1 reaching 32767. Triggers scale to 0
+through 255. The app currently submits the selected controller as user slot
+zero only. Its on-screen directional control can act as a virtual host input
+and replace only the horizontal directional bits, mirroring the legacy fixture
+control.
+
+Vibration/haptics output, capabilities, keystrokes, headset and battery
+interfaces, physical-controller hotplug policy beyond the app's existing
+polling, multiplayer assignment, arbitrary game execution and real-game
+compatibility remain unsupported. This chain proves conversion and delivery
+into runtime services; it does not prove physical Xbox controller behavior and
+was not compared with Windows or Xbox hardware.
 
 ### Guest heaps
 

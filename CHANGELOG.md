@@ -84,6 +84,8 @@ exact revision and known limitations.
 ### Fixed
 
 - QA benchmark statistics now reject NaN and infinite samples instead of producing meaningless ordering statistics or non-standard JSON evidence (#827).
+
+- Runtime import coverage extraction now removes only the items a `#[cfg(test)]` attribute gates rather than truncating each source file at the first one (#845). The item shape is found structurally over a comment- and string-blanked copy of the source - brace-matched bodies and semicolon declarations at delimiter depth zero, so the semicolon of an array type such as `[u8; 1]` does not end the span - so production registrations after a test module or a test-only helper stay visible. Measured against the loader sources: 54 genuine registrations the truncated scan silently dropped are reported again, including most of the `ws2_32.dll` winsock surface, and nothing the old scan reported is lost. Regression tests cover production registrations after both forms of gated item and the nested-semicolon case.
 - QA verification evidence is now bound to the selected checkout: profile suites run with that repository as their working directory, `qa verify` rejects a revision other than the checkout HEAD, and `--check-stale` requires matching profile and revision metadata and passing suites while reporting staleness separately (#277).
 - QA environment diagnostics now measure the current branch against its upstream instead of hard-coding a synchronized result, and report an unavailable upstream honestly (#832).
 - Refreshed the generated runtime inventory to match the registered services, restoring the inventory check on the current tree (#794).

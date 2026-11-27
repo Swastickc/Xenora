@@ -288,6 +288,59 @@ mod module_memory {
     }
 
     #[test]
+    fn successful_batch_retains_holes_against_later_unrelated_mappings() {
+        let (bytes, pe) = image(&ImageSpec::dll(0, FIRST_BASE, 0x11, 0x51));
+        let layout = plan(&[&pe], &[]).unwrap();
+        let images = [explicit(&bytes, &pe)];
+        let mut memory = GuestMemory::new();
+        let reservations = map_module_batch(&images, &layout, &mut memory).unwrap();
+        let hole = FIRST_BASE + 0x1200;
+        assert!(hole < reservations[0].end);
+        assert_eq!(
+            memory.read_u8(hole),
+            Err(MemoryError::UnmappedAddress(hole))
+        );
+        assert_eq!(
+            memory.map_region(hole, 0x100, MemoryPermissions::READ_WRITE),
+            Err(MemoryError::OverlappingRegion {
+                base: hole,
+                size: 0x100,
+            })
+        );
+        assert_eq!(
+            memory.read_u8(hole),
+            Err(MemoryError::UnmappedAddress(hole))
+        );
+        assert_image(&mut memory, FIRST_BASE, 0x11, 0x51);
+    }
+
+    #[test]
+    fn pre_existing_memory_in_an_image_hole_is_rejected_before_mapping() {
+        let (bytes, pe) = image(&ImageSpec::dll(0, FIRST_BASE, 0x11, 0x51));
+        let layout = plan(&[&pe], &[]).unwrap();
+        let images = [explicit(&bytes, &pe)];
+        let mut memory = GuestMemory::new();
+        let hole = FIRST_BASE + 0x1800;
+        memory
+            .map_region_with_data(hole, 0x100, MemoryPermissions::READ_WRITE, &[0x99; 0x100])
+            .unwrap();
+
+        assert_eq!(
+            map_module_batch(&images, &layout, &mut memory),
+            Err(ModuleMemoryError::PlacementConflict {
+                image_index: 0,
+                placement: AddressInterval::new(FIRST_BASE, FIRST_BASE + u64::from(SIZE_OF_IMAGE)),
+                existing: AddressInterval::new(hole, hole + 0x100),
+            })
+        );
+        assert_eq!(memory.read_u8(hole), Ok(0x99));
+        assert_eq!(
+            memory.read_u8(FIRST_BASE),
+            Err(MemoryError::UnmappedAddress(FIRST_BASE))
+        );
+    }
+
+    #[test]
     fn fallback_base_is_preserved_in_reservation_metadata() {
         let (bytes, pe) = image(&ImageSpec::dll(TEXT_RVA, FIRST_BASE, 0x33, 0x63));
         let occupied = [AddressInterval::new(FIRST_BASE, FIRST_BASE + 0x4000)];
@@ -426,7 +479,7 @@ mod module_memory {
     }
 
     #[test]
-    fn insertion_failure_after_partial_mapping_rolls_back_the_whole_batch() {
+    fn pre_existing_memory_in_a_section_is_rejected_before_mapping() {
         let (first_bytes, first_pe) = image(&ImageSpec::dll(0, FIRST_BASE, 0x11, 0x51));
         let (second_bytes, second_pe) = image(&ImageSpec::dll(TEXT_RVA, SECOND_BASE, 0x22, 0x62));
         let layout = plan(&[&first_pe, &second_pe], &[]).unwrap();
@@ -442,12 +495,13 @@ mod module_memory {
 
         assert_eq!(
             map_module_batch(&images, &layout, &mut memory),
-            Err(ModuleMemoryError::MappingFailed {
+            Err(ModuleMemoryError::PlacementConflict {
                 image_index: 1,
-                source: PeError::SectionMappingError(MemoryError::OverlappingRegion {
-                    base: blocker,
-                    size: SECTION_LEN as u64,
-                }),
+                placement: AddressInterval::new(
+                    SECOND_BASE,
+                    SECOND_BASE + u64::from(SIZE_OF_IMAGE)
+                ),
+                existing: AddressInterval::new(blocker, blocker + 0x80),
             })
         );
         assert_scratch_and_absent_images(&mut memory, &[FIRST_BASE]);
@@ -461,8 +515,8 @@ mod module_memory {
         }
 
         // The pre-existing blocker is part of the exact prior state: its bytes
-        // and write permission survive even though the second image's headers
-        // and .text had been inserted before its .data collision was found.
+        // and write permission survive because the conflict is found before
+        // either image is inserted.
         let mut retained = [0; 0x80];
         memory.read_bytes(blocker, &mut retained).unwrap();
         assert_eq!(retained, [0x55; 0x80]);
@@ -563,7 +617,7 @@ mod module_memory {
     }
 
     #[test]
-    fn hole_relocation_failure_rolls_back_the_batch_without_reusing_the_hole() {
+    fn hole_relocation_failure_rolls_back_the_batch_without_committing_the_hole() {
         let first_spec =
             ImageSpec::dll(0, FIRST_BASE, 0x11, 0x51).relocated(standard_relocation_table());
         let hole_target_table = relocation_block(TEXT_RVA, &[0xA800, 0x0000]);
@@ -585,10 +639,6 @@ mod module_memory {
             .read_u64_bypass(first_base + u64::from(DATA_RVA))
             .unwrap();
         let hole = second_base + 0x1800;
-        memory
-            .map_region(hole, 0x100, MemoryPermissions::READ_WRITE)
-            .expect("unrelated mapping can reuse the image hole");
-        memory.write_u64_bypass(hole, 0x55).unwrap();
 
         let error = relocate_module_batch(&images, &reservations, &mut memory).unwrap_err();
 
@@ -610,7 +660,10 @@ mod module_memory {
             memory.read_u64_bypass(first_base + IMAGE_BASE_FIELD_OFFSET),
             Ok(FIRST_BASE)
         );
-        assert_eq!(memory.read_u64_bypass(hole), Ok(0x55));
+        assert_eq!(
+            memory.read_u8(hole),
+            Err(MemoryError::UnmappedAddress(hole))
+        );
         assert_eq!(memory.read_u8(SCRATCH), Ok(0x77));
     }
 

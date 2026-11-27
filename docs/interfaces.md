@@ -143,14 +143,20 @@ static inspection of a file is unchanged.
 
 The separate explicit-module loader infrastructure can plan and map a batch of
 caller-supplied in-memory PE32+ images without host file search. Batch mapping
-returns logical reservations rather than ownership tokens. Batch relocation
+returns half-open reservation records and also retains those complete image
+spans in `GuestMemory` as lightweight ownership records. Only headers and
+sections are committed; holes remain unmapped. A batch is rejected before
+mutation when memory already exists anywhere in a planned span, and later
+unrelated mappings or dynamic allocations cannot reuse those holes. The records
+do not implement unloading,
+per-section ownership or host operating-system guard pages. Batch relocation
 requires exactly one reservation per input image and validates its index,
 64 KiB-aligned base, `SizeOfImage` extent, entry and preferred-base metadata
 and overlap shape before mutation. It then applies the existing DIR64
 relocation engine at each reserved base and writes each mapped optional-header
 `ImageBase` field. A DIR64 target must be continuously backed by committed
-image headers or sections; a target in a logical `SizeOfImage` hole is refused
-even when unrelated memory was later mapped there. Any validation or
+image headers or sections; a target in a `SizeOfImage` hole is refused even
+if inconsistent memory state contains unrelated bytes there. Any validation or
 relocation failure restores the exact pre-relocation address space, including
 fixups already applied to earlier images. The implementation uses a whole
 `GuestMemory` snapshot for that transaction; this is correct but deliberately
@@ -158,7 +164,24 @@ expensive and is not the final memory-ownership design. Relocation itself
 performs no import or IAT write. Ordinary-IAT binding is a separate implemented
 step, while delayed imports, service registration, exception-directory
 registration, TLS callbacks, unloading, reference counting and module execution
-remain unsupported.
+remain unsupported. Before ordinary-IAT writes, the binder also requires
+fixed-base images to occupy their preferred reservations and each image/base
+pair to satisfy the same nonmutating mapping validation that produces legitimate
+reservations.
+step, while delayed imports, service registration, TLS callbacks, unloading,
+reference counting and module execution remain unsupported.
+
+Batch exception-directory registration uses the same exact-one reservation
+validation. For each image it reads PE data directory 3, requires whole aligned
+`RUNTIME_FUNCTION` entries in ascending order inside `SizeOfImage`, and requires
+the directory, function ranges and fixed unwind-data bytes to be backed by
+committed image headers or sections. Valid tables are registered in input order
+for the existing x64 exception lookup path, while an absent directory is an
+honest no-op. Registration writes no guest bytes; if a later image fails, the
+function-table list is truncated to its original length so earlier registrations
+do not remain visible. Language-specific variable-sized handler data is not fully bounded here. This
+does not execute module code, change unwind semantics, implement dynamic
+function-table APIs or provide unloading.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,

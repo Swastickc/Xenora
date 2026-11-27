@@ -50,6 +50,8 @@ use crate::module_layout::{AddressInterval, IMAGE_BASE_ALIGNMENT};
 use crate::module_memory::{ExplicitModuleImage, ModuleReservation};
 use crate::pe::{ParsedPe, PeError};
 
+const IMAGE_FILE_RELOCS_STRIPPED: u16 = 0x0001;
+
 /// Errors that prevent transactional IAT binding or roll it back completely.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModuleIatError {
@@ -79,6 +81,20 @@ pub enum ModuleIatError {
         base: u64,
         preferred_base: u64,
         used_preferred_base: bool,
+    },
+    /// A relocation-stripped fixed-base image cannot occupy a nonpreferred
+    /// reservation in any batch produced by the layout planner and mapper.
+    FixedBaseReservationMismatch {
+        image_index: usize,
+        base: u64,
+        preferred_base: u64,
+    },
+    /// The image bytes and reservation base do not satisfy the nonmutating
+    /// mapping validation that produced legitimate reservations.
+    ImageNotMappableAtReservation {
+        image_index: usize,
+        base: u64,
+        source: PeError,
     },
     /// The optional entry address is not exactly the value produced by
     /// mapping this parsed image at the reservation base.
@@ -187,6 +203,22 @@ impl fmt::Display for ModuleIatError {
                 f,
                 "reservation for image {image_index} has base {base:#x}, preferred base {preferred_base:#x} and used_preferred_base={used_preferred_base}"
             ),
+            Self::FixedBaseReservationMismatch {
+                image_index,
+                base,
+                preferred_base,
+            } => write!(
+                f,
+                "relocation-stripped image {image_index} cannot use nonpreferred reservation base {base:#x}; required preferred base is {preferred_base:#x}"
+            ),
+            Self::ImageNotMappableAtReservation {
+                image_index,
+                base,
+                source,
+            } => write!(
+                f,
+                "image {image_index} cannot map at reservation base {base:#x}: {source}"
+            ),
             Self::ReservationEntryPointMismatch {
                 image_index,
                 expected,
@@ -272,6 +304,7 @@ impl std::error::Error for ModuleIatError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::InvalidImage { source, .. } => Some(source),
+            Self::ImageNotMappableAtReservation { source, .. } => Some(source),
             Self::ImageGraphMismatch {
                 source: Some(source),
                 ..
@@ -460,6 +493,23 @@ fn validate_reservations(
                 used_preferred_base: reservation.used_preferred_base,
             });
         }
+        if images[image_index].pe.characteristics & IMAGE_FILE_RELOCS_STRIPPED != 0
+            && reservation.base != preferred_base
+        {
+            return Err(ModuleIatError::FixedBaseReservationMismatch {
+                image_index,
+                base: reservation.base,
+                preferred_base,
+            });
+        }
+        images[image_index]
+            .pe
+            .validate_mapping_at(images[image_index].bytes, reservation.base)
+            .map_err(|source| ModuleIatError::ImageNotMappableAtReservation {
+                image_index,
+                base: reservation.base,
+                source,
+            })?;
 
         let entry_rva = images[image_index].pe.entry_point_rva;
         let expected = (entry_rva != 0)

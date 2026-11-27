@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 296 |
-| Generated adapters | 296 |
-| Unique handler implementations | 278 |
-| Implemented | 100 |
-| Partial | 194 |
+| Services with a declared ABI | 300 |
+| Generated adapters | 300 |
+| Unique handler implementations | 282 |
+| Implemented | 101 |
+| Partial | 197 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 296 |
-| API-set aliases (not services) | 369 |
+| Conformance-tested through guest dispatch | 300 |
+| API-set aliases (not services) | 373 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -260,11 +260,15 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!log1p` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
 | `ucrtbase.dll!log2` | `(x: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
 | `ucrtbase.dll!lround` | `(x: f64) -> i32` | partial | LONG_MIN for a NaN or an out-of-range result; errno is not set |
+| `ucrtbase.dll!lroundf` | `(x: f32) -> i32` | partial | LONG_MIN for a NaN or an out-of-range result; errno and floating-point exception flags are not set |
 | `ucrtbase.dll!modf` | `(x: f64, integral: out<8>) -> f64` | implemented | stops the guest with a memory fault when integral is not writable |
+| `ucrtbase.dll!modff` | `(x: f32, integral: out<4>) -> f32` | implemented | stops the guest with a memory fault when integral is not writable |
 | `ucrtbase.dll!nearbyint` | `(x: f64) -> f64` | partial | rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set |
+| `ucrtbase.dll!nextafterf` | `(x: f32, y: f32) -> f32` | partial | range events do not set errno or floating-point exception flags |
 | `ucrtbase.dll!pow` | `(x: f64, y: f64) -> f64` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
 | `ucrtbase.dll!powf` | `(x: f32, y: f32) -> f32` | partial | host math library result, can differ from the UCRT in the last place; errno is not set and no exception flag is raised |
 | `ucrtbase.dll!remainder` | `(x: f64, y: f64) -> f64` | partial | NaN for a domain error; errno is not set |
+| `ucrtbase.dll!remainderf` | `(x: f32, y: f32) -> f32` | partial | NaN for a domain error; errno and floating-point exception flags are not set |
 | `ucrtbase.dll!rint` | `(x: f64) -> f64` | partial | rounds to nearest, ties to even, whatever the guest MXCSR says; errno is not set |
 | `ucrtbase.dll!round` | `(x: f64) -> f64` | implemented | never |
 | `ucrtbase.dll!roundf` | `(x: f32) -> f32` | implemented | never |

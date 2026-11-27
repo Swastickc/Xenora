@@ -16646,6 +16646,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "MsgWaitForMultipleObjects"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "PeekMessageA"
     },
     {

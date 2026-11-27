@@ -2654,6 +2654,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "kernel32.dll",
+      "canonical_symbol": "FreeEnvironmentStringsA",
+      "kind": "name",
+      "library": "api-ms-win-core-processenvironment-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "FreeEnvironmentStringsA"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "kernel32.dll",
       "canonical_symbol": "FreeEnvironmentStringsW",
       "kind": "name",
       "library": "api-ms-win-core-processenvironment-l1-1-0.dll",
@@ -2679,6 +2689,16 @@
       "library": "api-ms-win-core-processenvironment-l1-1-0.dll",
       "status": "partial",
       "symbol": "GetCommandLineW"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "kernel32.dll",
+      "canonical_symbol": "GetEnvironmentStrings",
+      "kind": "name",
+      "library": "api-ms-win-core-processenvironment-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "GetEnvironmentStrings"
     },
     {
       "api_set": true,
@@ -10656,6 +10676,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "FreeEnvironmentStringsA"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "FreeEnvironmentStringsW"
     },
     {
@@ -10937,6 +10967,26 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "GetDriveTypeW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "GetEnvironmentStrings"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "GetEnvironmentStringsA"
     },
     {
       "data_import": false,
@@ -16816,6 +16866,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpAddRequestHeaders"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpCloseHandle"
     },
     {
@@ -16907,6 +16967,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WinHttpSendRequest"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpSetOption"
     },
     {
       "data_import": false,
@@ -18280,17 +18350,17 @@
     }
   ],
   "summary": {
-    "aliases": 906,
-    "api_set_aliases": 740,
-    "canonical_services": 867,
+    "aliases": 908,
+    "api_set_aliases": 742,
+    "canonical_services": 872,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 571,
+    "manual_services": 576,
     "ordinal_aliases": 0,
-    "partial": 630,
+    "partial": 635,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

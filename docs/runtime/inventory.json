@@ -3,6 +3,206 @@
     {
       "api_set": true,
       "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CLSIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateGuid",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitializeEx",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemAlloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemFree",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemRealloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoUninitialize",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "CoUninitialize"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "IIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "IIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "PropVariantClear",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "PropVariantClear"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "StringFromGUID2",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "StringFromGUID2"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CLSIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateGuid",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitializeEx",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemAlloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemFree",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemRealloc",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoUninitialize",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "CoUninitialize"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "IIDFromString",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "IIDFromString"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "PropVariantClear",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "PropVariantClear"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "StringFromGUID2",
+      "kind": "name",
+      "library": "api-ms-win-core-com-l1-1-1.dll",
+      "status": "partial",
+      "symbol": "StringFromGUID2"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
       "canonical_library": "kernel32.dll",
       "canonical_symbol": "GetConsoleCP",
       "kind": "name",
@@ -5624,6 +5824,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "__stdio_common_vfscanf",
+      "kind": "name",
+      "library": "api-ms-win-crt-stdio-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "__stdio_common_vfscanf"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "__stdio_common_vsprintf",
       "kind": "name",
       "library": "api-ms-win-crt-stdio-l1-1-0.dll",
@@ -6837,7 +7047,7 @@
       "canonical_symbol": "rand_s",
       "kind": "name",
       "library": "api-ms-win-crt-utility-l1-1-0.dll",
-      "status": "stub",
+      "status": "partial",
       "symbol": "rand_s"
     },
     {
@@ -7184,6 +7394,16 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_chdir",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "status": "implemented",
+      "symbol": "_chdir"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_close",
       "kind": "name",
       "library": "msvcrt.dll",
@@ -7304,6 +7524,16 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_fullpath",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "status": "partial",
+      "symbol": "_fullpath"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_get_errno",
       "kind": "name",
       "library": "msvcrt.dll",
@@ -7319,6 +7549,16 @@
       "library": "msvcrt.dll",
       "status": "implemented",
       "symbol": "_get_osfhandle"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_getcwd",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "status": "implemented",
+      "symbol": "_getcwd"
     },
     {
       "api_set": false,
@@ -8319,6 +8559,146 @@
       "library": "msvcrt.dll",
       "status": "partial",
       "symbol": "wcstoull"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CLSIDFromString",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateGuid",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateInstance",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoCreateInstance"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoCreateInstanceEx",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoCreateInstanceEx"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoGetClassObject",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoGetClassObject"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitialize",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoInitialize"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoInitializeEx",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemAlloc",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemFree",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoTaskMemRealloc",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "CoUninitialize",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "CoUninitialize"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "IIDFromString",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "IIDFromString"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "PropVariantClear",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "PropVariantClear"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "combase.dll",
+      "canonical_symbol": "StringFromGUID2",
+      "kind": "name",
+      "library": "ole32.dll",
+      "status": "partial",
+      "symbol": "StringFromGUID2"
     }
   ],
   "findings": {
@@ -8607,6 +8987,20 @@
         "source": "manual",
         "status": "implemented",
         "symbol": "vfprintf"
+      },
+      {
+        "kind": "name",
+        "library": "ucrtbase.dll",
+        "source": "manual",
+        "status": "implemented",
+        "symbol": "_chdir"
+      },
+      {
+        "kind": "name",
+        "library": "ucrtbase.dll",
+        "source": "manual",
+        "status": "implemented",
+        "symbol": "_getcwd"
       },
       {
         "kind": "name",
@@ -9073,6 +9467,146 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_wspawnve"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CLSIDFromString"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoCreateGuid"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoCreateInstance"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoCreateInstanceEx"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoGetClassObject"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoInitialize"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoInitializeEx"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoTaskMemAlloc"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoTaskMemFree"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoTaskMemRealloc"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "CoUninitialize"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "IIDFromString"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "PropVariantClear"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "combase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "StringFromGUID2"
     },
     {
       "data_import": false,
@@ -12842,6 +13376,16 @@
       "source": "typed",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "__stdio_common_vfscanf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "__stdio_common_vsprintf"
     },
     {
@@ -12913,6 +13457,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_cexit"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": false,
+      "symbol": "_chdir"
     },
     {
       "data_import": false,
@@ -13183,6 +13737,16 @@
       "status": "implemented",
       "status_explicit": true,
       "symbol": "_get_osfhandle"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": false,
+      "symbol": "_getcwd"
     },
     {
       "data_import": false,
@@ -14870,7 +15434,7 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "manual",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "rand_s"
     },
@@ -15553,6 +16117,116 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "TranslateMessage"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpCloseHandle"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpConnect"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpOpen"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpOpenRequest"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpQueryDataAvailable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpQueryHeaders"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpQueryOption"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpReadData"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpReceiveResponse"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpSendRequest"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpSetTimeouts"
     },
     {
       "data_import": false,
@@ -16530,6 +17204,16 @@
       "kind": "name",
       "library": "xgameruntime.dll",
       "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingGetConnectivityHint"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XTaskQueueCloseHandle"
@@ -16616,6 +17300,276 @@
     },
     {
       "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputEnable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetBatteryInformation"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetDSoundAudioDeviceGuids"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetKeystroke"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputSetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "ordinal",
+      "library": "xinput1_3.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "Ordinal#100"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputEnable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetAudioDeviceIds"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetBatteryInformation"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetKeystroke"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputSetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "ordinal",
+      "library": "xinput1_4.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "Ordinal#100"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput9_1_0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput9_1_0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetDSoundAudioDeviceGuids"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput9_1_0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinput9_1_0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputSetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputEnable"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetAudioDeviceIds"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetBatteryInformation"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetCapabilities"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetKeystroke"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputGetState"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "xinputuap.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "XInputSetState"
+    },
+    {
+      "data_import": false,
       "family": "xbox-gaming",
       "kind": "name",
       "library": "xmem.dll",
@@ -16630,27 +17584,27 @@
       "kind": "name",
       "library": "xmem.dll",
       "source": "manual",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "XMemFree"
     }
   ],
   "summary": {
-    "aliases": 832,
-    "api_set_aliases": 702,
-    "canonical_services": 778,
+    "aliases": 870,
+    "api_set_aliases": 723,
+    "canonical_services": 834,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 216,
-    "implicit_status_services": 74,
-    "libraries": 15,
-    "manual_services": 527,
+    "implemented": 219,
+    "implicit_status_services": 76,
+    "libraries": 21,
+    "manual_services": 568,
     "ordinal_aliases": 0,
-    "partial": 558,
+    "partial": 613,
     "structural_consistency_findings": 0,
-    "stub": 4,
-    "typed_registry_entries": 251,
-    "typed_services": 251,
+    "stub": 2,
+    "typed_registry_entries": 266,
+    "typed_services": 266,
     "wanted_imports": null,
     "wanted_missing": null
   },

@@ -98,6 +98,12 @@ pub(super) struct StandardStreams {
     /// streams: 0 unoriented, 1 byte, 2 wide.
     output_orientation: u8,
     error_orientation: u8,
+    /// The standard descriptors a `_dup2` rewired and the guest then closed:
+    /// the CRT slot stays dead, the console stream does not come back. An
+    /// entry only ever sets when a table-carrying standard descriptor is
+    /// closed, because closing the unduplicated standard stream itself is
+    /// still refused outright.
+    closed: [bool; 3],
 }
 
 /// The standard input: bytes the host supplied before the run, after the
@@ -1117,10 +1123,18 @@ impl StandardStreams {
         if fd < 0 {
             return Ok(Err(Failed(-1, EBADF)));
         }
-        if fd < 3 {
+        // A standard descriptor the table carries closes through the
+        // ordinary machinery: `_dup2` put it there, and closing it is
+        // closing the duplication. One the table does not carry is the
+        // standard stream itself, whose close the runtime still refuses.
+        if fd < 3 && !self.opened.has_descriptor(fd as u32) {
             return Err(RUNTIME_LIMIT);
         }
-        Ok(if self.opened.descriptor_close(memory, drive, fd as u32) {
+        let closed = self.opened.descriptor_close(memory, drive, fd as u32);
+        if closed && fd < 3 {
+            self.closed[fd as usize] = true;
+        }
+        Ok(if closed {
             Ok(0)
         } else {
             Err(Failed(-1, EBADF))
@@ -1145,9 +1159,11 @@ impl StandardStreams {
         if fd < 0 || count as u64 > MAX_TRANSFER {
             return Ok(Err(Failed(-1, EINVAL)));
         }
+        let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let bytes = match fd {
-            0 => self.input.take((count as usize).min(1 << 20)),
-            1 | 2 => return Ok(Err(Failed(-1, EBADF))),
+            0 if !rewired && self.closed[0] => return Ok(Err(Failed(-1, EBADF))),
+            0 if !rewired => self.input.take((count as usize).min(1 << 20)),
+            1 | 2 if !rewired => return Ok(Err(Failed(-1, EBADF))),
             _ => {
                 match self.opened.pipe_end(fd as u32) {
                     Ok(Some((id, false))) => {
@@ -1195,10 +1211,16 @@ impl StandardStreams {
         }
         let mut bytes = vec![0; count as usize];
         memory.read_bytes(buffer, &mut bytes).map_err(fault)?;
+        // A standard descriptor the table carries is no standard stream
+        // anymore: `_dup2` rewired it, and the ordinary descriptor machinery
+        // answers for it exactly as the CRT's table does.
+        let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let result = match fd {
-            0 => Err(EBADF),
-            1 => self.write(drive, Stream::Output, &bytes)?,
-            2 => self.write(drive, Stream::Error, &bytes)?,
+            0 if !rewired => Err(EBADF),
+            1 if !rewired && self.closed[1] => Err(EBADF),
+            2 if !rewired && self.closed[2] => Err(EBADF),
+            1 if !rewired => self.write(drive, Stream::Output, &bytes)?,
+            2 if !rewired => self.write(drive, Stream::Error, &bytes)?,
             _ => match self.opened.pipe_end(fd as u32) {
                 Ok(Some((id, true))) => match self.opened.pipe_write(id, &bytes) {
                     Ok(_) => Ok(()),
@@ -1230,7 +1252,7 @@ impl StandardStreams {
         if fd < 0 {
             return Ok(Err(Failed(-1, EBADF)));
         }
-        if fd < 3 {
+        if fd < 3 && !self.opened.has_descriptor(fd as u32) {
             return Ok(Err(Failed(-1, EBADF)));
         }
         Ok(self
@@ -1249,7 +1271,7 @@ impl StandardStreams {
         offset: i64,
         origin: i32,
     ) -> Outcome<i64> {
-        if fd < 3 {
+        if fd < 3 && !self.opened.has_descriptor(fd as u32) {
             return Ok(Err(Failed(-1, EBADF)));
         }
         if origin < 0 {

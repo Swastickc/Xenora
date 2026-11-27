@@ -12,18 +12,18 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 867 |
+| Canonical services | 871 |
 | Typed registry services | 296 |
-| Manual code registrations | 571 |
+| Manual code registrations | 575 |
 | Canonical libraries | 21 |
-| Implemented | 237 |
-| Partial | 628 |
-| Stub | 2 |
+| Implemented | 239 |
+| Partial | 632 |
+| Stub | 0 |
 | Data-import services | 7 |
 | Aliases of every kind | 906 |
 | API-set aliases | 740 |
 | Ordinal aliases | 0 |
-| Statuses never explicitly set | 76 |
+| Statuses never explicitly set | 78 |
 | Duplicate canonical registrations | 0 |
 | Structural consistency findings | 0 |
 
@@ -34,7 +34,7 @@ independent acceptance or compatibility claims.
 | <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
-| <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 276 | 0 | 26 |
+| <code>kernel32.dll</code> | <code>windows-system</code> | 318 | 59 | 259 | 0 | 42 | 276 | 0 | 28 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
 | <code>libstdc++-6.dll</code> | <code>c++-support</code> | 14 | 3 | 11 | 0 | 11 | 3 | 0 | 0 |
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
@@ -42,7 +42,7 @@ independent acceptance or compatibility claims.
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
 | <code>ucrtbase.dll</code> | <code>c-runtime</code> | 297 | 207 | 90 | 0 | 103 | 194 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
-| <code>winhttp.dll</code> | <code>other</code> | 11 | 0 | 11 | 0 | 0 | 11 | 0 | 0 |
+| <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
@@ -78,6 +78,8 @@ before analysis; structurally valid discrepancies remain visible here.
 | --- | --- | --- |
 | <code>kernel32.dll!CreateFileA (name)</code> | implemented | manual |
 | <code>kernel32.dll!CreateToolhelp32Snapshot (name)</code> | implemented | manual |
+| <code>kernel32.dll!FindFirstFileExA (name)</code> | implemented | manual |
+| <code>kernel32.dll!FindFirstFileExW (name)</code> | implemented | manual |
 | <code>kernel32.dll!GetCompressedFileSizeA (name)</code> | implemented | manual |
 | <code>kernel32.dll!GetDiskFreeSpaceExA (name)</code> | implemented | manual |
 | <code>kernel32.dll!GetDiskFreeSpaceExW (name)</code> | implemented | manual |

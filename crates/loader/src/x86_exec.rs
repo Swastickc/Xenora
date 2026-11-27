@@ -511,6 +511,7 @@ pub fn execute(
             }
             cpu.flags = flags;
         }
+        Op::Cmpxchg8b => compare_exchange_pair(cpu, memory, insn)?,
         Op::Bswap => {
             let value = read_reg(cpu, insn.reg, size).swap_bytes() >> (64 - 8 * u32::from(size));
             write_reg(cpu, insn.reg, size, value);
@@ -819,6 +820,57 @@ pub fn execute(
     }
     cpu.rip = next;
     Ok(None)
+}
+
+/// CMPXCHG8B, and CMPXCHG16B under REX.W (Intel SDM Vol. 2A,
+/// CMPXCHG8B/CMPXCHG16B). The memory operand holds two halves of the operand
+/// size. It is compared with rDX:rAX and replaced by rCX:rBX when they match;
+/// otherwise its halves are loaded into rDX:rAX, which a 32-bit write
+/// zero-extends. ZF says whether they matched and no other flag changes.
+fn compare_exchange_pair(
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+    insn: &Insn,
+) -> Result<(), ExitReason> {
+    // The form is memory-only, so the decoder never supplies a register.
+    let operand = insn.memory().ok_or(ExitReason::IllegalInstruction(0))?;
+    let at = address(cpu, &operand);
+    let half = usize::from(insn.size);
+    let width = 2 * half;
+    if width == 16 && !at.is_multiple_of(16) {
+        return Err(ExitReason::GeneralProtection);
+    }
+    if !canonical_access(at, 2 * insn.size) {
+        return Err(ExitReason::GeneralProtection);
+    }
+    let mut old = [0; 16];
+    memory
+        .read_bytes(at, &mut old[..width])
+        .map_err(ExitReason::MemoryFault)?;
+    let part = |bytes: &[u8]| {
+        let mut value = [0; 8];
+        value[..half].copy_from_slice(bytes);
+        u64::from_le_bytes(value)
+    };
+    let (low, high) = (part(&old[..half]), part(&old[half..width]));
+    let reg = |index: usize| cpu.gpr[index] & mask(insn.size);
+    let matched = (low, high) == (reg(RAX), reg(RDX));
+    // As for CMPXCHG, the destination is written whether or not the values
+    // match, so a mismatch on memory that cannot be written still faults.
+    let mut new = old;
+    if matched {
+        new[..half].copy_from_slice(&reg(RBX).to_le_bytes()[..half]);
+        new[half..width].copy_from_slice(&reg(RCX).to_le_bytes()[..half]);
+    }
+    memory
+        .write_bytes(at, &new[..width])
+        .map_err(ExitReason::MemoryFault)?;
+    if !matched {
+        write_reg(cpu, accumulator(RAX), insn.size, low);
+        write_reg(cpu, accumulator(RDX), insn.size, high);
+    }
+    cpu.flags.zf = matched;
+    Ok(())
 }
 
 fn accumulator(index: usize) -> RegOperand {

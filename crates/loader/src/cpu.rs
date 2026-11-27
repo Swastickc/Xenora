@@ -163,8 +163,12 @@ impl CpuState {
     }
 }
 
+/// CPUID leaf 1, EDX: CMPXCHG8B.
+pub const CPUID_CX8: u32 = 1 << 8;
 /// CPUID leaf 1, EDX: CMOVcc.
 pub const CPUID_CMOV: u32 = 1 << 15;
+/// CPUID leaf 1, ECX: CMPXCHG16B.
+pub const CPUID_CMPXCHG16B: u32 = 1 << 13;
 /// CPUID leaf 1, ECX: POPCNT.
 pub const CPUID_POPCNT: u32 = 1 << 23;
 /// CPUID leaf 0x8000_0001, ECX: LAHF and SAHF in 64-bit mode.
@@ -186,7 +190,12 @@ pub fn cpuid(leaf: u32, _subleaf: u32) -> [u32; 4] {
         // Highest basic leaf, then "Xenora guest" in EBX, EDX, ECX.
         0 => [1, word(b"Xeno"), word(b"uest"), word(b"ra g")],
         // No family, model or stepping: this is no shipped processor.
-        1 => [0, 0, CPUID_POPCNT, CPUID_CMOV],
+        1 => [
+            0,
+            0,
+            CPUID_CMPXCHG16B | CPUID_POPCNT,
+            CPUID_CX8 | CPUID_CMOV,
+        ],
         // Highest extended leaf.
         0x8000_0000 => [0x8000_0001, 0, 0, 0],
         0x8000_0001 => [0, 0, CPUID_LAHF_SAHF | CPUID_LZCNT, CPUID_LONG_MODE],

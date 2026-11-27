@@ -19,6 +19,7 @@ pub mod module_binding;
 pub mod module_exceptions;
 pub mod module_graph;
 pub mod module_iat;
+pub mod module_init;
 pub mod module_layout;
 pub mod module_memory;
 pub mod module_tls;
@@ -59,6 +60,11 @@ pub use jit::{JitError, JitMemory};
 pub use memory::{GuestMemory, MemoryError, MemoryPermissions};
 pub use module_exceptions::{
     ModuleExceptionError, ModuleExceptionReport, register_module_exception_directories,
+};
+pub use module_init::{
+    ModuleInitializationComponent, ModuleInitializationEntry, ModuleInitializationError,
+    ModuleInitializationMetadata, ModuleInitializationPlan, ModuleInspectionUncertainty,
+    plan_module_initialization,
 };
 pub use module_memory::{
     ExplicitModuleImage, ModuleMemoryError, ModuleRelocationError, ModuleReservation,

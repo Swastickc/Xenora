@@ -80,6 +80,7 @@ exact revision and known limitations.
 - An original hosted C record and compression fixture, with O0–O3 guest builds, independently specified output and file-byte checks, and malformed-input controls (#796).
 
 ### Fixed
+- Root-anchored guest paths (`/tmp/x`, `\tmp\x`) are no longer rejected as invalid: the leading separator anchors at the drive root, which the single-drive model already represents as the empty string, so the anchor is consumed in both the Win32 and CRT path conversions before component validation. The three spellings of the same object - anchored, drive-prefixed and relative - now resolve identically, while a `\\` UNC prefix and empty interior components stay rejected exactly as before.
 
 - QA benchmark statistics now reject NaN and infinite samples instead of producing meaningless ordering statistics or non-standard JSON evidence (#827).
 - QA verification evidence is now bound to the selected checkout: profile suites run with that repository as their working directory, `qa verify` rejects a revision other than the checkout HEAD, and `--check-stale` requires matching profile and revision metadata and passing suites while reporting staleness separately (#277).

@@ -1159,6 +1159,18 @@ impl StandardStreams {
         if fd < 0 || count as u64 > MAX_TRANSFER {
             return Ok(Err(Failed(-1, EINVAL)));
         }
+        // A duplication of a standard descriptor answers as the standard
+        // stream itself, from whatever descriptor number it hangs on.
+        if fd >= 0
+            && let Some(n) = self.opened.standard_terminal(fd as u32)
+        {
+            if n != 0 {
+                return Ok(Err(Failed(-1, EBADF)));
+            }
+            let bytes = self.input.take((count as usize).min(1 << 20));
+            memory.write_bytes(buffer, &bytes).map_err(fault)?;
+            return Ok(Ok(bytes.len() as i32));
+        }
         let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let bytes = match fd {
             0 if !rewired && self.closed[0] => return Ok(Err(Failed(-1, EBADF))),
@@ -1211,6 +1223,21 @@ impl StandardStreams {
         }
         let mut bytes = vec![0; count as usize];
         memory.read_bytes(buffer, &mut bytes).map_err(fault)?;
+        // A duplication of a standard descriptor answers as the standard
+        // stream itself, from whatever descriptor number it hangs on.
+        if fd >= 0
+            && let Some(n) = self.opened.standard_terminal(fd as u32)
+        {
+            let result = match n {
+                0 => Err(EBADF),
+                1 => self.write(drive, Stream::Output, &bytes)?,
+                _ => self.write(drive, Stream::Error, &bytes)?,
+            };
+            return Ok(match result {
+                Ok(()) => Ok(count as i32),
+                Err(errno) => Err(Failed(-1, errno)),
+            });
+        }
         // A standard descriptor the table carries is no standard stream
         // anymore: `_dup2` rewired it, and the ordinary descriptor machinery
         // answers for it exactly as the CRT's table does.

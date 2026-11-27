@@ -42,7 +42,7 @@ mod gdk_queue;
 mod graphics;
 mod heap;
 mod locale;
-mod modules;
+pub(crate) mod modules;
 mod platform_fixture;
 mod process;
 mod registry;

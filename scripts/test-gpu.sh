@@ -75,6 +75,11 @@ cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs --no-run
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs -- \
     --nocapture --test-threads=1
 
+# Session input router published into a running native frame loop (Campaign F, #942).
+cargo test --locked -p xenora-ffi --features gpu-tests --test input_router_gpu --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test input_router_gpu -- \
+    --nocapture --test-threads=1
+
 # Verify both the persistent CLI session and the hosted runner's final Metal frame.
 cargo test --locked -p xenora --test persistent_session_cli --no-run
 timeout 30s cargo test --locked -p xenora --test persistent_session_cli -- \

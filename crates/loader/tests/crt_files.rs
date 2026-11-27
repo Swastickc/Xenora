@@ -216,6 +216,46 @@ fn directories_are_not_files_and_hold_files() {
     assert_eq!(errno(&mut guest), ENOENT);
 }
 
+/// A leading separator anchors a path at the drive root: `\dir`, `/dir` and
+/// `c:\dir` are the same object, because the single drive already treats the
+/// empty string as its root. The UNC prefix `\\` is not a root anchor and
+/// stays invalid, as do empty interior components.
+#[test]
+fn root_anchored_paths_resolve_at_the_drive_root() {
+    let mut guest = guest();
+    // The anchored wide form creates the directory the drive-prefixed form sees.
+    let name = wide(&mut guest, "\\anchored");
+    assert_eq!(guest.call("CreateDirectoryW", &[name, 0]), 1);
+    // Files inside resolve through every spelling: anchored wide or narrow,
+    // forward slashes, backslashes and drive-prefixed.
+    let stream = fopen(&mut guest, "/anchored/inside.txt", "wb");
+    assert_ne!(stream, 0);
+    assert_eq!(put(&mut guest, stream, "in"), 0);
+    assert_eq!(guest.call("fclose", &[stream]) as u32, 0);
+    assert_eq!(
+        read_through_win32(&mut guest, "c:\\anchored\\inside.txt"),
+        b"in"
+    );
+    assert_eq!(
+        read_through_win32(&mut guest, "\\anchored\\inside.txt"),
+        b"in"
+    );
+    // The narrow anchored form makes the same object too.
+    let subdir = narrow(&mut guest, NARROW, "/anchored/narrow");
+    assert_eq!(guest.call("CreateDirectoryA", &[subdir, 0]), 1);
+    // Creating the same directory through another spelling already exists.
+    let name = wide(&mut guest, "c:\\anchored");
+    assert_eq!(guest.call("CreateDirectoryW", &[name, 0]), 0);
+    // A UNC prefix is not an anchor: the share is not a valid component.
+    let unc = wide(&mut guest, "\\\\server\\share");
+    assert_eq!(guest.call("CreateDirectoryW", &[unc, 0]), 0);
+    let unc_a = narrow(&mut guest, NARROW, "\\\\server\\share");
+    assert_eq!(guest.call("CreateDirectoryA", &[unc_a, 0]), 0);
+    // Empty interior components stay rejected, anchor or not.
+    let bad = narrow(&mut guest, NARROW, "/anchored\\\\double");
+    assert_eq!(guest.call("CreateDirectoryA", &[bad, 0]), 0);
+}
+
 /// A C stream is not a Win32 handle: it does not stop the file being deleted.
 /// Once the file is gone the stream's operations fail with `EBADF`, and
 /// closing it still succeeds. This is Xenora's behaviour, not Windows's,

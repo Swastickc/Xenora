@@ -1506,28 +1506,64 @@ impl StandardStreams {
     }
 
     /// `_filbuf`. The byte as an unsigned char, or EOF at the end or for a
-    /// stream that is not open and readable.
+    /// stream that is not open and readable. The standard streams are not
+    /// opened files: `stdin` consumes the host-supplied input exactly as
+    /// `fgetc` does, and the output streams cannot be read.
     pub(super) fn filbuf(&mut self, drive: &ObjectState, file: u64) -> Outcome<i32> {
-        if !self.opened.contains(file) {
-            return Ok(Err(Failed(-1, EBADF)));
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
         }
-        Ok(match self.opened.read_one(drive, file) {
-            std::result::Result::Ok(Some(byte)) => Ok(i32::from(byte)),
-            std::result::Result::Ok(None) => Ok(-1),
-            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
-        })
+        // A pointer that is no stream answers EOF with EBADF rather than
+        // stopping the guest: the primitive has always failed softly, and
+        // the byte-oriented CRT reaches it for every small read.
+        let stream = match self.stream(file) {
+            std::result::Result::Ok(stream) => stream,
+            std::result::Result::Err(_) => return Ok(Err(Failed(-1, EBADF))),
+        };
+        match stream {
+            Stream::Input => {
+                if !self.input.orient(false) {
+                    return Ok(Err(Failed(-1, EBADF)));
+                }
+                Ok(Ok(match self.input.character() {
+                    Some(byte) => i32::from(byte),
+                    None => -1,
+                }))
+            }
+            Stream::File(file) => Ok(match self.opened.read_one(drive, file) {
+                std::result::Result::Ok(Some(byte)) => Ok(i32::from(byte)),
+                std::result::Result::Ok(None) => Ok(-1),
+                std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+            }),
+            _ => Ok(Err(Failed(-1, EBADF))),
+        }
     }
 
     /// `_flsbuf`. The byte written, or EOF for a stream that is not open
-    /// and writable.
+    /// and writable. The standard streams are not opened files: a byte for
+    /// `stdout` or `stderr` goes through the same capture and text-mode
+    /// translation as every other write, and `stdin` cannot be written.
     pub(super) fn flsbuf(&mut self, drive: &mut ObjectState, c: i32, file: u64) -> Outcome<i32> {
-        if !self.opened.contains(file) {
-            return Ok(Err(Failed(-1, EBADF)));
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
         }
-        Ok(match self.opened.write_one(drive, file, c as u8) {
-            std::result::Result::Ok(()) => Ok(i32::from(c as u8)),
-            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
-        })
+        let stream = match self.stream(file) {
+            std::result::Result::Ok(stream) => stream,
+            std::result::Result::Err(_) => return Ok(Err(Failed(-1, EBADF))),
+        };
+        match stream {
+            Stream::Input => Ok(Err(Failed(-1, EBADF))),
+            stream @ (Stream::Output | Stream::Error) => {
+                match self.write(drive, stream, &[c as u8])? {
+                    std::result::Result::Ok(()) => Ok(Ok(i32::from(c as u8))),
+                    std::result::Result::Err(errno) => Ok(Err(Failed(-1, errno))),
+                }
+            }
+            Stream::File(file) => Ok(match self.opened.write_one(drive, file, c as u8) {
+                std::result::Result::Ok(()) => Ok(i32::from(c as u8)),
+                std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+            }),
+        }
     }
 
     /// `feof`: the end-of-file indicator of the stream. Only the standard

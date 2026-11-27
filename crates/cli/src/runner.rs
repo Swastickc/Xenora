@@ -53,7 +53,8 @@ const DEADLINE_GRACE: Duration = Duration::from_secs(2);
 /// the guest.
 const DEADLINE_CODE: u8 = 124;
 const FAILURE_CODE: u8 = 125;
-const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
+const USAGE: &str = "usage: xenora run --pe <executable> --experimental [--package <module>]... [--trace] [--startup-report] [--max-steps <n>] [--wall-seconds <1..=3600>] [--sha256 <64 hex digits>] [--max-executable-bytes <n>] [--max-mapped-image-bytes <n>] [--export-guest-file <guest-path> <host-path>] [-- <program argument>...]
+       --package names another explicit image to load beside the entry executable; it may be repeated and is never searched for on the host
        a hosted export copies up to 16 MiB from the synthetic C: drive to a new UTF-8 filename in an existing directory
        an embedded fixture takes --metal-hud instead of --wall-seconds, and its --max-steps is in 1..=10000";
 
@@ -70,6 +71,8 @@ enum GuestExport {
 
 struct Options {
     path: PathBuf,
+    /// Explicit package modules loaded beside the entry executable.
+    package: Vec<PathBuf>,
     max_steps: Option<usize>,
     wall_seconds: Option<u64>,
     executable_budget: u64,
@@ -118,6 +121,7 @@ impl Options {
     fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, String> {
         let mut args = args.into_iter();
         let mut path = None;
+        let mut package = Vec::new();
         let mut max_steps = None;
         let mut digest = None;
         let mut arguments = Vec::new();
@@ -133,6 +137,13 @@ impl Options {
             match arg.to_str() {
                 Some("--pe") if path.is_none() => {
                     path = Some(PathBuf::from(args.next().ok_or("missing --pe path")?));
+                }
+                Some("--package") => {
+                    let module = args.next().ok_or("missing --package path")?;
+                    if module.is_empty() {
+                        return Err("--package needs a nonempty path".into());
+                    }
+                    package.push(PathBuf::from(module));
                 }
                 Some("--max-steps") if max_steps.is_none() => {
                     max_steps = Some(
@@ -218,6 +229,9 @@ impl Options {
         if program && !worker {
             return Err("unknown or repeated run argument \"--program\"".into());
         }
+        if !package.is_empty() && worker && !program {
+            return Err("--package applies to a program".into());
+        }
         if (worker && startup_report) || (!worker && report_fd.is_some()) {
             return Err("invalid startup report option for this runner".into());
         }
@@ -234,6 +248,7 @@ impl Options {
         }
         Ok(Self {
             path: path.ok_or("missing --pe path")?,
+            package,
             max_steps,
             wall_seconds,
             executable_budget: executable_budget.unwrap_or(DEFAULT_EXECUTABLE_BUDGET),
@@ -301,6 +316,7 @@ pub fn command(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     } else {
         options.digest.is_some()
             || !options.arguments.is_empty()
+            || !options.package.is_empty()
             || verify_fixture(&options.path).is_err()
     };
     let (steps, wall) = match options.limits(program) {
@@ -421,6 +437,9 @@ fn launch_worker(
     };
     command.arg("--pe").arg(&options.path);
     if program {
+        for module in &options.package {
+            command.arg("--package").arg(module);
+        }
         command.arg("--").args(&options.arguments);
     }
 
@@ -712,42 +731,114 @@ fn run_program(
     let mut imports = ImportRegistry::new();
     register_standard_services(&mut imports, Arc::clone(&state));
     let mut entered = false;
-    // The entry point runs under the deterministic cooperative scheduler,
-    // so a program that creates threads with CreateThread runs them all,
-    // one guest thread at a time. A program that creates none behaves as
-    // before: its main thread takes every turn.
-    let startup = run_synthetic_startup_scheduled_with_budget(
-        &bytes,
-        StartupLayout {
-            image_base: IMAGE_BASE,
-            stack_top: 0x200010000,
-            tls_base: 0x300000000,
-        },
-        imports,
-        Arc::clone(&state),
-        steps,
-        DEFAULT_QUANTUM,
-        options.mapped_image_budget,
-        |event| {
-            entered |= matches!(event, StartupEvent::Entering { .. });
-            reporter.observed(&event);
-            if options.trace {
-                eprintln!("{}", startup_line(&event));
+    let execution = if options.package.is_empty() {
+        // The entry point runs under the deterministic cooperative scheduler,
+        // so a program that creates threads with CreateThread runs them all,
+        // one guest thread at a time. A program that creates none behaves as
+        // before: its main thread takes every turn.
+        run_synthetic_startup_scheduled_with_budget(
+            &bytes,
+            StartupLayout {
+                image_base: IMAGE_BASE,
+                stack_top: 0x200010000,
+                tls_base: 0x300000000,
+            },
+            imports,
+            Arc::clone(&state),
+            steps,
+            DEFAULT_QUANTUM,
+            options.mapped_image_budget,
+            |event| {
+                entered |= matches!(event, StartupEvent::Entering { .. });
+                reporter.observed(&event);
+                if options.trace {
+                    eprintln!("{}", startup_line(&event));
+                }
+            },
+        )
+        .map(|startup| startup.execution)
+    } else {
+        let mut module_bytes = Vec::with_capacity(options.package.len());
+        for module in &options.package {
+            module_bytes.push(
+                read_program(module, None, options.executable_budget)
+                    .inspect_err(|error| reporter.failed(FailurePhase::Admission, error))?,
+            );
+        }
+        let mut package = Vec::with_capacity(1 + module_bytes.len());
+        package.push(xenora_loader::module_graph::PackageModule {
+            file_name: name,
+            bytes: &bytes,
+        });
+        let mut names = vec![name];
+        for (path, module_bytes) in options.package.iter().zip(&module_bytes) {
+            let file_name = path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .ok_or("a package module's file name must be UTF-8")?;
+            if names.contains(&file_name) {
+                return Err(format!("package module {file_name:?} is named more than once").into());
             }
-        },
-    );
+            names.push(file_name);
+            package.push(xenora_loader::module_graph::PackageModule {
+                file_name,
+                bytes: module_bytes,
+            });
+        }
+        if options.trace {
+            eprintln!(
+                "trace package modules={} entry={name} entry_step_limit={} wall_limit_ms={}",
+                package.len(),
+                options
+                    .max_steps
+                    .map_or_else(|| "none".to_owned(), |steps| steps.to_string()),
+                wall.as_millis()
+            );
+        }
+        xenora_loader::run_package_startup(
+            &package,
+            xenora_loader::PackageStartupLayout {
+                arena: xenora_loader::module_layout::ModuleLayoutArena {
+                    base: IMAGE_BASE,
+                    size: options.mapped_image_budget,
+                },
+                stack_top: 0x200010000,
+                thread_tls_base: 0x300000000,
+            },
+            0,
+            imports,
+            steps,
+            Some((Arc::clone(&state), DEFAULT_QUANTUM)),
+        )
+        .map_err(|error| -> Box<dyn Error> { Box::new(error) })
+        .map(|result| {
+            entered = result
+                .diagnostics
+                .initialization
+                .iter()
+                .any(|record| record.phase == xenora_loader::InitializationPhase::ProcessEntry);
+            if options.trace {
+                eprintln!(
+                    "trace package imports={} initialization={}",
+                    result.diagnostics.imports.len(),
+                    result.diagnostics.initialization.len()
+                );
+            }
+            result.execution
+        })
+    };
     // Whatever the program wrote is shown, however the run ended. From here
     // the deadline no longer writes it.
     let _turn = finishing.lock();
-    let startup = startup.inspect_err(|error| reporter.failed(FailurePhase::Startup, error));
-    if startup.is_ok() && entered {
+    let execution = execution.inspect_err(|error| reporter.failed(FailurePhase::Startup, error));
+    if execution.is_ok() && entered {
         reporter.stage(Stage::EntryReturned);
     }
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&state.standard_output())?;
     stdout.flush()?;
     std::io::stderr().write_all(&state.standard_error())?;
-    let execution = startup?.execution;
+    let execution = execution?;
     if options.trace {
         eprintln!(
             "trace stage=exit entry_steps={} exit={:?}",

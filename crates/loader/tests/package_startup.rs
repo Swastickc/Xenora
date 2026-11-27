@@ -11,15 +11,19 @@
 
 use std::sync::Arc;
 
+use xenora_loader::imports::ServiceStatus;
 use xenora_loader::module_graph::PackageModule;
 use xenora_loader::module_layout::ModuleLayoutArena;
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 use xenora_loader::{
-    ExitReason, ImportRegistry, PackageStartupError, PackageStartupLayout, run_package_startup,
+    ExitReason, ImportDisposition, ImportFailure, ImportRegistry, PackageStartupError,
+    PackageStartupLayout, run_package_startup,
 };
 
 const CONSUMER: &[u8] = include_bytes!("../../../fixtures/pe/multidll/multidll-consumer.exe");
 const CHAIN: &[u8] = include_bytes!("../../../fixtures/pe/multidll/xenora_chain.dll");
+const CHAIN_NO_QUAD: &[u8] =
+    include_bytes!("../../../fixtures/pe/multidll/xenora_chain_no_quad.dll");
 const MATH: &[u8] = include_bytes!("../../../fixtures/pe/multidll/xenora_math.dll");
 
 /// 42 from `XenoraAdd`, 8 from `XenoraQuad` through the chain, 10 from the
@@ -202,6 +206,134 @@ fn missing_provider_fails_closed_with_structured_diagnostics() {
         counts
             .iter()
             .any(|(name, count)| *name == "missing-module" && *count != 0)
+    );
+    assert!(matches!(error, PackageStartupError::UnresolvedImports(_)));
+}
+
+#[test]
+fn package_exports_take_precedence_over_same_named_host_services() {
+    // A host registration with the exact identity of a package export must
+    // not win. Both handlers would return a value that changes the consumer's
+    // checksum, so the expected exit status also proves they never ran.
+    let mut imports = registry();
+    imports.register("xenora_math.dll", "XenoraAdd", |_, _, _| Ok(0xDEAD_BEEF));
+    imports.register("xenora_chain.dll", "XenoraQuad", |_, _, _| Ok(0xDEAD_BEEF));
+    let package = [
+        PackageModule {
+            file_name: "multidll-consumer.exe",
+            bytes: CONSUMER,
+        },
+        PackageModule {
+            file_name: "xenora_chain.dll",
+            bytes: CHAIN,
+        },
+        PackageModule {
+            file_name: "xenora_math.dll",
+            bytes: MATH,
+        },
+    ];
+    let result = run_package_startup(&package, layout(), 0, imports, 2_000_000, None)
+        .expect("the explicit package still starts");
+
+    assert_eq!(
+        result.execution.exit_reason,
+        ExitReason::ProcessExit(EXPECTED_EXIT)
+    );
+    for (module, symbol) in [
+        ("xenora_math.dll", "XenoraAdd"),
+        ("xenora_chain.dll", "XenoraQuad"),
+    ] {
+        let import = result
+            .diagnostics
+            .imports
+            .iter()
+            .find(|import| import.requested_module == module && import.symbol.to_string() == symbol)
+            .unwrap_or_else(|| panic!("import {module}!{symbol}"));
+        assert!(
+            matches!(import.disposition, ImportDisposition::Package { .. }),
+            "{module}!{symbol} bound to a host service: {:?}",
+            import.disposition
+        );
+    }
+}
+
+#[test]
+fn a_present_provider_without_the_exported_symbol_fails_closed() {
+    // The control DLL is the same middle provider built without XenoraQuad.
+    // Its presence must not be treated as a successful binding.
+    let package = [
+        PackageModule {
+            file_name: "multidll-consumer.exe",
+            bytes: CONSUMER,
+        },
+        PackageModule {
+            file_name: "xenora_chain.dll",
+            bytes: CHAIN_NO_QUAD,
+        },
+        PackageModule {
+            file_name: "xenora_math.dll",
+            bytes: MATH,
+        },
+    ];
+    let error = run_package_startup(&package, layout(), 0, registry(), 2_000_000, None)
+        .expect_err("a provider missing an imported export must not start");
+    let diagnostics = error
+        .diagnostics()
+        .unwrap_or_else(|| panic!("unresolved imports keep structured evidence: {error:?}"));
+    assert!(
+        diagnostics.unresolved_imports().any(|import| {
+            import.requested_module == "xenora_chain.dll"
+                && matches!(
+                    import.disposition,
+                    ImportDisposition::Unresolved(ImportFailure::MissingExport { .. })
+                )
+        }),
+        "{:?}",
+        diagnostics.unresolved_imports().collect::<Vec<_>>()
+    );
+    assert!(
+        diagnostics
+            .failure_counts()
+            .iter()
+            .any(|(name, count)| *name == "missing-export" && *count != 0)
+    );
+    assert!(matches!(error, PackageStartupError::UnresolvedImports(_)));
+}
+
+#[test]
+fn an_explicit_stub_service_fails_closed() {
+    let mut imports = registry();
+    imports.set_status("kernel32.dll", "ExitProcess", ServiceStatus::Stub);
+    let package = [
+        PackageModule {
+            file_name: "multidll-consumer.exe",
+            bytes: CONSUMER,
+        },
+        PackageModule {
+            file_name: "xenora_chain.dll",
+            bytes: CHAIN,
+        },
+        PackageModule {
+            file_name: "xenora_math.dll",
+            bytes: MATH,
+        },
+    ];
+    let error = run_package_startup(&package, layout(), 0, imports, 2_000_000, None)
+        .expect_err("a stub service must not be reported as a resolved import");
+    let diagnostics = error
+        .diagnostics()
+        .unwrap_or_else(|| panic!("unresolved imports keep structured evidence: {error:?}"));
+    assert!(diagnostics.unresolved_imports().any(|import| {
+        matches!(
+            import.disposition,
+            ImportDisposition::Unresolved(ImportFailure::StubService { .. })
+        )
+    }));
+    assert!(
+        diagnostics
+            .failure_counts()
+            .iter()
+            .any(|(name, count)| *name == "stub" && *count != 0)
     );
     assert!(matches!(error, PackageStartupError::UnresolvedImports(_)));
 }

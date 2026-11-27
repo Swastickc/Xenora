@@ -52,6 +52,12 @@ EXPORTS
     XenoraChainInit DATA
     XenoraChainDetach DATA
 DEF
+cat > xenora_chain_no_quad.def <<'DEF'
+LIBRARY xenora_chain_no_quad.dll
+EXPORTS
+    XenoraChainInit DATA
+    XenoraChainDetach DATA
+DEF
 cat > kernel32.def <<'DEF'
 LIBRARY kernel32.dll
 EXPORTS
@@ -64,15 +70,19 @@ done
 flags="--target=x86_64-pc-windows-msvc -O1 -Wall -Wextra -Werror -ffreestanding -fno-builtin -fno-stack-protector -fno-vectorize -fno-slp-vectorize"
 "$clang" $flags -c "$here/math.c" -o math.obj
 "$clang" $flags -c "$here/chain.c" -o chain.obj
+"$clang" $flags -DXENORA_NO_QUAD_EXPORT -c "$here/chain.c" -o chain-no-quad.obj
 "$clang" $flags -c "$here/consumer.c" -o consumer.obj
 
 link /dll /entry:DllMain /nodefaultlib /dynamicbase /timestamp:0 /machine:x64 \
     "/out:$outdir/xenora_math.dll" math.obj
 link /dll /entry:DllMain /nodefaultlib /dynamicbase /timestamp:0 /machine:x64 \
     "/out:$outdir/xenora_chain.dll" chain.obj xenora_math.lib
+# Control image: the middle provider without the function the consumer imports.
+link /dll /entry:DllMain /nodefaultlib /dynamicbase /timestamp:0 /machine:x64 \
+    "/out:$outdir/xenora_chain_no_quad.dll" chain-no-quad.obj xenora_math.lib
 link /entry:entry /subsystem:console /nodefaultlib /dynamicbase /timestamp:0 /machine:x64 \
     "/out:$outdir/multidll-consumer.exe" consumer.obj \
     xenora_math.lib xenora_chain.lib kernel32.lib
 
 chmod 644 "$outdir/xenora_math.dll" "$outdir/xenora_chain.dll" \
-    "$outdir/multidll-consumer.exe"
+    "$outdir/xenora_chain_no_quad.dll" "$outdir/multidll-consumer.exe"

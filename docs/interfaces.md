@@ -231,6 +231,23 @@ hidden dependencies could change the correct order. Loader-lock behavior,
 thread policy, initialization execution, unloading and reference counting
 remain unsupported.
 
+Package startup composes those seams for one explicit set of images.
+`run_package_startup` takes positional package modules, an entry index, a
+layout arena, an import registry and a step budget. It builds the dependency
+graph, plans and maps every image, applies relocations, registers exception
+directories, classifies and binds each import, prepares TLS, then runs TLS
+callbacks and `DllMain` in provider-before-consumer order before the entry
+point. Detach runs in reverse order only for modules whose attach completed.
+An export from another package image takes precedence over a same-named host
+registration; a missing module or export, an unresolved API set and an
+explicit stub are refused with structured per-import diagnostics before any
+guest code runs. The ordinary runner exposes this as
+`xenora run --pe <entry> --package <module>...`, with one bounded regular-file
+snapshot per supplied image, distinct file names and the existing mapped-image
+budget as the arena limit. The tested package is an original no-CRT executable
+with two dependent provider DLLs built by the native ARM64 toolchain; console
+compatibility and game execution are not claimed.
+
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
 where `xenora imports sync` also looks. `missing_imports.csv` lists unresolved ordinary keys

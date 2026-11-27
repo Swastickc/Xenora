@@ -11,7 +11,14 @@ __declspec(dllimport) unsigned int XenoraMathInit;
 __declspec(dllexport) unsigned int XenoraChainInit;
 __declspec(dllexport) unsigned int XenoraChainDetach;
 
-__declspec(dllexport) unsigned int XenoraQuad(unsigned int value) {
+/* The control build leaves this symbol local to test a missing export. */
+#ifndef XENORA_NO_QUAD_EXPORT
+#define XENORA_QUAD_EXPORT __declspec(dllexport)
+#else
+#define XENORA_QUAD_EXPORT
+#endif
+
+XENORA_QUAD_EXPORT unsigned int XenoraQuad(unsigned int value) {
     return XenoraAdd(XenoraAdd(value, value), XenoraAdd(value, value));
 }
 

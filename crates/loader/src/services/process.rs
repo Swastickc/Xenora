@@ -292,15 +292,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Err(ExitReason::ProcessExit(s.exit_process(args.rcx as u32)))
     });
 
-    // abort ends the process with exit code 3 and calls no registered
-    // function. It is partial: it prints no message, and it does not call a
-    // SIGABRT handler, which the documentation says it does when one is set.
-    let s = Arc::clone(state);
-    registry.register(UCRT, "abort", move |_, _, _| {
-        Err(ExitReason::ProcessExit(s.exit_process(ABORT_STATUS)))
-    });
+    // terminate defaults to abort (Microsoft Learn, "terminate (CRT)").
+    // This models the shared abrupt exit. Custom terminate handlers, SIGABRT
+    // handlers and the Windows abort message are outside this subset.
+    for symbol in ["abort", "terminate"] {
+        let s = Arc::clone(state);
+        registry.register(UCRT, symbol, move |_, _, _| {
+            Err(ExitReason::ProcessExit(s.exit_process(ABORT_STATUS)))
+        });
+    }
 
-    for symbol in ["_exit", "abort"] {
+    for symbol in ["_exit", "abort", "terminate"] {
         registry.alias(CRT_RUNTIME_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }

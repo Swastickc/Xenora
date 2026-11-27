@@ -32,12 +32,12 @@ Commercial game execution is not supported. Nothing in this document claims it.
 | F9 | Bounded host event delivery | Not started | |
 | F10 | Input recording and replay | Not started (coordinate with #154) | |
 | F11 | Diagnostics HUD | Not started | |
-| F12 | Headless interactive testing | Not started (coordinate with #793) | |
+| F12 | Headless interactive testing | Partial: one scripted, deterministic guest case | `crates/input/tests/guest_xinput.rs` (#951) |
 | F13 | Accessibility of the input UI | Not started (coordinate with #409) | |
 | F14 | Original interactive guest | Not started | |
 | F15 | Sustained reliability | Not started | |
 | F16 | This document | Active | |
-| F17 | Physical controller support | Partial: recognition and translation with virtual devices; existing bridge (#857, #874, #875, #914) | `crates/input/tests/controller.rs`, `review_profiles.rs` (#948) |
+| F17 | Physical controller support | Partial: recognition, translation and guest delivery with virtual devices; not yet wired to the app | `crates/input/tests/controller.rs`, `review_profiles.rs` (#948), `guest_xinput.rs` (#951) |
 
 "Partial" means the code exists and its tests pass, but a guest cannot use it yet.
 
@@ -164,6 +164,23 @@ A profile can change:
 
 Dead zones default to zero, because XInput applications apply their own. The default profile is a bit-exact per-axis passthrough of the host values, the same as the existing bridge, and `review_profiles.rs` checks that over a sweep of 32-bit values. Profiles are saved in a versioned line-oriented text format, limited to 16 KiB, 256 lines and 64 bindings. Malformed text is refused with a reason. A newer version is refused and named in the message, and a valid profile round-trips exactly.
 
+## A guest reads routed input through XInput (F17, F12)
+
+`fixtures/pe/xinput-poll.c` is an original freestanding C program, built by `fixtures/pe/build-xinput-poll.sh` with native ARM64 clang and lld, and the build is reproducible. Each frame it calls Xenora's frame-tick service, `xenora_session.dll!XenoraNextEvent`, the same one the persistent guest uses. It then reads user slots 0 to 3 through its own `xinput1_4.dll!XInputGetState` calls and prints a line for every packet change, connection and disconnection.
+
+`crates/input/tests/guest_xinput.rs` runs the guest through the loader and the ARM64 DBT, and checks that translated blocks and service calls occurred. On each tick it applies one frame of scripted host events to the router, then installs the router output through the public `ServicesState::set_xinput_controller`. The script covers:
+
+- keyboard keys;
+- mouse motion;
+- two virtual DualSense-profile controllers on slots 0 and 1;
+- a button held by one source while another releases it;
+- focus loss;
+- a disconnect.
+
+The guest's output is compared with a hand-written literal. The same script in physical-only mode produces a different hand-written literal, and repeated runs are identical. Nothing reaches the guest except its own XInput calls.
+
+These are virtual devices: the raw element values stand in for what GameController reports. The app does not route live input this way yet.
+
 ## Hardware evidence
 
 No physical controller has been tested in this campaign so far. None was connected to the development Mac: GameController reported zero controllers. Every controller family named in the directive is untested here: Xbox Series X|S, Xbox One, Elite Series 2, DualShock 4, DualSense, DualSense Edge, Switch Pro, and third-party USB or Bluetooth controllers.
@@ -172,6 +189,7 @@ No physical controller has been tested in this campaign so far. None was connect
 
 ```sh
 cargo test -p xenora-input --locked
+fixtures/pe/build-xinput-poll.sh   # rebuilds fixtures/pe/xinput-poll.exe byte for byte
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --all -- --check
 ```

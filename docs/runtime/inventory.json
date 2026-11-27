@@ -16816,6 +16816,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpAddRequestHeaders"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpCloseHandle"
     },
     {
@@ -16907,6 +16917,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WinHttpSendRequest"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpSetOption"
     },
     {
       "data_import": false,
@@ -17217,6 +17237,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "inet_pton"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "ioctlsocket"
     },
     {
       "data_import": false,
@@ -18282,15 +18312,15 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 867,
+    "canonical_services": 870,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 571,
+    "manual_services": 574,
     "ordinal_aliases": 0,
-    "partial": 630,
+    "partial": 633,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

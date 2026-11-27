@@ -725,6 +725,44 @@ fn register_event_select(registry: &mut ImportRegistry, state: &Arc<ServicesStat
     );
 }
 
+fn ioctl_socket_memory(
+    memory: &mut GuestMemory,
+    socket: &Socket,
+    command: u32,
+    input: u64,
+    output: u64,
+) -> Result<u64, u32> {
+    const FIONREAD: u32 = 0x4004_667F;
+    const FIONBIO: u32 = 0x8004_667E;
+    match command {
+        FIONREAD => {
+            if output == 0 {
+                return Err(WSAEFAULT);
+            }
+            let bytes = if socket.stream {
+                socket.stream_read.len() as u32
+            } else {
+                socket
+                    .pending
+                    .front()
+                    .map_or(0, |(_, data)| data.len() as u32)
+            };
+            memory.write_u32(output, bytes).map_err(|_| WSAEFAULT)?;
+            Ok(0)
+        }
+        FIONBIO => {
+            if input == 0 {
+                return Err(WSAEFAULT);
+            }
+            let enable = memory.read_u32(input).map_err(|_| WSAEFAULT)? != 0;
+            // Every socket of the machine is nonblocking by construction:
+            // enabling is the truth, disabling cannot be served.
+            if enable { Ok(0) } else { Err(WSAEINVAL) }
+        }
+        _ => Err(WSAEINVAL),
+    }
+}
+
 fn register_ioctl_and_reverse(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     // WSAIoctl serves the queries with real answers in this model: FIONREAD
     // reports the bytes a recv could return now - the stream fifo length or
@@ -737,43 +775,30 @@ fn register_ioctl_and_reverse(registry: &mut ImportRegistry, state: &Arc<Service
         "WSAIoctl",
         ServiceStatus::Partial,
         move |args, cpu, memory| {
-            const FIONREAD: u32 = 0x4004_667F;
-            const FIONBIO: u32 = 0x8004_667E;
             let result = (|| {
                 let net = ioctl.winsock.lock().expect("guest Winsock state");
                 let socket = net.socket(args.rcx)?;
-                match args.rdx as u32 {
-                    FIONREAD => {
-                        if args.get(4, memory).map_err(|_| WSAEFAULT)? == 0 {
-                            return Err(WSAEFAULT);
-                        }
-                        let bytes = if socket.stream {
-                            socket.stream_read.len() as u32
-                        } else {
-                            socket
-                                .pending
-                                .front()
-                                .map_or(0, |(_, data)| data.len() as u32)
-                        };
-                        memory
-                            .write_u32(args.get(4, memory).map_err(|_| WSAEFAULT)?, bytes)
-                            .map_err(|_| WSAEFAULT)?;
-                        Ok(0)
-                    }
-                    FIONBIO => {
-                        if args.r8 == 0 {
-                            return Err(WSAEFAULT);
-                        }
-                        let enable = memory.read_u32(args.r8).map_err(|_| WSAEFAULT)? != 0;
-                        // Every socket of the machine is nonblocking by
-                        // construction: enabling is the truth, disabling
-                        // cannot be served.
-                        if enable { Ok(0) } else { Err(WSAEINVAL) }
-                    }
-                    _ => Err(WSAEINVAL),
-                }
+                let output = args.get(4, memory).map_err(|_| WSAEFAULT)?;
+                ioctl_socket_memory(memory, socket, args.rdx as u32, args.r8, output)
             })();
             socket_result(&ioctl, cpu.gs_base, result)
+        },
+    );
+
+    // ioctlsocket is the legacy three-argument form of the same bounded
+    // socket ioctl surface: socket, command and one argument pointer.
+    let legacy_ioctl = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "ioctlsocket",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let result = (|| {
+                let net = legacy_ioctl.winsock.lock().expect("guest Winsock state");
+                let socket = net.socket(args.rcx)?;
+                ioctl_socket_memory(memory, socket, args.rdx as u32, args.r8, args.r8)
+            })();
+            socket_result(&legacy_ioctl, cpu.gs_base, result)
         },
     );
 
@@ -2062,6 +2087,13 @@ fn sendto_recvfrom_hostname_and_inet_addr() {
         call(&mut memory, "sendto", &[client, 0x1300, 4, 0, 0x1200, 16]),
         4
     );
+    // The legacy ioctl reports the first pending datagram's size.
+    const FIONREAD: u64 = 0x4004_667F;
+    assert_eq!(
+        call(&mut memory, "ioctlsocket", &[server, FIONREAD, 0x1504]),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1504).unwrap(), 4);
     // recvfrom reports the source address of the datagram.
     memory.write_u32(0x1500, 16).unwrap();
     assert_eq!(
@@ -2516,6 +2548,24 @@ fn wsioctl_fionread_and_reverse_lookup() {
         0
     );
     assert_eq!(memory.read_u32(0x1700).unwrap(), 5, "fifo length reported");
+    memory.write_u32(0x1700, 0).unwrap();
+    assert_eq!(
+        call(&mut memory, "ioctlsocket", &[server, FIONREAD, 0x1700]),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1700).unwrap(), 5);
+    assert_eq!(
+        call(&mut memory, "ioctlsocket", &[server, FIONREAD, 0]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(
+            &mut memory,
+            "ioctlsocket",
+            &[INVALID_SOCKET, FIONREAD, 0x1700]
+        ),
+        SOCKET_ERROR
+    );
     // FIONBIO enabling is the truth; disabling is honest refusal.
     const FIONBIO: u64 = 0x8004_667E;
     memory.write_u32(0x1710, 1).unwrap();
@@ -2534,6 +2584,16 @@ fn wsioctl_fionread_and_reverse_lookup() {
             "WSAIoctl",
             &[server, FIONBIO, 0x1710, 4, 0x1720, 4, 0x1730, 0, 0]
         ),
+        SOCKET_ERROR
+    );
+    memory.write_u32(0x1710, 1).unwrap();
+    assert_eq!(
+        call(&mut memory, "ioctlsocket", &[server, FIONBIO, 0x1710]),
+        0
+    );
+    memory.write_u32(0x1710, 0).unwrap();
+    assert_eq!(
+        call(&mut memory, "ioctlsocket", &[server, FIONBIO, 0x1710]),
         SOCKET_ERROR
     );
     // The loopback reverses into the machine's one name.

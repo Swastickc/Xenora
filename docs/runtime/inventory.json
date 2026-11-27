@@ -7047,7 +7047,7 @@
       "canonical_symbol": "rand_s",
       "kind": "name",
       "library": "api-ms-win-crt-utility-l1-1-0.dll",
-      "status": "stub",
+      "status": "partial",
       "symbol": "rand_s"
     },
     {
@@ -15434,7 +15434,7 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "manual",
-      "status": "stub",
+      "status": "partial",
       "status_explicit": true,
       "symbol": "rand_s"
     },
@@ -17204,6 +17204,16 @@
       "kind": "name",
       "library": "xgameruntime.dll",
       "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingGetConnectivityHint"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XTaskQueueCloseHandle"
@@ -17585,7 +17595,7 @@
     "canonical_services": 833,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 218,
+    "implemented": 219,
     "implicit_status_services": 76,
     "libraries": 21,
     "manual_services": 567,

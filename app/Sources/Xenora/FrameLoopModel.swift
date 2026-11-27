@@ -22,6 +22,12 @@ protocol FrameLoopAPI: Sendable {
     func start(_ handle: xenora_session, mode: FrameLoopMode, frames: UInt32) -> Int32
     func sendInput(_ handle: xenora_session, _ input: inout xenora_controller_input) -> Int32
     func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32
+    func sendXInputWithBattery(
+        _ handle: xenora_session,
+        _ userIndex: UInt32,
+        _ input: inout xenora_xinput_state,
+        _ battery: inout xenora_xinput_battery
+    ) -> Int32
     func pollXInputVibration(
         _ handle: xenora_session, _ userIndex: UInt32, _ output: inout xenora_xinput_vibration
     ) -> Int32
@@ -57,6 +63,15 @@ struct NativeFrameLoopAPI: FrameLoopAPI {
 
     func sendXInput(_ handle: xenora_session, _ userIndex: UInt32, _ input: inout xenora_xinput_state) -> Int32 {
         xenora_session_send_xinput_state(handle, userIndex, &input)
+    }
+
+    func sendXInputWithBattery(
+        _ handle: xenora_session,
+        _ userIndex: UInt32,
+        _ input: inout xenora_xinput_state,
+        _ battery: inout xenora_xinput_battery
+    ) -> Int32 {
+        xenora_session_send_xinput_state_with_battery(handle, userIndex, &input, &battery)
     }
 
     func pollXInputVibration(
@@ -109,6 +124,7 @@ final class FrameLoopModel: ObservableObject {
         var values = XInputSnapshotValues()
         var connected = false
         var vibrationSupported = false
+        var battery = XInputBatteryValues()
     }
 
     private let api: any FrameLoopAPI
@@ -321,7 +337,7 @@ final class FrameLoopModel: ObservableObject {
             || input.right_trigger != lastSentInput.right_trigger
 
         let byIdentity = Dictionary(uniqueKeysWithValues: detected.map { ($0.identity, $0) })
-        var desiredXInputs: [(slot: Int, input: SentXInput, wire: xenora_xinput_state)] = []
+        var desiredXInputs: [(slot: Int, input: SentXInput, wire: xenora_xinput_state, battery: xenora_xinput_battery)] = []
         for slot in 0..<4 {
             let physical = xinputAssignments[slot].flatMap { byIdentity[$0] }
             var xinputValues = physical?.snapshot.xinput ?? XInputSnapshotValues()
@@ -339,14 +355,15 @@ final class FrameLoopModel: ObservableObject {
             let desired = SentXInput(
                 values: xinputValues,
                 connected: connected,
-                vibrationSupported: vibrationSupported
+                vibrationSupported: vibrationSupported,
+                battery: connected ? physical?.battery ?? XInputBatteryValues() : XInputBatteryValues()
             )
             guard desired != lastSentXInputs[slot] else { continue }
             let wire = xinputValues.ffi(
                 connected: connected,
                 vibrationSupported: connected && vibrationSupported
             )
-            desiredXInputs.append((slot, desired, wire))
+            desiredXInputs.append((slot, desired, wire, desired.battery.ffi()))
         }
 
         guard legacyChanged || !desiredXInputs.isEmpty else {
@@ -364,7 +381,7 @@ final class FrameLoopModel: ObservableObject {
             }
         }
         for var item in desiredXInputs {
-            let code = api.sendXInput(session, UInt32(item.slot), &item.wire)
+            let code = api.sendXInputWithBattery(session, UInt32(item.slot), &item.wire, &item.battery)
             if code == XENORA_OK {
                 lastSentXInputs[item.slot] = item.input
             } else if firstFailure == nil {

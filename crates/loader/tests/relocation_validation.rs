@@ -589,6 +589,26 @@ fn target_crossing_adjacent_header_and_section_backing_is_accepted() {
 }
 
 #[test]
+fn target_crossing_the_end_of_section_backing_is_rejected() {
+    // `.text` backing ends at RVA 0x1200. A DIR64 target at 0x11f9 lies inside
+    // SizeOfImage but its eight bytes are not continuously image-backed.
+    let table = block(0x1000, &[0xA1F9, 0x0000]);
+    let bytes = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1000;
+    let (pe, mut memory) = load(&bytes, base);
+
+    let result = apply_relocations(&pe, &bytes, base, &mut memory);
+
+    assert_eq!(
+        result.unwrap_err(),
+        RelocationError::TargetNotImageBacked {
+            target_rva: 0x11f9,
+            target_va: base + 0x11f9,
+        }
+    );
+}
+
+#[test]
 fn virtual_zero_fill_target_is_image_backed() {
     // `.reloc` has 0x200 bytes of file data and a 0x1000-byte virtual extent.
     // RVA 0x2800 is zero-filled section backing rather than a hole.
@@ -604,6 +624,46 @@ fn virtual_zero_fill_target_is_image_backed() {
 
     assert_eq!(report.applied_dir64, 1);
     assert_eq!(memory.read_u64_bypass(base + 0x2800).unwrap(), 0x1000);
+}
+
+#[test]
+fn raw_larger_than_virtual_section_extent_is_image_backed() {
+    // PE backing uses the larger of virtual and raw size. Shrink .text's
+    // virtual extent while retaining its 0x200-byte raw extent.
+    let table = block(0x1000, &[0xA150, 0x0000]);
+    let mut bytes = build(16, &table, table.len() as u32);
+    let text_header = OPTIONAL_HEADER + 240;
+    bytes[text_header + 8..text_header + 12].copy_from_slice(&0x100u32.to_le_bytes());
+    let base = PREFERRED + 0x1000;
+    let (pe, mut memory) = load(&bytes, base);
+
+    let report = apply_relocations(&pe, &bytes, base, &mut memory).expect("relocate");
+
+    assert_eq!(report.applied_dir64, 1);
+}
+
+#[test]
+fn target_crossing_adjacent_section_backing_is_accepted() {
+    // Extend .text exactly to .reloc at RVA 0x2000, so committed backing is
+    // contiguous across the section boundary. Memory for the zero-filled part
+    // is mapped explicitly because the compact test loader maps only raw bytes.
+    let table = block(0x1000, &[0xAFFC, 0x0000]);
+    let mut bytes = build(16, &table, table.len() as u32);
+    let text_header = OPTIONAL_HEADER + 240;
+    bytes[text_header + 8..text_header + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+    let base = PREFERRED + 0x1000;
+    let (pe, mut memory) = load(&bytes, base);
+    memory
+        .map_region(
+            base + 0x1200,
+            0xe00,
+            xenora_loader::MemoryPermissions::READ_WRITE,
+        )
+        .expect("zero-fill backing");
+
+    let report = apply_relocations(&pe, &bytes, base, &mut memory).expect("relocate");
+
+    assert_eq!(report.applied_dir64, 1);
 }
 
 #[test]

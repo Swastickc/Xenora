@@ -101,6 +101,7 @@ exact revision and known limitations.
 
 ### Added
 
+- Documented AMD FidelityFX licensing and native Metal compatibility boundaries at a pinned public SDK revision, including the default binary-only license, exact-file MIT-list review requirement, temporal-upscaling input contracts and independent fixture requirements. No AMD implementation source, shader or asset was copied, and no upscaling implementation or compatibility is claimed.
 - Documented native Metal acceleration-structure compatibility boundaries from the public SDK, including descriptor separation, sizing, scratch ownership, build/refit/copy/compaction ordering and deterministic fixture requirements. No implementation or console-specific ABI is claimed.
 - Added an original Scarlett-style Gaming Runtime fixture (#713) with static import and startup diagnostics.
 - The interpreter and ARM64 dynamic binary translator accept 73 additional 256-bit AVX2 packed integer forms through shared semantics (#711).

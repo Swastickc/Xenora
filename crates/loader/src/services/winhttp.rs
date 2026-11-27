@@ -4,7 +4,7 @@
 //!
 //! The object layer models sessions, connections and requests. The transport
 //! layer performs one cleartext HTTP/1.1 request/response exchange per request
-//! with `Connection: close`. TLS, chunked coding, asynchronous callbacks,
+//! with `Connection: close`. TLS, asynchronous callbacks,
 //! cancellation, redirection, authentication, proxying, streaming writes and
 //! connection reuse remain separate unsupported slices.
 
@@ -17,6 +17,8 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
+
+mod request_headers;
 
 const MODULE: &str = "winhttp.dll";
 const MAX_HANDLES: usize = 256;
@@ -59,10 +61,10 @@ const DOCUMENTED_REQUEST_FLAGS: u32 = 0x0000_01cc | WINHTTP_FLAG_SECURE;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TimeoutSettings {
-    resolve: i32,
-    connect: i32,
-    send: i32,
-    receive: i32,
+    resolve: u32,
+    connect: u32,
+    send: u32,
+    receive: u32,
 }
 
 impl Default for TimeoutSettings {
@@ -76,8 +78,20 @@ impl Default for TimeoutSettings {
     }
 }
 
-fn timeout_duration(timeout: i32) -> Option<Duration> {
-    (timeout > 0).then(|| Duration::from_millis(timeout as u64))
+impl TimeoutSettings {
+    fn option_mut(&mut self, option: u32) -> Option<&mut u32> {
+        match option {
+            WINHTTP_OPTION_RESOLVE_TIMEOUT => Some(&mut self.resolve),
+            WINHTTP_OPTION_CONNECT_TIMEOUT => Some(&mut self.connect),
+            WINHTTP_OPTION_SEND_TIMEOUT => Some(&mut self.send),
+            WINHTTP_OPTION_RECEIVE_TIMEOUT => Some(&mut self.receive),
+            _ => None,
+        }
+    }
+}
+
+fn timeout_duration(timeout: u32) -> Option<Duration> {
+    (timeout != 0 && timeout != u32::MAX).then(|| Duration::from_millis(u64::from(timeout)))
 }
 
 enum HandleKind {
@@ -92,14 +106,11 @@ enum HandleKind {
         session_timeouts: Arc<Mutex<TimeoutSettings>>,
     },
     Request {
-        agent: Option<String>,
         server: String,
         port: u32,
         verb: String,
         object_name: String,
         version: String,
-        referrer: Option<String>,
-        accept_types: Vec<String>,
         secure: bool,
         timeouts: Arc<Mutex<TimeoutSettings>>,
         transport: Arc<Mutex<TransportState>>,
@@ -107,14 +118,11 @@ enum HandleKind {
 }
 
 struct RequestSnapshot {
-    agent: Option<String>,
     server: String,
     port: u32,
     verb: String,
     object_name: String,
     version: String,
-    referrer: Option<String>,
-    accept_types: Vec<String>,
     secure: bool,
     timeouts: TimeoutSettings,
 }
@@ -171,6 +179,7 @@ struct ResponseHead {
 
 struct TransportState {
     phase: TransportPhase,
+    request_headers: Vec<(String, String)>,
     verb: String,
     stream: Option<BufReader<TcpStream>>,
     response: Option<ResponseHead>,
@@ -179,9 +188,20 @@ struct TransportState {
 }
 
 impl TransportState {
-    fn new() -> Self {
+    fn new(agent: Option<String>, referrer: Option<String>, accept_types: Vec<String>) -> Self {
+        let mut request_headers = Vec::new();
+        if let Some(agent) = agent.filter(|agent| !agent.is_empty()) {
+            request_headers.push(("User-Agent".to_owned(), agent));
+        }
+        if !accept_types.is_empty() {
+            request_headers.push(("Accept".to_owned(), accept_types.join(", ")));
+        }
+        if let Some(referrer) = referrer {
+            request_headers.push(("Referer".to_owned(), referrer));
+        }
         Self {
             phase: TransportPhase::New,
+            request_headers,
             verb: String::new(),
             stream: None,
             response: None,
@@ -191,9 +211,8 @@ impl TransportState {
     }
 }
 
-/// The WinHTTP handle table. Handles are opaque guest values; the table owns
-/// immutable snapshots of every string, so later guest-memory writes cannot
-/// mutate an existing object.
+/// The WinHTTP handle table owns all copied strings and request settings.
+/// Later guest-memory writes cannot mutate an existing object.
 #[derive(Default)]
 pub(super) struct WinHttpHandles {
     next: u64,
@@ -221,6 +240,31 @@ impl WinHttpHandles {
         let handle = 0x5748_0000_0000_0000 | self.next;
         self.handles.insert(handle, kind);
         Ok(handle)
+    }
+
+    fn configure_timeouts(
+        &self,
+        handle: u64,
+        update: impl FnOnce(&mut TimeoutSettings) -> Result<(), u32>,
+    ) -> Result<(), u32> {
+        match self.kind(handle) {
+            Some(HandleKind::Session { timeouts, .. }) => {
+                update(&mut timeouts.lock().expect("WinHTTP timeouts"))
+            }
+            Some(HandleKind::Request {
+                timeouts,
+                transport,
+                ..
+            }) => {
+                let request = transport.lock().expect("WinHTTP transport");
+                if request.phase != TransportPhase::New {
+                    return Err(ERROR_WINHTTP_INCORRECT_HANDLE_STATE);
+                }
+                update(&mut timeouts.lock().expect("WinHTTP timeouts"))
+            }
+            Some(_) => Err(ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
+            None => Err(ERROR_INVALID_HANDLE),
+        }
     }
 
     fn kind(&self, handle: u64) -> Option<&HandleKind> {
@@ -305,12 +349,15 @@ fn valid_header_value(text: &str) -> bool {
         .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
 }
 
-fn parse_additional_headers(text: &str) -> Result<Vec<(String, String)>, u32> {
+fn parse_request_headers(
+    text: &str,
+    require_final_crlf: bool,
+) -> Result<Vec<(String, String)>, u32> {
     let mut headers = Vec::new();
     if text.is_empty() {
         return Ok(headers);
     }
-    if !text.ends_with("\r\n") {
+    if require_final_crlf && !text.ends_with("\r\n") {
         return Err(ERROR_INVALID_PARAMETER);
     }
     for line in text.split_terminator("\r\n") {
@@ -341,18 +388,22 @@ fn read_exact_wide_string(memory: &GuestMemory, address: u64, units: usize) -> R
     }
     let mut wide = Vec::with_capacity(units);
     for index in 0..units {
+        let unit_address = address
+            .checked_add(2 * index as u64)
+            .ok_or(ERROR_INVALID_PARAMETER)?;
         let unit = memory
-            .read_u16(address + 2 * index as u64)
+            .read_u16(unit_address)
             .map_err(|_| ERROR_INVALID_PARAMETER)?;
         wide.push(unit);
     }
     Ok(String::from_utf16_lossy(&wide))
 }
 
-fn read_additional_headers(
+fn read_request_headers(
     memory: &GuestMemory,
     address: u64,
     units: u32,
+    require_final_crlf: bool,
 ) -> Result<Vec<(String, String)>, u32> {
     if address == 0 {
         return if units == 0 {
@@ -369,7 +420,7 @@ fn read_additional_headers(
     if !text.is_ascii() {
         return Err(ERROR_INVALID_PARAMETER);
     }
-    parse_additional_headers(&text)
+    parse_request_headers(&text, require_final_crlf)
 }
 
 fn request_path(object_name: &str) -> Result<String, u32> {
@@ -398,8 +449,8 @@ fn effective_port(port: u32, secure: bool) -> u16 {
 
 fn build_request_wire(
     snapshot: &RequestSnapshot,
+    configured_headers: &[(String, String)],
     additional_headers: &[(String, String)],
-    body: &[u8],
     total_length: u32,
 ) -> Result<Vec<u8>, u32> {
     let path = request_path(&snapshot.object_name)?;
@@ -414,37 +465,10 @@ fn build_request_wire(
         "{} {} {}\r\nHost: {}\r\n",
         snapshot.verb, path, snapshot.version, host
     );
-    if let Some(agent) = &snapshot.agent
-        && !agent.is_empty()
-    {
-        if !valid_header_value(agent) {
+    for (name, value) in configured_headers.iter().chain(additional_headers) {
+        if !valid_header_value(value) {
             return Err(ERROR_INVALID_PARAMETER);
         }
-        request.push_str("User-Agent: ");
-        request.push_str(agent);
-        request.push_str("\r\n");
-    }
-    if !snapshot.accept_types.is_empty() {
-        if snapshot
-            .accept_types
-            .iter()
-            .any(|accept| !valid_header_value(accept))
-        {
-            return Err(ERROR_INVALID_PARAMETER);
-        }
-        request.push_str("Accept: ");
-        request.push_str(&snapshot.accept_types.join(", "));
-        request.push_str("\r\n");
-    }
-    if let Some(referrer) = &snapshot.referrer {
-        if !valid_header_value(referrer) {
-            return Err(ERROR_INVALID_PARAMETER);
-        }
-        request.push_str("Referer: ");
-        request.push_str(referrer);
-        request.push_str("\r\n");
-    }
-    for (name, value) in additional_headers {
         request.push_str(name);
         request.push_str(": ");
         request.push_str(value);
@@ -456,9 +480,7 @@ fn build_request_wire(
         request.push_str("\r\n");
     }
     request.push_str("Connection: close\r\n\r\n");
-    let mut wire = request.into_bytes();
-    wire.extend_from_slice(body);
-    Ok(wire)
+    Ok(request.into_bytes())
 }
 
 fn request_parts(
@@ -467,28 +489,22 @@ fn request_parts(
 ) -> Result<(RequestSnapshot, Arc<Mutex<TransportState>>), u32> {
     match handles.kind(handle) {
         Some(HandleKind::Request {
-            agent,
             server,
             port,
             verb,
             object_name,
             version,
-            referrer,
-            accept_types,
             secure,
             timeouts,
             transport,
             ..
         }) => Ok((
             RequestSnapshot {
-                agent: agent.clone(),
                 server: server.clone(),
                 port: *port,
                 verb: verb.clone(),
                 object_name: object_name.clone(),
                 version: version.clone(),
-                referrer: referrer.clone(),
-                accept_types: accept_types.clone(),
                 secure: *secure,
                 timeouts: *timeouts.lock().expect("WinHTTP timeouts"),
             },
@@ -510,7 +526,7 @@ fn request_transport(
     }
 }
 
-fn resolve_addresses(server: &str, port: u16, timeout: i32) -> Result<Vec<SocketAddr>, u32> {
+fn resolve_addresses(server: &str, port: u16, timeout: u32) -> Result<Vec<SocketAddr>, u32> {
     let Some(duration) = timeout_duration(timeout) else {
         return (server, port)
             .to_socket_addrs()
@@ -973,19 +989,20 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 None => return request.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
             };
             match handles.insert(HandleKind::Request {
-                agent,
                 server,
                 port,
                 verb,
                 object_name,
                 version,
-                referrer,
-                accept_types,
                 secure: flags & WINHTTP_FLAG_SECURE != 0,
                 timeouts: Arc::new(Mutex::new(
                     *session_timeouts.lock().expect("WinHTTP timeouts"),
                 )),
-                transport: Arc::new(Mutex::new(TransportState::new())),
+                transport: Arc::new(Mutex::new(TransportState::new(
+                    agent,
+                    referrer,
+                    accept_types,
+                ))),
             }) {
                 Ok(handle) => Ok(handle),
                 Err(error) => request.fail(cpu.gs_base, error, 0),
@@ -999,41 +1016,82 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "WinHttpSetTimeouts",
         ServiceStatus::Partial,
         move |args, cpu, memory| {
-            let values = TimeoutSettings {
-                resolve: args.rdx as i32,
-                connect: args.r8 as i32,
-                send: args.r9 as i32,
-                receive: args.get(4, memory).map_err(memory_fault)? as i32,
-            };
-            if [values.resolve, values.connect, values.send, values.receive]
-                .iter()
-                .any(|timeout| *timeout < -1)
-            {
+            let values = [
+                args.rdx as i32,
+                args.r8 as i32,
+                args.r9 as i32,
+                args.get(4, memory).map_err(memory_fault)? as i32,
+            ];
+            if values.iter().any(|&timeout| timeout < -1) {
                 return set_timeouts.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
             }
+            let [resolve, connect, send, receive] = values.map(|timeout| timeout as u32);
             let handles = set_timeouts.winhttp.lock().expect("WinHTTP handle table");
-            match handles.kind(args.rcx) {
-                Some(HandleKind::Session { timeouts, .. }) => {
-                    *timeouts.lock().expect("WinHTTP timeouts") = values;
-                    Ok(1)
-                }
-                Some(HandleKind::Request {
-                    timeouts,
-                    transport,
-                    ..
-                }) => {
-                    if transport.lock().expect("WinHTTP transport").phase != TransportPhase::New {
-                        return set_timeouts.fail(
-                            cpu.gs_base,
-                            ERROR_WINHTTP_INCORRECT_HANDLE_STATE,
-                            0,
-                        );
-                    }
-                    *timeouts.lock().expect("WinHTTP timeouts") = values;
-                    Ok(1)
-                }
-                Some(_) => set_timeouts.fail(cpu.gs_base, ERROR_WINHTTP_INCORRECT_HANDLE_TYPE, 0),
-                None => set_timeouts.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+            match handles.configure_timeouts(args.rcx, |timeouts| {
+                *timeouts = TimeoutSettings {
+                    resolve,
+                    connect,
+                    send,
+                    receive,
+                };
+                Ok(())
+            }) {
+                Ok(()) => Ok(1),
+                Err(error) => set_timeouts.fail(cpu.gs_base, error, 0),
+            }
+        },
+    );
+
+    let set_option = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WinHttpSetOption",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            if args.r8 == 0 || args.r9 as u32 != 4 {
+                return set_option.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            let value = match memory.read_u32(args.r8) {
+                Ok(value) => value,
+                Err(_) => return set_option.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
+            };
+            let handles = set_option.winhttp.lock().expect("WinHTTP handle table");
+            match handles.configure_timeouts(args.rcx, |timeouts| {
+                let timeout = timeouts
+                    .option_mut(args.rdx as u32)
+                    .ok_or(ERROR_WINHTTP_INVALID_OPTION)?;
+                *timeout = value;
+                Ok(())
+            }) {
+                Ok(()) => Ok(1),
+                Err(error) => set_option.fail(cpu.gs_base, error, 0),
+            }
+        },
+    );
+
+    let add_headers = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WinHttpAddRequestHeaders",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let headers = match read_request_headers(memory, args.rdx, args.r8 as u32, false) {
+                Ok(headers) if !headers.is_empty() => headers,
+                Ok(_) => return add_headers.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0),
+                Err(error) => return add_headers.fail(cpu.gs_base, error, 0),
+            };
+            let handles = add_headers.winhttp.lock().expect("WinHTTP handle table");
+            let transport = match request_transport(&handles, args.rcx) {
+                Ok(transport) => transport,
+                Err(error) => return add_headers.fail(cpu.gs_base, error, 0),
+            };
+            let mut request = transport.lock().expect("WinHTTP transport");
+            if request.phase != TransportPhase::New {
+                return add_headers.fail(cpu.gs_base, ERROR_WINHTTP_INCORRECT_HANDLE_STATE, 0);
+            }
+            match request_headers::update(&mut request.request_headers, headers, args.r9 as u32) {
+                Ok(()) => Ok(1),
+                Err(error) => add_headers.fail(cpu.gs_base, error, 0),
             }
         },
     );
@@ -1044,17 +1102,20 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "WinHttpSendRequest",
         ServiceStatus::Partial,
         move |args, cpu, memory| {
-            let (snapshot, transport) = {
+            {
                 let handles = send.winhttp.lock().expect("WinHTTP handle table");
-                match request_parts(&handles, args.rcx) {
-                    Ok(parts) => parts,
-                    Err(error) => return send.fail(cpu.gs_base, error, 0),
+                match handles.kind(args.rcx) {
+                    Some(HandleKind::Request { secure: false, .. }) => {}
+                    Some(HandleKind::Request { secure: true, .. }) => {
+                        return send.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+                    }
+                    Some(_) => {
+                        return send.fail(cpu.gs_base, ERROR_WINHTTP_INCORRECT_HANDLE_TYPE, 0);
+                    }
+                    None => return send.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
                 }
-            };
-            if snapshot.secure {
-                return send.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
-            let additional = match read_additional_headers(memory, args.rdx, args.r8 as u32) {
+            let additional = match read_request_headers(memory, args.rdx, args.r8 as u32, true) {
                 Ok(headers) => headers,
                 Err(error) => return send.fail(cpu.gs_base, error, 0),
             };
@@ -1079,17 +1140,34 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     return send.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
                 }
             }
-            let wire = match build_request_wire(&snapshot, &additional, &body, total_length) {
-                Ok(wire) => wire,
-                Err(error) => return send.fail(cpu.gs_base, error, 0),
+            let (snapshot, transport, mut wire) = {
+                // Hold the table across the timeout snapshot and phase change.
+                // Configuration changes either run first or see a started request.
+                let handles = send.winhttp.lock().expect("WinHTTP handle table");
+                let (snapshot, transport) = match request_parts(&handles, args.rcx) {
+                    Ok(parts) => parts,
+                    Err(error) => return send.fail(cpu.gs_base, error, 0),
+                };
+                let wire = {
+                    let mut request = transport.lock().expect("WinHTTP transport");
+                    if request.phase != TransportPhase::New {
+                        return send.fail(cpu.gs_base, ERROR_WINHTTP_INCORRECT_HANDLE_STATE, 0);
+                    }
+                    let wire = match build_request_wire(
+                        &snapshot,
+                        &request.request_headers,
+                        &additional,
+                        total_length,
+                    ) {
+                        Ok(wire) => wire,
+                        Err(error) => return send.fail(cpu.gs_base, error, 0),
+                    };
+                    request.phase = TransportPhase::Busy;
+                    wire
+                };
+                (snapshot, transport, wire)
             };
-            {
-                let mut transport_guard = transport.lock().expect("WinHTTP transport");
-                if transport_guard.phase != TransportPhase::New {
-                    return send.fail(cpu.gs_base, ERROR_WINHTTP_INCORRECT_HANDLE_STATE, 0);
-                }
-                transport_guard.phase = TransportPhase::Busy;
-            }
+            wire.extend_from_slice(&body);
             let port = effective_port(snapshot.port, snapshot.secure);
             let result =
                 connect_tcp(&snapshot.server, port, snapshot.timeouts).and_then(|mut stream| {
@@ -1445,7 +1523,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             }
             let length_ptr = args.r9;
             let capacity = memory.read_u32(length_ptr).map_err(memory_fault)?;
-            let timeouts = {
+            let mut timeouts = {
                 let handles = query_option.winhttp.lock().expect("WinHTTP handle table");
                 match handles.kind(args.rcx) {
                     Some(HandleKind::Session { timeouts, .. })
@@ -1462,13 +1540,9 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     None => return query_option.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
                 }
             };
-            let value = match args.rdx as u32 {
-                WINHTTP_OPTION_RESOLVE_TIMEOUT => timeouts.resolve,
-                WINHTTP_OPTION_CONNECT_TIMEOUT => timeouts.connect,
-                WINHTTP_OPTION_SEND_TIMEOUT => timeouts.send,
-                WINHTTP_OPTION_RECEIVE_TIMEOUT => timeouts.receive,
-                _ => return query_option.fail(cpu.gs_base, ERROR_WINHTTP_INVALID_OPTION, 0),
-            } as u32;
+            let Some(&mut value) = timeouts.option_mut(args.rdx as u32) else {
+                return query_option.fail(cpu.gs_base, ERROR_WINHTTP_INVALID_OPTION, 0);
+            };
             memory.write_u32(length_ptr, 4).map_err(memory_fault)?;
             if args.r8 == 0 || capacity < 4 {
                 return query_option.fail(cpu.gs_base, ERROR_INSUFFICIENT_BUFFER, 0);
@@ -1693,10 +1767,16 @@ mod tests {
         assert_ne!(request, 0);
         write_wide(&mut fixture.memory, 0x2500, "text/html");
         let handles = fixture.state.winhttp.lock().unwrap();
-        assert!(matches!(
-            handles.kind(request),
-            Some(HandleKind::Request { accept_types, .. }) if accept_types == &vec!["text/plain".to_owned()]
-        ));
+        let Some(HandleKind::Request { transport, .. }) = handles.kind(request) else {
+            panic!("request handle missing");
+        };
+        let transport = transport.lock().unwrap();
+        assert!(
+            transport
+                .request_headers
+                .iter()
+                .any(|(name, value)| { name == "Accept" && value == "text/plain" })
+        );
     }
 
     #[test]
@@ -1777,7 +1857,7 @@ mod tests {
         assert_eq!(
             *timeouts.lock().unwrap(),
             TimeoutSettings {
-                resolve: -1,
+                resolve: u32::MAX,
                 connect: 1,
                 send: 2,
                 receive: 3,
@@ -1829,6 +1909,69 @@ mod tests {
             1
         );
         assert_eq!(fixture.memory.read_u32(0x2910).unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn setting_timeout_options_preserves_dwords_and_request_inheritance() {
+        let mut fixture = Fixture::new();
+        let (session, connection) = fixture.open_connection();
+        for (option, value) in [(2, u32::MAX), (3, 0x8000_0001), (5, 700), (6, 10_000)] {
+            fixture.memory.write_u32(0x2910, value).unwrap();
+            assert_eq!(
+                fixture.call("WinHttpSetOption", &[session, option, 0x2910, 4]),
+                1
+            );
+        }
+        let request = fixture.call("WinHttpOpenRequest", &[connection, 0, 0, 0, 0, 0, 0]);
+        assert_ne!(request, 0);
+
+        fixture.memory.write_u32(0x2910, 240).unwrap();
+        assert_eq!(
+            fixture.call("WinHttpSetOption", &[request, 6, 0x2910, 4]),
+            1
+        );
+        for (handle, option, expected) in [
+            (request, 2, u32::MAX),
+            (request, 3, 0x8000_0001),
+            (request, 5, 700),
+            (request, 6, 240),
+            (session, 6, 10_000),
+        ] {
+            fixture.memory.write_u32(0x2900, 4).unwrap();
+            assert_eq!(
+                fixture.call("WinHttpQueryOption", &[handle, option, 0x2920, 0x2900]),
+                1
+            );
+            assert_eq!(fixture.memory.read_u32(0x2920).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_timeout_options_leave_current_values_intact() {
+        let mut fixture = Fixture::new();
+        let (session, connection) = fixture.open_connection();
+        fixture.memory.write_u32(0x2910, 901).unwrap();
+        for (args, error) in [
+            ([session, 3, 0, 4], ERROR_INVALID_PARAMETER),
+            ([session, 3, 0x2910, 3], ERROR_INVALID_PARAMETER),
+            ([session, 3, 0x2910, 8], ERROR_INVALID_PARAMETER),
+            ([session, 3, 0x9000, 4], ERROR_INVALID_PARAMETER),
+            ([session, 4, 0x2910, 4], ERROR_WINHTTP_INVALID_OPTION),
+            (
+                [connection, 3, 0x2910, 4],
+                ERROR_WINHTTP_INCORRECT_HANDLE_TYPE,
+            ),
+            ([0, 3, 0x2910, 4], ERROR_INVALID_HANDLE),
+        ] {
+            assert_eq!(fixture.call("WinHttpSetOption", &args), 0);
+            assert_eq!(fixture.state.last_error(0), error);
+        }
+        fixture.memory.write_u32(0x2900, 4).unwrap();
+        assert_eq!(
+            fixture.call("WinHttpQueryOption", &[session, 3, 0x2920, 0x2900]),
+            1
+        );
+        assert_eq!(fixture.memory.read_u32(0x2920).unwrap(), 60_000);
     }
 
     #[test]
@@ -1913,7 +2056,12 @@ mod tests {
         let mut fixture = Fixture::new();
         let request = open_loopback_request(&mut fixture, port);
         assert_eq!(
-            fixture.call("WinHttpSetTimeouts", &[request, 5_000, 1_000, 1_000, 50]),
+            fixture.call("WinHttpSetTimeouts", &[request, 5_000, 1_000, 1_000, 0]),
+            1
+        );
+        fixture.memory.write_u32(0x2900, 50).unwrap();
+        assert_eq!(
+            fixture.call("WinHttpSetOption", &[request, 6, 0x2900, 4]),
             1
         );
         assert_eq!(
@@ -1922,6 +2070,14 @@ mod tests {
         );
         assert_eq!(
             fixture.call("WinHttpSetTimeouts", &[request, 0, 1_000, 1_000, 50]),
+            0
+        );
+        assert_eq!(
+            fixture.state.last_error(0),
+            ERROR_WINHTTP_INCORRECT_HANDLE_STATE
+        );
+        assert_eq!(
+            fixture.call("WinHttpSetOption", &[request, 6, 0x2900, 4]),
             0
         );
         assert_eq!(
@@ -2001,6 +2157,118 @@ mod tests {
         );
         assert_ne!(request, 0);
         request
+    }
+
+    #[test]
+    fn configured_headers_are_copied_merged_and_sent_on_the_wire() {
+        let (port, captured, server) =
+            serve_once(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+        let mut fixture = Fixture::new();
+        write_wide(&mut fixture.memory, 0x2200, "POST");
+        let request = open_loopback_request(&mut fixture, port);
+
+        let mut add = |text: &str, units, modifiers| {
+            write_wide(&mut fixture.memory, 0x2700, text);
+            fixture.call(
+                "WinHttpAddRequestHeaders",
+                &[request, 0x2700, units, modifiers],
+            )
+        };
+        let initial = "X-Trace: one\r\nX-Drop: obsolete";
+        assert_eq!(
+            add(&format!("{initial}ignored"), initial.len() as u64, 0),
+            1
+        );
+        assert_eq!(add("x-TRACE: two", u64::from(u32::MAX), 0x4000_0000), 1);
+        assert_eq!(add("X-Drop:", u64::from(u32::MAX), 0x8000_0000), 1);
+        assert_eq!(
+            add("accept: application/json", u64::from(u32::MAX), 0x8000_0000),
+            1
+        );
+        assert_eq!(
+            add(
+                "X-Omitted: first\r\nx-trace: duplicate",
+                u64::from(u32::MAX),
+                0x1000_0000
+            ),
+            0
+        );
+        assert_eq!(fixture.state.last_error(0), 12155);
+        write_wide(&mut fixture.memory, 0x2700, "X-Once: transient\r\n");
+        let body = [0, b'A', 0xff];
+        fixture.memory.write_bytes(0x2800, &body).unwrap();
+        assert_eq!(
+            fixture.call(
+                "WinHttpSendRequest",
+                &[request, 0x2700, u64::from(u32::MAX), 0x2800, 3, 3, 0]
+            ),
+            1
+        );
+        assert_eq!(
+            fixture.call(
+                "WinHttpAddRequestHeaders",
+                &[request, 0x2700, u64::from(u32::MAX), 0]
+            ),
+            0
+        );
+        assert_eq!(
+            fixture.state.last_error(0),
+            ERROR_WINHTTP_INCORRECT_HANDLE_STATE
+        );
+        assert_eq!(fixture.call("WinHttpReceiveResponse", &[request, 0]), 1);
+        server.join().unwrap();
+        let captured = captured.lock().unwrap();
+        let mut expected = format!(
+            "POST /fixture HTTP/1.1\r\n\
+             Host: 127.0.0.1:{port}\r\n\
+             User-Agent: XenoraTest/1.0\r\n\
+             Accept: application/json\r\n\
+             X-Trace: one, two\r\n\
+             X-Once: transient\r\n\
+             Content-Length: 3\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .into_bytes();
+        expected.extend_from_slice(&body);
+        assert_eq!(*captured, expected);
+    }
+
+    #[test]
+    fn request_header_updates_reject_bad_pointers_handles_and_framing() {
+        let mut fixture = Fixture::new();
+        let (session, connection) = fixture.open_connection();
+        let request = fixture.call("WinHttpOpenRequest", &[connection, 0, 0, 0, 0, 0, 0]);
+        write_wide(&mut fixture.memory, 0x2700, "X-Test: okay");
+        for (args, error) in [
+            (
+                [session, 0x2700, 12, 0],
+                ERROR_WINHTTP_INCORRECT_HANDLE_TYPE,
+            ),
+            ([request, 0, 0, 0], ERROR_INVALID_PARAMETER),
+            ([request, 0x9000, 5, 0], ERROR_INVALID_PARAMETER),
+            ([request, 0x2700, 4097, 0], ERROR_INVALID_PARAMETER),
+            ([request, 0x2700, 12, 1], ERROR_NOT_SUPPORTED),
+            ([1, 0x2700, 12, 0], ERROR_INVALID_HANDLE),
+        ] {
+            assert_eq!(fixture.call("WinHttpAddRequestHeaders", &args), 0);
+            assert_eq!(fixture.state.last_error(0), error);
+        }
+        for (text, error) in [
+            ("bad name: data", ERROR_INVALID_PARAMETER),
+            ("X-Okay: value\nX-Other: data", ERROR_INVALID_PARAMETER),
+            ("hOsT: outside", ERROR_NOT_SUPPORTED),
+            ("Transfer-Encoding: chunked", ERROR_NOT_SUPPORTED),
+        ] {
+            write_wide(&mut fixture.memory, 0x2700, text);
+            assert_eq!(
+                fixture.call(
+                    "WinHttpAddRequestHeaders",
+                    &[request, 0x2700, u64::from(u32::MAX), 0]
+                ),
+                0
+            );
+            assert_eq!(fixture.state.last_error(0), error);
+        }
     }
 
     #[test]
@@ -2342,11 +2610,28 @@ mod tests {
             "WinHttpOpenRequest",
             &[connection, 0, 0, 0, 0, 0, WINHTTP_FLAG_SECURE as u64],
         );
-        assert_eq!(
-            fixture.call("WinHttpSendRequest", &[request, 0, 0, 0, 0, 0, 0]),
-            0
-        );
-        assert_eq!(fixture.state.last_error(0), ERROR_NOT_SUPPORTED);
+        for (handle, expected) in [
+            (request, ERROR_NOT_SUPPORTED),
+            (session, ERROR_WINHTTP_INCORRECT_HANDLE_TYPE),
+            (0, ERROR_INVALID_HANDLE),
+        ] {
+            let descriptor = fixture
+                .registry
+                .resolve(MODULE, &ImportName::Name("WinHttpSendRequest".to_owned()))
+                .unwrap();
+            let args = Win64Args {
+                rcx: handle,
+                rdx: 0x9000,
+                r8: 4,
+                r9: 0,
+                rsp: 0x9000,
+            };
+            assert_eq!(
+                (descriptor.handler)(&args, &mut CpuState::default(), &mut fixture.memory),
+                Ok(0)
+            );
+            assert_eq!(fixture.state.last_error(0), expected);
+        }
     }
 
     #[test]

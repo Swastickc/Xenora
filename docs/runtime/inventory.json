@@ -18282,7 +18282,7 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 865,
+    "canonical_services": 867,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,

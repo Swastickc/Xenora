@@ -92,6 +92,7 @@ exact revision and known limitations.
 - An original hosted C record and compression fixture, with O0–O3 guest builds, independently specified output and file-byte checks, and malformed-input controls (#796).
 
 ### Fixed
+- Contended, recursive or invalid `__cxa_guard_acquire` no longer answers `-1`: the Itanium C++ ABI gives acquisition no error channel, so compiler-generated callers read any nonzero result as permission to initialize, and the old answer authorized exactly the double initialization the guard exists to prevent. The refusal now stops the guest with the explicit fault, matching the release/abort contract of the same surface. The compiler-generated fixture gains reentrant, unmapped-acquire and unaligned-acquire controls proving no answer leaves the handler.
 
 - QA benchmark statistics now reject NaN and infinite samples instead of producing meaningless ordering statistics or non-standard JSON evidence (#827).
 - `_filbuf` and `_flsbuf` now honor the standard streams: the byte primitives resolved their stream through the opened-file table only, so the three standard streams failed with EBADF and every CRT small read on `stdin` ended before it began. `_filbuf` consumes the host-supplied input exactly as `fgetc` does, `_flsbuf` appends to the captured output with the same text-mode translation as every write, and a pointer that is no stream keeps its soft EOF/EBADF answer. Measured on the real mingw64 busybox probe: `wc -c` counts piped input correctly and `head` prints it, where both reported empty input before (#945).

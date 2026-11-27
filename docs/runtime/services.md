@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 292 |
-| Generated adapters | 292 |
-| Unique handler implementations | 274 |
+| Services with a declared ABI | 293 |
+| Generated adapters | 293 |
+| Unique handler implementations | 275 |
 | Implemented | 100 |
-| Partial | 190 |
+| Partial | 191 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 292 |
-| API-set aliases (not services) | 367 |
+| Conformance-tested through guest dispatch | 293 |
+| API-set aliases (not services) | 369 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |

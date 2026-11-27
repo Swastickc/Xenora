@@ -862,6 +862,60 @@ fn register_ioctl_and_reverse(registry: &mut ImportRegistry, state: &Arc<Service
             }
         },
     );
+
+    // gethostbyname resolves only names true in this loopback machine. Every
+    // other name is host-not-found because there is no external DNS.
+    let byname = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "gethostbyname",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            use crate::memory::PROCESS_HEAP;
+            let result = (|| {
+                if byname.winsock.lock().expect("guest Winsock state").refs == 0 {
+                    return Err(WSANOTINITIALISED);
+                }
+                if args.rcx == 0 {
+                    return Err(WSAEFAULT);
+                }
+                let name = read_socket_cstr(memory, args.rcx)?;
+                if !matches!(name.as_str(), "localhost" | "127.0.0.1" | "XENORA") {
+                    return Err(11001); // WSAHOST_NOT_FOUND
+                }
+                let needs = 64;
+                let base = memory
+                    .map_heap_allocation(PROCESS_HEAP, needs)
+                    .map_err(|_| WSAENOBUFS)?;
+                memory
+                    .write_bytes(base + 32, b"XENORA\0")
+                    .map_err(|_| WSAEFAULT)?;
+                memory
+                    .write_bytes(base + 40, &[127, 0, 0, 1])
+                    .map_err(|_| WSAEFAULT)?;
+                memory
+                    .write_u64(base + 48, base + 40)
+                    .map_err(|_| WSAEFAULT)?;
+                memory.write_u64(base + 56, 0).map_err(|_| WSAEFAULT)?;
+                memory.write_u64(base, base + 32).map_err(|_| WSAEFAULT)?;
+                memory
+                    .write_u64(base + 8, base + 56)
+                    .map_err(|_| WSAEFAULT)?;
+                memory.write_u64(base + 16, 2).map_err(|_| WSAEFAULT)?;
+                memory
+                    .write_u64(base + 24, base + 48)
+                    .map_err(|_| WSAEFAULT)?;
+                Ok(base)
+            })();
+            match result {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    let _ = byname.fail(cpu.gs_base, error, 0);
+                    Ok(0)
+                }
+            }
+        },
+    );
 }
 
 fn register_service_lookup(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -2604,6 +2658,24 @@ fn wsioctl_fionread_and_reverse_lookup() {
     let mut name = [0; 7];
     memory.read_bytes(name_ptr, &mut name).unwrap();
     assert_eq!(&name, b"XENORA\0");
+    for text in [
+        b"localhost\0".as_slice(),
+        b"127.0.0.1\0".as_slice(),
+        b"XENORA\0".as_slice(),
+    ] {
+        memory.write_bytes(0x1900, text).unwrap();
+        let hostent = call(&mut memory, "gethostbyname", &[0x1900]);
+        assert_ne!(hostent, 0);
+        assert_eq!(memory.read_u64(hostent + 24).unwrap() - hostent, 48);
+        let address_list = memory.read_u64(hostent + 24).unwrap();
+        let address_ptr = memory.read_u64(address_list).unwrap();
+        let mut loopback = [0; 4];
+        memory.read_bytes(address_ptr, &mut loopback).unwrap();
+        assert_eq!(loopback, [127, 0, 0, 1]);
+    }
+    memory.write_bytes(0x1900, b"example.invalid\0").unwrap();
+    assert_eq!(call(&mut memory, "gethostbyname", &[0x1900]), 0);
+    assert_eq!(call(&mut memory, "gethostbyname", &[0]), 0);
     // A foreign address is an honest no-host.
     memory.write_bytes(0x1800, &[8, 8, 8, 8]).unwrap();
     assert_eq!(call(&mut memory, "gethostbyaddr", &[0x1800, 4, 2]), 0);

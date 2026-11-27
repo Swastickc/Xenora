@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Implemented loopback-only Winsock `gethostbyname` for `localhost`, `127.0.0.1` and the fixed `XENORA` machine name (#1107). Other names remain explicit host-not-found results because no external DNS exists.
 - Implemented the bounded Winsock `ioctlsocket` legacy form for `FIONREAD` and `FIONBIO` over the existing process-local loopback socket model (#1105). Unsupported commands and blocking-mode requests remain explicit errors; no external networking or general ioctl compatibility is claimed.
 - `xenora-session --workload reopen` runs the second bundled program under the same worker, frame and journal checks. That guest reopens its file each frame and checks an auto-reset event (#958).
 - `xenora-session --workload threaded` runs the bundled scheduled guest with one persistent Win32 worker (#961). Positional and replay inputs drive checked frames, journal columns and cleanup through the same launcher and PPM export path.

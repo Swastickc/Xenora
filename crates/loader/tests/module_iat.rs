@@ -806,6 +806,74 @@ mod module_iat {
     }
 
     #[test]
+    fn impossible_fixed_base_and_unmappable_reservations_are_rejected_before_mutation() {
+        let mut library = build_image(true, &[], Some(&export("lib.dll", &["X"])));
+        put16(&mut library.bytes, 0x96, 0x2001);
+        let root = build_image(false, &[named("lib.dll", "X")], None);
+        let package = Package::new(vec![("root.exe", root), ("lib.dll", library)]);
+        let images = package.explicit_images();
+        let graph = package.graph();
+        let mut memory = GuestMemory::new();
+        let reservations = map_images(&images, &mut memory);
+        let plan = correct_plan(&graph, &reservations);
+        let slot = package.images[0].image.import_slots[0];
+        let address = reservations[0].base + u64::from(slot);
+        let original = read_slot_bytes(&memory, address);
+
+        let mut fixed_bad = reservations.clone();
+        fixed_bad[1].base += BASE_STRIDE;
+        fixed_bad[1].end += BASE_STRIDE;
+        fixed_bad[1].used_preferred_base = false;
+        assert_eq!(
+            bind_module_iat(&images, &fixed_bad, &graph, &plan, &mut memory),
+            Err(ModuleIatError::FixedBaseReservationMismatch {
+                image_index: 1,
+                base: reservations[1].base + BASE_STRIDE,
+                preferred_base: reservations[1].base,
+            })
+        );
+
+        let mut unmappable_root = build_image(false, &[named("lib.dll", "X")], None);
+        put32(&mut unmappable_root.bytes, OPTIONAL + 16, 0x1_0000);
+        put32(&mut unmappable_root.bytes, OPTIONAL + 240 + 12, 0x1_0000);
+        let library = build_image(true, &[], Some(&export("lib.dll", &["X"])));
+        let unmappable_package =
+            Package::new(vec![("root.exe", unmappable_root), ("lib.dll", library)]);
+        let unmappable_images = unmappable_package.explicit_images();
+        let unmappable_graph = unmappable_package.graph();
+        let unmappable_reservations = vec![
+            ModuleReservation {
+                image_index: 0,
+                base: unmappable_package.images[0].pe.image_base,
+                end: unmappable_package.images[0].pe.image_base
+                    + u64::from(unmappable_package.images[0].pe.size_of_image),
+                used_preferred_base: true,
+                entry_point: Some(unmappable_package.images[0].pe.image_base + 0x1_0000),
+            },
+            ModuleReservation {
+                image_index: 1,
+                base: unmappable_package.images[1].pe.image_base,
+                end: unmappable_package.images[1].pe.image_base
+                    + u64::from(unmappable_package.images[1].pe.size_of_image),
+                used_preferred_base: true,
+                entry_point: None,
+            },
+        ];
+        let unmappable_plan = correct_plan(&unmappable_graph, &unmappable_reservations);
+        assert!(matches!(
+            bind_module_iat(
+                &unmappable_images,
+                &unmappable_reservations,
+                &unmappable_graph,
+                &unmappable_plan,
+                &mut memory,
+            ),
+            Err(ModuleIatError::ImageNotMappableAtReservation { image_index: 0, .. })
+        ));
+        assert_eq!(read_slot_bytes(&memory, address), original);
+    }
+
+    #[test]
     fn reservation_shape_and_input_indexes_are_validated_before_memory_mutation() {
         let library = build_image(true, &[], Some(&export("lib.dll", &["X"])));
         let root = build_image(false, &[named("lib.dll", "X")], None);

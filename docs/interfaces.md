@@ -158,7 +158,10 @@ expensive and is not the final memory-ownership design. Relocation itself
 performs no import or IAT write. Ordinary-IAT binding is a separate implemented
 step, while delayed imports, service registration, exception-directory
 registration, TLS callbacks, unloading, reference counting and module execution
-remain unsupported.
+remain unsupported. Before ordinary-IAT writes, the binder also requires
+fixed-base images to occupy their preferred reservations and each image/base
+pair to satisfy the same nonmutating mapping validation that produces legitimate
+reservations.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,

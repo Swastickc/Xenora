@@ -1,0 +1,10 @@
+[package]
+name = "xenora-input"
+description = "Host input router for Xenora: keyboard, mouse and physical controller sources into XInput-unit gamepad snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

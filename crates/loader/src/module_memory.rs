@@ -6,7 +6,9 @@
 //! single-image [`ParsedPe::map_into_memory`] primitive. It checks that the
 //! plan belongs to the exact ordered input batch before touching memory, maps
 //! images in input order at their planned bases and returns logical
-//! reservation records for inspection.
+//! reservation records for inspection. Those complete spans are retained in
+//! `GuestMemory` without committing their holes, so later allocations cannot
+//! reuse bytes reserved for the image.
 //!
 //! A complete batch plan has exactly one successful placement for every input
 //! image index, with no missing, duplicate or extra indexes. This layer also
@@ -30,11 +32,12 @@
 //! image snapshot. This is not the final memory-ownership or efficient
 //! reservation design.
 //!
-//! The returned reservations are logical `[base, end)` spans derived from the
-//! planned `SizeOfImage`. They are not ownership tokens. Only headers and
-//! sections are committed; holes inside an image span are not inaccessible
-//! guard reservations, and this layer does not prevent a later unrelated
-//! mapping from using one. Batch mapping performs no relocation, import or IAT
+//! The returned reservations describe `[base, end)` spans derived from the
+//! planned `SizeOfImage`. Only headers and sections are committed, but the
+//! complete span is retained as a lightweight ownership record so holes remain
+//! unmapped and unavailable to later mappings or dynamic allocations. The
+//! records still do not implement unloading, per-section ownership or host OS
+//! guard pages. Batch mapping performs no relocation, import or IAT
 //! binding, API-set resolution, service registration, exception or TLS
 //! initialization, unloading, reference counting or guest execution.
 
@@ -97,6 +100,14 @@ pub enum ModuleMemoryError {
     /// The descriptor retained by the plan does not match the parsed image
     /// supplied at the same input index.
     DescriptorMismatch { image_index: usize },
+    /// A placement span overlaps memory that existed before the batch. The
+    /// complete span is module-owned, so even an uncommitted hole cannot
+    /// contain unrelated memory.
+    PlacementConflict {
+        image_index: usize,
+        placement: AddressInterval,
+        existing: AddressInterval,
+    },
     /// Two half-open placement intervals overlap. Adjacent intervals do not.
     OverlappingPlacements {
         first_index: usize,
@@ -108,6 +119,13 @@ pub enum ModuleMemoryError {
     /// The image's own validation or insertion failed. The batch restored the
     /// exact prior [`GuestMemory`] snapshot before returning this error.
     MappingFailed { image_index: usize, source: PeError },
+    /// Retaining the image's complete span conflicted with an existing module
+    /// reservation. The batch restored the exact prior [`GuestMemory`]
+    /// snapshot before returning this error.
+    ReservationFailed {
+        image_index: usize,
+        source: MemoryError,
+    },
 }
 
 impl fmt::Display for ModuleMemoryError {
@@ -133,6 +151,15 @@ impl fmt::Display for ModuleMemoryError {
             Self::DescriptorMismatch { image_index } => {
                 write!(f, "layout descriptor does not describe image {image_index}")
             }
+            Self::PlacementConflict {
+                image_index,
+                placement,
+                existing,
+            } => write!(
+                f,
+                "placement for image {image_index} at [{:#x}, {:#x}) overlaps existing memory at [{:#x}, {:#x})",
+                placement.start, placement.end, existing.start, existing.end
+            ),
             Self::OverlappingPlacements {
                 first_index,
                 second_index,
@@ -150,6 +177,13 @@ impl fmt::Display for ModuleMemoryError {
                 f,
                 "image {image_index} failed validation or mapping: {source}"
             ),
+            Self::ReservationFailed {
+                image_index,
+                source,
+            } => write!(
+                f,
+                "image {image_index} failed reservation ownership: {source}"
+            ),
         }
     }
 }
@@ -158,6 +192,7 @@ impl std::error::Error for ModuleMemoryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::MappingFailed { source, .. } => Some(source),
+            Self::ReservationFailed { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -600,6 +635,17 @@ pub fn map_module_batch(
     if images.is_empty() {
         return Ok(Vec::new());
     }
+    for (image_index, placement) in placements.iter().enumerate() {
+        if let Some((existing_base, existing_end)) =
+            memory.first_region_overlap(placement.base, placement.end)
+        {
+            return Err(ModuleMemoryError::PlacementConflict {
+                image_index,
+                placement: AddressInterval::new(placement.base, placement.end),
+                existing: AddressInterval::new(existing_base, existing_end),
+            });
+        }
+    }
 
     let before = memory.clone();
     let mut reservations = Vec::with_capacity(images.len());
@@ -623,6 +669,15 @@ pub fn map_module_batch(
                     source,
                 });
             }
+        }
+    }
+    for reservation in &reservations {
+        if let Err(source) = memory.reserve_module_image_span(reservation.base, reservation.end) {
+            *memory = before;
+            return Err(ModuleMemoryError::ReservationFailed {
+                image_index: reservation.image_index,
+                source,
+            });
         }
     }
     Ok(reservations)

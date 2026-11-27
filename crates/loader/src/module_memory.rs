@@ -182,6 +182,12 @@ pub enum ModuleReservationError {
         entry_point: Option<u64>,
         expected_entry_point: Option<u64>,
     },
+    /// The preferred-base marker must say whether the reservation uses the
+    /// parsed image's preferred base.
+    WrongPreferredBase {
+        used_preferred_base: bool,
+        expected_used_preferred_base: bool,
+    },
 }
 
 impl fmt::Display for ModuleReservationError {
@@ -215,6 +221,13 @@ impl fmt::Display for ModuleReservationError {
                 f,
                 "reservation entry {entry_point:?} does not match image entry {expected_entry_point:?}"
             ),
+            Self::WrongPreferredBase {
+                used_preferred_base,
+                expected_used_preferred_base,
+            } => write!(
+                f,
+                "reservation preferred-base marker {used_preferred_base} does not match expected {expected_used_preferred_base}"
+            ),
         }
     }
 }
@@ -235,6 +248,11 @@ pub enum ModuleRelocationError {
     InvalidReservation {
         image_index: usize,
         source: ModuleReservationError,
+    },
+    /// Two reservation spans overlap. Half-open adjacency is valid.
+    OverlappingReservations {
+        first_image_index: usize,
+        second_image_index: usize,
     },
     /// The original bytes and parsed headers no longer agree on the image-base
     /// field location. The batch was not mutated.
@@ -279,6 +297,13 @@ impl fmt::Display for ModuleRelocationError {
                     "reservation for image {image_index} is inconsistent: {source}"
                 )
             }
+            Self::OverlappingReservations {
+                first_image_index,
+                second_image_index,
+            } => write!(
+                f,
+                "reservations for images {first_image_index} and {second_image_index} overlap"
+            ),
             Self::ValidationFailed {
                 image_index,
                 source,
@@ -321,9 +346,11 @@ impl std::error::Error for ModuleRelocationError {
 
 /// Apply every explicit module image's base relocations as one transaction.
 ///
-/// The reservation shape, image extents, alignment, entry metadata and mapped
-/// image-base field locations are validated before mutation. Relocation then
-/// runs in input order through the existing PE32+ DIR64 engine. Because that
+/// Reservation records are matched by `image_index`, so the caller's slice
+/// order does not matter. The exact-one index rule, reservation shape, image
+/// extents, alignment, entry and preferred-base metadata, span overlap and
+/// mapped image-base field locations are validated before mutation. Relocation
+/// then runs in input order through the existing PE32+ DIR64 engine. Because that
 /// engine is intentionally small and can discover malformed later entries only
 /// after earlier writes, this batch layer snapshots the whole address space
 /// once; any failure assigns that snapshot back before returning. The rollback
@@ -409,6 +436,20 @@ fn validate_reservations(
         validate_reservation(image_index, *image, reservation)?;
         ordered.push(reservation);
     }
+
+    let mut spans: Vec<_> = ordered
+        .iter()
+        .map(|reservation| (reservation.image_index, reservation.base, reservation.end))
+        .collect();
+    spans.sort_unstable_by_key(|&(image_index, base, end)| (base, end, image_index));
+    for pair in spans.windows(2) {
+        if pair[1].1 < pair[0].2 {
+            return Err(ModuleRelocationError::OverlappingReservations {
+                first_image_index: pair[0].0,
+                second_image_index: pair[1].0,
+            });
+        }
+    }
     Ok(ordered)
 }
 
@@ -446,6 +487,13 @@ fn validate_reservation(
         return Err(inconsistent(ModuleReservationError::WrongEntryPoint {
             entry_point: reservation.entry_point,
             expected_entry_point,
+        }));
+    }
+    let expected_used_preferred_base = reservation.base == image.pe.image_base;
+    if reservation.used_preferred_base != expected_used_preferred_base {
+        return Err(inconsistent(ModuleReservationError::WrongPreferredBase {
+            used_preferred_base: reservation.used_preferred_base,
+            expected_used_preferred_base,
         }));
     }
     Ok(())

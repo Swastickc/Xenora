@@ -49,6 +49,7 @@ pub mod sysinfo;
 mod task_fixture;
 pub(crate) mod threads;
 mod user32;
+mod winhttp;
 mod winsock;
 
 use crate::runtime::HResult;
@@ -285,6 +286,7 @@ pub struct ServicesState {
     /// The status the guest process exited with. Set once.
     exit_status: Mutex<Option<u32>>,
     crt_startup: Mutex<crt_startup::CrtStartup>,
+    winhttp: Mutex<winhttp::WinHttpHandles>,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -362,6 +364,7 @@ impl ServicesState {
             emutls: Mutex::default(),
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
+            winhttp: Mutex::default(),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -433,8 +436,8 @@ impl ServicesState {
         *self.exit_status.lock().expect("guest exit status")
     }
 
-    /// How many guest handles are open: kernel objects, sockets and task
-    /// queues, which are kept in three separate tables.
+    /// How many guest handles are open: kernel objects, WinHTTP objects,
+    /// sockets and task queues, which are kept in four separate tables.
     pub fn open_handle_count(&self) -> usize {
         let objects = self
             .objects
@@ -442,6 +445,11 @@ impl ServicesState {
             .expect("guest object state")
             .handles
             .len();
+        let internet = self
+            .winhttp
+            .lock()
+            .expect("WinHTTP handle table")
+            .open_count();
         let sockets = self
             .winsock
             .lock()
@@ -452,7 +460,7 @@ impl ServicesState {
             .lock()
             .expect("GDK queue handle table")
             .open_count();
-        objects + sockets + queues
+        objects + internet + sockets + queues
     }
 
     /// A file on the synthetic `C:` drive, named as the guest names it.
@@ -485,6 +493,10 @@ impl ServicesState {
             objects.handles.clear();
             objects.locks.clear();
         }
+        self.winhttp
+            .lock()
+            .expect("WinHTTP handle table")
+            .close_all();
         self.winsock
             .lock()
             .expect("guest Winsock state")
@@ -1046,6 +1058,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         ServiceStatus::Implemented,
     );
     winsock::register(registry, &state);
+    winhttp::register(registry, &state);
     task_fixture::register(registry, &state);
     platform_fixture::register(registry, &state);
     gdk_queue::register(registry, &state);

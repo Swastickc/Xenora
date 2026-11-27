@@ -15640,6 +15640,46 @@
     },
     {
       "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpCloseHandle"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpConnect"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpOpen"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpOpenRequest"
+    },
+    {
+      "data_import": false,
       "family": "windows-networking",
       "kind": "name",
       "library": "ws2_32.dll",

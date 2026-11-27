@@ -19,9 +19,9 @@
 //! Microsoft's `printf` page describes since Windows 10 version 2004. That
 //! page also says the rounding follows the mode `fesetround` sets; here it is
 //! always to nearest. The decimal point is always `.`: no locale is modelled.
-//! The caller's option bits choose two things, see [`Floats`]: a program that
-//! asks for the rounding of older Windows gets no floating point at all,
-//! because that rounding is not modelled.
+//! The caller's option bits choose two things, see [`Floats`]: the exponent
+//! width and the rounding of halfway cases, to the even digit or away from
+//! zero as the older Windows runtime did.
 //!
 //! Refused as invalid, as Windows does by default: `%n`, and a character that
 //! has no meaning as a type. Refused as not modelled, so that nothing is
@@ -57,8 +57,8 @@ pub(super) struct Floats {
     /// exponent digits, as before Visual Studio 2015, not two.
     pub(super) three_digit_exponents: bool,
     /// `STANDARD_ROUNDING`: ties go to the even digit. Without it the
-    /// Universal CRT rounds as older versions of Windows did. That is not
-    /// modelled, so a floating-point conversion is then refused.
+    /// conversion rounds as older versions of Windows did, ties away from
+    /// zero.
     pub(super) standard_rounding: bool,
 }
 
@@ -307,6 +307,137 @@ pub(super) fn integer(
     Ok(())
 }
 
+/// Exact significant decimal digits of a positive finite value, and the
+/// power of ten of the leading digit: the value is digits[0].digits[1..]
+/// times 10^power. A binary fraction has a finite decimal expansion, 767
+/// digits at most for a double, so 800 digits after the point hold it
+/// exactly; trailing zeros are trimmed as carrying no information.
+fn exact_digits(magnitude: f64) -> (Vec<u8>, i32) {
+    let text = format!("{magnitude:.800e}");
+    let (mantissa, power) = text.split_once('e').expect("an exponent");
+    let power = power.parse().expect("a decimal exponent");
+    let digits: Vec<u8> = mantissa
+        .bytes()
+        .filter(|byte| byte.is_ascii_digit())
+        .collect();
+    let end = digits
+        .iter()
+        .rposition(|digit| *digit != b'0')
+        .map_or(1, |at| at + 1);
+    (digits[..end].to_vec(), power)
+}
+
+/// The digit of the value digits describe at the `place` power of ten, or a
+/// zero when there is none: digit index `power - place` in the sequence.
+fn digit_at(digits: &[u8], power: i32, place: i32) -> u8 {
+    let index = power - place;
+    if index < 0 {
+        return b'0';
+    }
+    digits.get(index as usize).copied().unwrap_or(b'0')
+}
+
+/// Round exact digits at the `place` power of ten, ties to the even digit or,
+/// when `legacy`, away from zero as the pre-2015 Windows runtime did (the
+/// modern runtime rounds by the mode `fesetround` sets; both rules agree
+/// except exactly halfway). Returns the kept digits, possibly shorter than
+/// the kept width when trailing digits are zero, and the power of ten of the
+/// leading digit: the carry of all nines raises it by one. A value too small
+/// for a single kept digit answers either no digit at all or, rounding up,
+/// one digit at `place` itself.
+fn round_at(digits: &[u8], power: i32, place: i32, legacy: bool) -> (Vec<u8>, i32) {
+    let keep = power - place + 1;
+    if keep <= 0 {
+        // No significant digit survives. The value measured in units of
+        // 10^place is below 0.1 when the leading digit sits more than one
+        // position under the cutoff, and is 0.digits otherwise; rounding up
+        // means reaching half a unit.
+        if power < place - 1 {
+            return (Vec::new(), power);
+        }
+        let first = digits.first().copied().unwrap_or(b'0');
+        let rest_nonzero = digits
+            .get(1..)
+            .is_some_and(|rest| rest.iter().any(|digit| *digit != b'0'));
+        let up = first > b'5' || (first == b'5' && (rest_nonzero || legacy));
+        return if up {
+            (vec![b'1'], place)
+        } else {
+            (Vec::new(), power)
+        };
+    }
+    let keep = keep as usize;
+    if digits.len() <= keep {
+        return (digits.to_vec(), power);
+    }
+    let mut kept: Vec<u8> = digits[..keep].to_vec();
+    let first_dropped = digits[keep];
+    let rest_nonzero = digits[keep + 1..].iter().any(|digit| *digit != b'0');
+    let up = if first_dropped > b'5' {
+        true
+    } else if first_dropped < b'5' {
+        false
+    } else if rest_nonzero || legacy {
+        true
+    } else {
+        (kept[keep - 1] - b'0') % 2 == 1
+    };
+    let mut power = power;
+    if up {
+        let mut at = keep;
+        loop {
+            if at == 0 {
+                kept.insert(0, b'1');
+                kept.pop();
+                power += 1;
+                break;
+            }
+            at -= 1;
+            if kept[at] == b'9' {
+                kept[at] = b'0';
+            } else {
+                kept[at] += 1;
+                break;
+            }
+        }
+    }
+    (kept, power)
+}
+
+/// Render digits already rounded at `place` in fixed notation: every position
+/// from the leading one or the units down to `place`, the point included when
+/// anything follows it.
+fn render_fixed(digits: &[u8], power: i32, place: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    if power < 0 {
+        out.push(b'0');
+    } else {
+        for position in (0..=power).rev() {
+            out.push(digit_at(digits, power, position));
+        }
+    }
+    if place < 0 {
+        out.push(b'.');
+        for position in (place..=-1).rev() {
+            out.push(digit_at(digits, power, position));
+        }
+    }
+    out
+}
+
+/// Render digits in scientific form with `precision` digits after the point,
+/// without the exponent part.
+fn render_scientific(digits: &[u8], precision: usize) -> Vec<u8> {
+    let mut out = vec![digits.first().copied().unwrap_or(b'0')];
+    if precision > 0 {
+        out.push(b'.');
+        for index in 1..=precision {
+            out.push(digits.get(index).copied().unwrap_or(b'0'));
+        }
+    }
+    out
+}
+
 /// The exponent part of the `e` and `a` styles: the letter, a sign, and at
 /// least `least` digits.
 fn exponent(letter: u8, value: i32, least: usize) -> Vec<u8> {
@@ -317,17 +448,6 @@ fn exponent(letter: u8, value: i32, least: usize) -> Vec<u8> {
         value.unsigned_abs()
     )
     .into_bytes()
-}
-
-/// `magnitude` in the `e` style with `precision` digits after the point: the
-/// digits, and the decimal exponent as a number.
-fn scientific(magnitude: f64, precision: usize) -> (Vec<u8>, i32) {
-    let text = format!("{magnitude:.precision$e}");
-    let (digits, power) = text.split_once('e').expect("an exponent");
-    (
-        digits.as_bytes().to_vec(),
-        power.parse().expect("a decimal exponent"),
-    )
 }
 
 /// A point with nothing after it is written only for `#`.
@@ -350,7 +470,13 @@ fn trim(digits: &mut Vec<u8>) {
 }
 
 /// The `a` style: the value's own binary digits, four to a hexadecimal one.
-fn hexadecimal(magnitude: f64, precision: Option<usize>, alternate: bool, upper: bool) -> Vec<u8> {
+fn hexadecimal(
+    magnitude: f64,
+    precision: Option<usize>,
+    alternate: bool,
+    upper: bool,
+    legacy: bool,
+) -> Vec<u8> {
     const FRACTION_BITS: u32 = 52;
     let bits = magnitude.to_bits();
     let field = (bits >> FRACTION_BITS) & 0x7FF;
@@ -373,8 +499,11 @@ fn hexadecimal(magnitude: f64, precision: Option<usize>, alternate: bool, upper:
         let half = 1u64 << (dropped - 1);
         let rest = whole & ((1 << dropped) - 1);
         whole >>= dropped;
-        // Ties go to the even digit.
-        if rest > half || (rest == half && whole & 1 == 1) {
+        // Ties go to the even digit, or away from zero in legacy mode. The
+        // pre-2015 library never printed hexadecimal floating-point at all,
+        // so this is Xenora's consistent extension of its documented decimal
+        // rounding rule rather than measured behavior.
+        if rest > half || (rest == half && (legacy || whole & 1 == 1)) {
             whole += 1;
         }
     }
@@ -402,9 +531,7 @@ pub(super) fn float(
     slot: u64,
     floats: Floats,
 ) -> Result<(), FormatError> {
-    if !floats.standard_rounding {
-        return Err(FormatError::Unsupported);
-    }
+    let legacy = !floats.standard_rounding;
     let exponent_digits = if floats.three_digit_exponents { 3 } else { 2 };
     match spec.size {
         // `l` and `L` name a long double, which is a double here: the slot is
@@ -459,14 +586,21 @@ pub(super) fn float(
     let mut digits = match style {
         b'f' => {
             let precision = spec.precision.unwrap_or(6);
-            let mut digits = format!("{magnitude:.precision$}").into_bytes();
+            let (exact, power) = exact_digits(magnitude);
+            let place = -(precision as i32);
+            let (rounded, rounded_power) = round_at(&exact, power, place, legacy);
+            let mut digits = render_fixed(&rounded, rounded_power, place);
             point(&mut digits, alternate);
             digits
         }
         b'e' => {
-            let (mut digits, power) = scientific(magnitude, spec.precision.unwrap_or(6));
+            let precision = spec.precision.unwrap_or(6);
+            let (exact, power) = exact_digits(magnitude);
+            let place = power - precision as i32;
+            let (rounded, rounded_power) = round_at(&exact, power, place, legacy);
+            let mut digits = render_scientific(&rounded, precision);
             point(&mut digits, alternate);
-            digits.extend(exponent(b'e', power, exponent_digits));
+            digits.extend(exponent(b'e', rounded_power, exponent_digits));
             digits
         }
         b'g' => {
@@ -479,13 +613,17 @@ pub(super) fn float(
                 Some(0) => 1,
                 Some(precision) => precision,
             };
-            let (mut digits, power) = scientific(magnitude, significant - 1);
+            let (exact, power) = exact_digits(magnitude);
+            let place = power - (significant - 1) as i32;
+            let (rounded, power) = round_at(&exact, power, place, legacy);
             let fixed =
                 usize::try_from(i64::from(power) + 4).is_ok_and(|above| above < significant + 4);
-            if fixed {
+            let mut digits = if fixed {
                 let precision = (significant as i64 - 1 - i64::from(power)) as usize;
-                digits = format!("{magnitude:.precision$}").into_bytes();
-            }
+                render_fixed(&rounded, power, -(precision as i32))
+            } else {
+                render_scientific(&rounded, significant - 1)
+            };
             point(&mut digits, alternate);
             if !alternate {
                 trim(&mut digits);
@@ -495,7 +633,7 @@ pub(super) fn float(
             }
             digits
         }
-        _ => hexadecimal(magnitude, spec.precision, alternate, false),
+        _ => hexadecimal(magnitude, spec.precision, alternate, false, legacy),
     };
     if upper {
         digits.make_ascii_uppercase();
@@ -1030,20 +1168,33 @@ mod tests {
             assert_eq!(with(text, &[double(value)], STANDARD).unwrap(), two_digits);
             assert_eq!(with(text, &[double(value)], three).unwrap(), three_digits);
         }
-        // Without the standard rounding bit no floating-point conversion is
-        // printed, whatever its value; everything else still is.
+        // Without the standard rounding bit the conversion is the legacy
+        // one: ties away from zero, everything else identical.
         let legacy = Floats {
             three_digit_exponents: false,
             standard_rounding: false,
         };
-        for kind in ["e", "E", "f", "F", "g", "G", "a", "A"] {
-            for value in [0.0, 2.5, f64::INFINITY] {
-                assert_eq!(
-                    with(&format!("%{kind}"), &[double(value)], legacy),
-                    Err(FormatError::Unsupported),
-                    "{kind}"
-                );
-            }
+        for (text, value, standard_answer, legacy_answer) in [
+            // Exact halfway cases: ties to even against ties away from zero.
+            ("%.1f", 0.25, "0.2", "0.3"),
+            ("%.2f", 0.125, "0.12", "0.13"),
+            ("%.0f", 2.5, "2", "3"),
+            ("%.0e", 2.5, "2e+00", "3e+00"),
+            ("%.1e", 0.25, "2.5e-01", "2.5e-01"),
+            // Not a halfway case: the two modes agree.
+            ("%.1f", 0.251, "0.3", "0.3"),
+            ("%.1f", 2.45, "2.5", "2.5"),
+        ] {
+            assert_eq!(
+                with(text, &[double(value)], STANDARD).unwrap(),
+                standard_answer,
+                "{text} standard"
+            );
+            assert_eq!(
+                with(text, &[double(value)], legacy).unwrap(),
+                legacy_answer,
+                "{text} legacy"
+            );
         }
         assert_eq!(with("%d|%x", &[7, 255], legacy), Ok("7|ff".to_owned()));
     }

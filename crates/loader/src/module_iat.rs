@@ -50,11 +50,6 @@ use crate::module_layout::{AddressInterval, IMAGE_BASE_ALIGNMENT};
 use crate::module_memory::{ExplicitModuleImage, ModuleReservation};
 use crate::pe::{ParsedPe, PeError};
 
-/// `map_into_memory` rounds the header mapping to one guest page. The value is
-/// duplicated here because the mapping primitive does not expose its internal
-/// constant; this is validation arithmetic only, not another mapping rule.
-const HEADER_MAPPING_PAGE: u64 = 0x1000;
-
 /// Errors that prevent transactional IAT binding or roll it back completely.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModuleIatError {
@@ -603,41 +598,6 @@ fn validate_binding_plan(
     })
 }
 
-fn mapped_interval_covered(pe: &ParsedPe, rva: u32, len: u64) -> bool {
-    let start = u64::from(rva);
-    let end = start + len;
-    let mut intervals = Vec::with_capacity(pe.sections.len() + 1);
-    let headers_end = u64::from(pe.size_of_headers).next_multiple_of(HEADER_MAPPING_PAGE);
-    if headers_end != 0 {
-        intervals.push((0, headers_end));
-    }
-    for section in &pe.sections {
-        let size = u64::from(section.virtual_size.max(section.raw_data_size));
-        if size != 0 {
-            intervals.push((
-                u64::from(section.virtual_address),
-                u64::from(section.virtual_address) + size,
-            ));
-        }
-    }
-    intervals.sort_unstable();
-
-    let mut covered = start;
-    for &(interval_start, interval_end) in &intervals {
-        if interval_end <= covered {
-            continue;
-        }
-        if interval_start > covered {
-            return false;
-        }
-        if interval_end >= end {
-            return true;
-        }
-        covered = interval_end;
-    }
-    false
-}
-
 fn validate_slot_location(
     slot: &IatSlotPlan,
     binding: &ResolvedBinding,
@@ -661,7 +621,10 @@ fn validate_slot_location(
             image: image_interval,
         });
     }
-    if !mapped_interval_covered(image.pe, slot.slot_rva, IAT_SLOT_BYTES) {
+    if !image
+        .pe
+        .mapped_rva_range_is_backed(slot.slot_rva, IAT_SLOT_BYTES)
+    {
         return Err(ModuleIatError::SlotImageBackingMissing {
             consumer: slot.consumer.clone(),
             slot_rva: slot.slot_rva,

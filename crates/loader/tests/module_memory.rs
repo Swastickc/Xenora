@@ -563,6 +563,58 @@ mod module_memory {
     }
 
     #[test]
+    fn hole_relocation_failure_rolls_back_the_batch_without_reusing_the_hole() {
+        let first_spec =
+            ImageSpec::dll(0, FIRST_BASE, 0x11, 0x51).relocated(standard_relocation_table());
+        let hole_target_table = relocation_block(TEXT_RVA, &[0xA800, 0x0000]);
+        let second_spec =
+            ImageSpec::dll(TEXT_RVA, SECOND_BASE, 0x22, 0x62).relocated(hole_target_table);
+        let (first_bytes, first_pe) = relocation_image(first_spec);
+        let (second_bytes, second_pe) = relocation_image(second_spec);
+        let occupied = occupied_preferred_bases();
+        let layout = plan(&[&first_pe, &second_pe], &occupied).unwrap();
+        let images = [
+            explicit(&first_bytes, &first_pe),
+            explicit(&second_bytes, &second_pe),
+        ];
+        let mut memory = scratch_memory();
+        let reservations = map_module_batch(&images, &layout, &mut memory).unwrap();
+        let first_base = reservations[0].base;
+        let second_base = reservations[1].base;
+        let first_original = memory
+            .read_u64_bypass(first_base + u64::from(DATA_RVA))
+            .unwrap();
+        let hole = second_base + 0x1800;
+        memory
+            .map_region(hole, 0x100, MemoryPermissions::READ_WRITE)
+            .expect("unrelated mapping can reuse the image hole");
+        memory.write_u64_bypass(hole, 0x55).unwrap();
+
+        let error = relocate_module_batch(&images, &reservations, &mut memory).unwrap_err();
+
+        assert_eq!(
+            error,
+            ModuleRelocationError::RelocationFailed {
+                image_index: 1,
+                source: RelocationError::TargetNotImageBacked {
+                    target_rva: 0x1800,
+                    target_va: hole,
+                },
+            }
+        );
+        assert_eq!(
+            memory.read_u64_bypass(first_base + u64::from(DATA_RVA)),
+            Ok(first_original)
+        );
+        assert_eq!(
+            memory.read_u64_bypass(first_base + IMAGE_BASE_FIELD_OFFSET),
+            Ok(FIRST_BASE)
+        );
+        assert_eq!(memory.read_u64_bypass(hole), Ok(0x55));
+        assert_eq!(memory.read_u8(SCRATCH), Ok(0x77));
+    }
+
+    #[test]
     fn invalid_reservations_are_rejected_before_relocation_mutation() {
         let (first_bytes, first_pe, second_bytes, second_pe) = relocation_pair();
         let occupied = occupied_preferred_bases();
@@ -626,6 +678,38 @@ mod module_memory {
                 Ok(original)
             );
         }
+    }
+
+    #[test]
+    fn entry_point_address_overflow_is_rejected_as_invalid_reservation_metadata() {
+        let spec = ImageSpec::dll(TEXT_RVA, FIRST_BASE, 0x33, 0x63);
+        let mut bytes = spec.build();
+        bytes[OPTIONAL + 16..OPTIONAL + 20].copy_from_slice(&0x1_0000u32.to_le_bytes());
+        bytes[SECTION_TABLE + 12..SECTION_TABLE + 16].copy_from_slice(&0x1_0000u32.to_le_bytes());
+        let pe = ParsedPe::parse(&bytes).expect("parse-valid unmappable image");
+        let images = [explicit(&bytes, &pe)];
+        let base = 0xffff_ffff_ffff_0000;
+        let reservations = [xenora_loader::ModuleReservation {
+            image_index: 0,
+            base,
+            end: base + u64::from(SIZE_OF_IMAGE),
+            used_preferred_base: false,
+            entry_point: None,
+        }];
+        let mut memory = GuestMemory::new();
+
+        let error = relocate_module_batch(&images, &reservations, &mut memory).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ModuleRelocationError::InvalidReservation {
+                image_index: 0,
+                source: xenora_loader::ModuleReservationError::EntryPointOverflow {
+                    base: reservation_base,
+                    entry_rva: 0x1_0000,
+                },
+            } if reservation_base == base
+        ));
     }
 
     #[test]

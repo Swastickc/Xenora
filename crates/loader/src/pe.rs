@@ -226,6 +226,63 @@ fn map_plan(
     })
 }
 
+/// Committed image-header and section intervals used to decide whether an
+/// RVA range is image-backed rather than merely inside `SizeOfImage`.
+pub(crate) struct MappedImageBacking {
+    intervals: Vec<(u64, u64)>,
+}
+
+impl MappedImageBacking {
+    pub(crate) fn new(pe: &ParsedPe) -> Self {
+        let mut intervals = Vec::with_capacity(pe.sections.len() + 1);
+        let headers_end = u64::from(pe.size_of_headers).next_multiple_of(HEADER_PAGE);
+        if headers_end != 0 {
+            intervals.push((0, headers_end));
+        }
+        for section in &pe.sections {
+            let size = u64::from(section.virtual_size.max(section.raw_data_size));
+            if size != 0 {
+                intervals.push((
+                    u64::from(section.virtual_address),
+                    u64::from(section.virtual_address) + size,
+                ));
+            }
+        }
+        intervals.sort_unstable();
+        Self { intervals }
+    }
+
+    /// Whether `[rva, rva + len)` is continuously covered. The header interval
+    /// includes the zero-filled remainder of its final mapping page. A section
+    /// interval covers the larger of virtual and raw size because the smaller
+    /// side is zero-filled in the same mapping. Adjacent intervals may jointly
+    /// cover a crossing range.
+    pub(crate) fn covers(&self, rva: u32, len: u64) -> bool {
+        let start = u64::from(rva);
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        if start == end {
+            return true;
+        }
+
+        let mut covered = start;
+        for &(interval_start, interval_end) in &self.intervals {
+            if interval_end <= covered {
+                continue;
+            }
+            if interval_start > covered {
+                return false;
+            }
+            if interval_end >= end {
+                return true;
+            }
+            covered = interval_end;
+        }
+        false
+    }
+}
+
 impl ParsedPe {
     /// Parse PE32+ headers from an in-memory byte slice.
     pub fn parse(bytes: &[u8]) -> Result<Self, PeError> {
@@ -461,6 +518,12 @@ impl ParsedPe {
             return Err(PeError::InvalidHeaderSize);
         }
         Ok((len, mapped, image_base))
+    }
+
+    /// Whether the half-open RVA range is continuously backed by the bytes
+    /// this image would commit as headers or sections.
+    pub(crate) fn mapped_rva_range_is_backed(&self, rva: u32, len: u64) -> bool {
+        MappedImageBacking::new(self).covers(rva, len)
     }
 
     /// Validate the input and arithmetic of a mapping without changing memory.

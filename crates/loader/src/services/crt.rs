@@ -907,16 +907,6 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         });
     }
 
-    // The missing character classes, ASCII like the rest of the C locale.
-    registry.register(UCRT, "isblank", |args, _, _| {
-        Ok(u64::from(
-            matches!(args.rcx as u8, b' ' | b'\t') && args.rcx < 0x80,
-        ))
-    });
-    registry.register(UCRT, "isgraph", |args, _, _| {
-        Ok(u64::from((0x21..=0x7e).contains(&(args.rcx as u32))))
-    });
-
     // The integer formatting family: radix 2 through 36, lowercase digits,
     // a minus sign for signed negative input in radix ten only, as
     // documented. The _s forms check the buffer size.
@@ -1252,8 +1242,6 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         ("strxfrm", CRT_STRING_API),
         ("memcpy_s", CRT_STRING_API),
         ("memmove_s", CRT_STRING_API),
-        ("isblank", "api-ms-win-crt-string-l1-1-0.dll"),
-        ("isgraph", "api-ms-win-crt-string-l1-1-0.dll"),
         ("_itoa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_ltoa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_i64toa", "api-ms-win-crt-convert-l1-1-0.dll"),

@@ -4917,7 +4917,7 @@ const LEGACY_DATA_SYMBOLS: [&str; 7] = [
 /// Legacy-linked binaries import these services from `msvcrt.dll`, where the
 /// compatibility mapping resolves them to the same handlers as the modern
 /// runtime.
-const LEGACY_FUNCTION_SYMBOLS: [&str; 21] = [
+const LEGACY_FUNCTION_SYMBOLS: [&str; 37] = [
     "__iob_func",
     "sscanf",
     "fprintf",
@@ -4939,6 +4939,22 @@ const LEGACY_FUNCTION_SYMBOLS: [&str; 21] = [
     "_getpid",
     "rand",
     "srand",
+    "isalpha",
+    "isdigit",
+    "isalnum",
+    "islower",
+    "isupper",
+    "isspace",
+    "ispunct",
+    "iscntrl",
+    "isprint",
+    "isgraph",
+    "isxdigit",
+    "isblank",
+    "tolower",
+    "toupper",
+    "atoi",
+    "atof",
 ];
 
 const JUNK: u64 = 0xFFFF_FFFF_0000_0000;
@@ -8360,4 +8376,97 @@ fn co_create_instance_ex_checks_the_bounded_interface_array() {
         guest.run("CoCreateInstanceEx", &[SCRATCH, 0, 1, 0]).1,
         ExitReason::Halt
     );
+}
+
+/// The narrow `ctype.h` classification and case conversion of the C locale,
+/// the surface legacy mingw binaries bind out of `msvcrt.dll`. The
+/// expectations are the ASCII table: characters at or above 128 are in no
+/// class, and EOF (-1) is in no class and converts to itself.
+#[test]
+fn narrow_classification_is_the_c_locale() {
+    let (mut guest, _) = stdio_guest();
+    // Alpha, digit and the unions and intersections of the classes.
+    for (symbol, yes, no) in [
+        ("isalpha", b'a', b'0'),
+        ("isdigit", b'7', b'a'),
+        ("isalnum", b'9', b'_'),
+        ("islower", b'z', b'Z'),
+        ("isupper", b'Q', b'q'),
+        ("isspace", b' ', b'0'),
+        ("ispunct", b'_', b'a'),
+        ("iscntrl", 0x01_u8, b' '),
+        ("isprint", b'~', 0x7f_u8),
+        ("isgraph", b'!', b' '),
+        ("isxdigit", b'F', b'g'),
+    ] {
+        assert_eq!(guest.call(symbol, &[u64::from(yes)]), 1, "{symbol} accepts");
+        assert_eq!(guest.call(symbol, &[u64::from(no)]), 0, "{symbol} refuses");
+        // Bytes at or above 128 are in no class of the C locale.
+        assert_eq!(guest.call(symbol, &[0xC0]), 0, "{symbol} above ASCII");
+        // EOF is in no class.
+        assert_eq!(
+            guest.call(symbol, &[u64::from(u32::MAX)]),
+            0,
+            "{symbol} EOF"
+        );
+    }
+    // The other whitespace bytes of the C locale.
+    for byte in [b'\t', b'\n', 0x0B_u8, 0x0C_u8, b'\r'] {
+        assert_eq!(guest.call("isspace", &[u64::from(byte)]), 1);
+    }
+    // Case conversion answers the converted character and leaves the rest.
+    assert_eq!(guest.call("tolower", &[u64::from(b'A')]), u64::from(b'a'));
+    assert_eq!(guest.call("toupper", &[u64::from(b'x')]), u64::from(b'X'));
+    assert_eq!(guest.call("tolower", &[u64::from(b'4')]), u64::from(b'4'));
+    assert_eq!(guest.call("toupper", &[u64::from(b'H')]), u64::from(b'H'));
+    // EOF converts to itself.
+    assert_eq!(
+        guest.call("tolower", &[u64::from(u32::MAX)]),
+        u64::from(u32::MAX)
+    );
+    // The same spellings import from msvcrt.dll: the harness binds the
+    // legacy module for every symbol in the legacy list above.
+}
+
+/// `atoi` and `atof` parse the decimal forms of the C contract: leading
+/// ASCII whitespace, an optional sign, digits, and for the floating form a
+/// fraction and an exponent. A string with no digits answers zero.
+#[test]
+fn narrow_decimal_parses_follow_the_c_contract() {
+    let (mut guest, _) = stdio_guest();
+    for (text, expected) in [
+        (b"42" as &[u8], 42_i32),
+        (b"  -17", -17),
+        (b"+305", 305),
+        (b"\t\n99x", 99),
+        (b"abc", 0),
+        (b"-", 0),
+        (b"", 0),
+        (b"  00012", 12),
+    ] {
+        let at = place(&mut guest, TEXT + 0x3000, text);
+        assert_eq!(
+            guest.call("atoi", &[at]) as u32 as i32,
+            expected,
+            "atoi {text:?}"
+        );
+    }
+    // The floating form, exact values a binary64 represents.
+    for (text, expected) in [
+        (b"2.5" as &[u8], 2.5_f64),
+        (b"  -0.75e2", -75.0),
+        (b"1e-3", 0.001),
+        (b".5", 0.5),
+        (b"4.", 4.0),
+        (b"xyz", 0.0),
+        (b"1.5e", 1.5),
+        (b"3e+", 3.0),
+    ] {
+        let at = place(&mut guest, TEXT + 0x3200, text);
+        let bits = math_call(&mut guest, "atof", &[], &[at]);
+        assert_eq!(f64::from_bits(bits as u64), expected, "atof {text:?}");
+    }
+    let at = place(&mut guest, TEXT + 0x3300, b"6.25");
+    let bits = math_call(&mut guest, "atof", &[], &[at]);
+    assert_eq!(f64::from_bits(bits as u64), 6.25);
 }

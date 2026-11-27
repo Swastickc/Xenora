@@ -1159,7 +1159,7 @@ impl StandardStreams {
         if fd < 0 || count as u64 > MAX_TRANSFER {
             return Ok(Err(Failed(-1, EINVAL)));
         }
-        let rewired = fd >= 0 && fd < 3 && self.opened.has_descriptor(fd as u32);
+        let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let bytes = match fd {
             0 if !rewired && self.closed[0] => return Ok(Err(Failed(-1, EBADF))),
             0 if !rewired => self.input.take((count as usize).min(1 << 20)),
@@ -1214,7 +1214,7 @@ impl StandardStreams {
         // A standard descriptor the table carries is no standard stream
         // anymore: `_dup2` rewired it, and the ordinary descriptor machinery
         // answers for it exactly as the CRT's table does.
-        let rewired = fd >= 0 && fd < 3 && self.opened.has_descriptor(fd as u32);
+        let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let result = match fd {
             0 if !rewired => Err(EBADF),
             1 if !rewired && self.closed[1] => Err(EBADF),

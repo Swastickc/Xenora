@@ -338,9 +338,7 @@ pub(super) fn register_tokens(registry: &mut ImportRegistry, state: &Arc<Service
             }
             // GENERIC_READ/WRITE/EXECUTE/ALL map through the caller's
             // mapping exactly as the contract documents.
-            let generic_read = memory
-                .read_u32(mapping)
-                .map_err(ExitReason::MemoryFault)?;
+            let generic_read = memory.read_u32(mapping).map_err(ExitReason::MemoryFault)?;
             let generic_write = memory
                 .read_u32(mapping + 4)
                 .map_err(ExitReason::MemoryFault)?;
@@ -1008,16 +1006,38 @@ fn access_check_grants_the_one_identity_and_validates_exactly() {
     memory.write_u32(0x120C, 0x001F_01FF).unwrap(); // generic all
     memory.write_u32(0x1300, 64).unwrap(); // privilege buffer length
     // GENERIC_READ alone maps to the file-read bits and is granted.
-    let args = [0x1100, MACHINE_TOKEN, 0x8000_0000, 0x1200, 0x1400, 0x1300, 0x1500, 0x1504];
+    let args = [
+        0x1100,
+        MACHINE_TOKEN,
+        0x8000_0000,
+        0x1200,
+        0x1400,
+        0x1300,
+        0x1500,
+        0x1504,
+    ];
     assert_eq!(call(&mut memory, &args), 1);
     assert_eq!(memory.read_u32(0x1500).unwrap(), 0x0012_0089, "mapped read");
     assert_eq!(memory.read_u32(0x1504).unwrap(), 1, "access granted");
     // The empty privilege set header is written and the length updated.
     assert_eq!(memory.read_u32(0x1400).unwrap(), 0, "no privileges");
-    assert_eq!(memory.read_u32(0x1300).unwrap(), 8, "length of the empty set");
+    assert_eq!(
+        memory.read_u32(0x1300).unwrap(),
+        8,
+        "length of the empty set"
+    );
     // Specific bits pass through unmapped, combined with generic mapping.
     memory.write_u32(0x1300, 64).unwrap();
-    let args = [0x1100, MACHINE_TOKEN, 0x8000_0004, 0x1200, 0x1400, 0x1300, 0x1500, 0x1504];
+    let args = [
+        0x1100,
+        MACHINE_TOKEN,
+        0x8000_0004,
+        0x1200,
+        0x1400,
+        0x1300,
+        0x1500,
+        0x1504,
+    ];
     assert_eq!(call(&mut memory, &args), 1);
     assert_eq!(
         memory.read_u32(0x1500).unwrap(),
@@ -1027,11 +1047,33 @@ fn access_check_grants_the_one_identity_and_validates_exactly() {
     // A privilege buffer too small reports the needed eight bytes.
     memory.write_u32(0x1300, 4).unwrap();
     assert_eq!(call(&mut memory, &args), 0);
-    assert_eq!(memory.read_u32(0x1300).unwrap(), 8, "required size reported");
+    assert_eq!(
+        memory.read_u32(0x1300).unwrap(),
+        8,
+        "required size reported"
+    );
     // A foreign token is a bad handle; a null descriptor is invalid.
     memory.write_u32(0x1300, 64).unwrap();
-    let bad_token = [0x1100, 0xDEAD, 0x8000_0000, 0x1200, 0x1400, 0x1300, 0x1500, 0x1504];
+    let bad_token = [
+        0x1100,
+        0xDEAD,
+        0x8000_0000,
+        0x1200,
+        0x1400,
+        0x1300,
+        0x1500,
+        0x1504,
+    ];
     assert_eq!(call(&mut memory, &bad_token), 0);
-    let null_sd = [0, MACHINE_TOKEN, 0x8000_0000, 0x1200, 0x1400, 0x1300, 0x1500, 0x1504];
+    let null_sd = [
+        0,
+        MACHINE_TOKEN,
+        0x8000_0000,
+        0x1200,
+        0x1400,
+        0x1300,
+        0x1500,
+        0x1504,
+    ];
     assert_eq!(call(&mut memory, &null_sd), 0);
 }

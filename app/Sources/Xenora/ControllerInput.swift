@@ -12,7 +12,7 @@ struct XInputSnapshotValues: Equatable {
     var rightX: Int16 = 0
     var rightY: Int16 = 0
 
-    func ffi(connected: Bool) -> xenora_xinput_state {
+    func ffi(connected: Bool, vibrationSupported: Bool = false) -> xenora_xinput_state {
         xenora_xinput_state(
             buttons: buttons,
             left_trigger: leftTrigger,
@@ -22,7 +22,8 @@ struct XInputSnapshotValues: Equatable {
             right_x: rightX,
             right_y: rightY,
             connected: connected ? 1 : 0,
-            reserved: (0, 0, 0)
+            features: connected && vibrationSupported ? UInt8(XENORA_XINPUT_FEATURE_VIBRATION) : 0,
+            reserved: (0, 0)
         )
     }
 }
@@ -85,6 +86,7 @@ enum XInputButtonBits {
     static let rightThumb = UInt16(XENORA_XINPUT_GAMEPAD_RIGHT_THUMB)
     static let leftShoulder = UInt16(XENORA_XINPUT_GAMEPAD_LEFT_SHOULDER)
     static let rightShoulder = UInt16(XENORA_XINPUT_GAMEPAD_RIGHT_SHOULDER)
+    static let guide = UInt16(XENORA_XINPUT_GAMEPAD_GUIDE)
     static let a = UInt16(XENORA_XINPUT_GAMEPAD_A)
     static let b = UInt16(XENORA_XINPUT_GAMEPAD_B)
     static let x = UInt16(XENORA_XINPUT_GAMEPAD_X)
@@ -96,6 +98,31 @@ struct DetectedController: Equatable {
     let name: String
     let supportsHaptics: Bool
     let snapshot: ControllerSnapshot
+    let haptics: GCDeviceHaptics?
+
+    init(
+        identity: ObjectIdentifier,
+        name: String,
+        supportsHaptics: Bool,
+        snapshot: ControllerSnapshot,
+        haptics: GCDeviceHaptics? = nil
+    ) {
+        self.identity = identity
+        self.name = name
+        self.supportsHaptics = supportsHaptics
+        self.snapshot = snapshot
+        self.haptics = haptics
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        let sameHaptics = switch (lhs.haptics, rhs.haptics) {
+        case (nil, nil): true
+        case let (left?, right?): left === right
+        default: false
+        }
+        return lhs.identity == rhs.identity && lhs.name == rhs.name
+            && lhs.supportsHaptics == rhs.supportsHaptics && lhs.snapshot == rhs.snapshot && sameHaptics
+    }
 }
 
 @MainActor
@@ -104,13 +131,35 @@ func pollGameController() -> DetectedController? {
 }
 
 @MainActor
-func pollGameController(current: GCController?, controllers: [GCController]) -> DetectedController? {
-    let extended = current.flatMap { $0.extendedGamepad == nil ? nil : $0 }
-        ?? controllers.first { $0.extendedGamepad != nil }
-    let controller = extended ?? current.flatMap { $0.microGamepad == nil ? nil : $0 }
-        ?? controllers.first { $0.microGamepad != nil }
-    guard let controller else { return nil }
+func pollGameControllers() -> [DetectedController] {
+    pollGameControllers(current: GCController.current, controllers: GCController.controllers())
+}
 
+@MainActor
+func pollGameController(current: GCController?, controllers: [GCController]) -> DetectedController? {
+    pollGameControllers(current: current, controllers: controllers).first
+}
+
+@MainActor
+func pollGameControllers(current: GCController?, controllers: [GCController]) -> [DetectedController] {
+    var ordered: [GCController] = []
+    func appendPlayable(_ controller: GCController) {
+        var duplicate = false
+        for existing in ordered where existing === controller {
+            duplicate = true
+        }
+        guard controller.extendedGamepad != nil || controller.microGamepad != nil, !duplicate else { return }
+        ordered.append(controller)
+    }
+    if let current, current.extendedGamepad != nil { appendPlayable(current) }
+    for controller in controllers where controller.extendedGamepad != nil { appendPlayable(controller) }
+    if let current, current.microGamepad != nil { appendPlayable(current) }
+    for controller in controllers where controller.microGamepad != nil { appendPlayable(controller) }
+    return ordered.prefix(4).compactMap(detectController)
+}
+
+@MainActor
+private func detectController(_ controller: GCController) -> DetectedController? {
     let captured = controller.capture()
     let snapshot: ControllerSnapshot
     if let pad = captured.extendedGamepad {
@@ -137,7 +186,8 @@ func pollGameController(current: GCController?, controllers: [GCController]) -> 
         identity: ObjectIdentifier(controller),
         name: controller.vendorName ?? controller.productCategory,
         supportsHaptics: controller.haptics != nil,
-        snapshot: snapshot
+        snapshot: snapshot,
+        haptics: controller.haptics
     )
 }
 
@@ -150,6 +200,7 @@ private func extendedXInputSnapshot(_ pad: GCExtendedGamepad) -> XInputSnapshotV
     if pad.rightThumbstickButton?.isPressed == true { buttons |= XInputButtonBits.rightThumb }
     if pad.leftShoulder.isPressed { buttons |= XInputButtonBits.leftShoulder }
     if pad.rightShoulder.isPressed { buttons |= XInputButtonBits.rightShoulder }
+    if pad.buttonHome?.isPressed == true { buttons |= XInputButtonBits.guide }
     if pad.buttonA.isPressed { buttons |= XInputButtonBits.a }
     if pad.buttonB.isPressed { buttons |= XInputButtonBits.b }
     if pad.buttonX.isPressed { buttons |= XInputButtonBits.x }

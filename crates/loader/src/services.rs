@@ -290,6 +290,7 @@ pub struct ServicesState {
     crt_startup: Mutex<crt_startup::CrtStartup>,
     winhttp: Mutex<winhttp::WinHttpHandles>,
     xinput: Mutex<xinput::Slots>,
+    xinput_enabled: AtomicBool,
     winsock: Mutex<winsock::Winsock>,
     task_fixture: Mutex<task_fixture::TaskFixture>,
     platform_fixture: Mutex<platform_fixture::PlatformFixture>,
@@ -369,6 +370,7 @@ impl ServicesState {
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
             xinput: Mutex::default(),
+            xinput_enabled: AtomicBool::new(true),
             winsock: Mutex::default(),
             task_fixture: Mutex::default(),
             platform_fixture: Mutex::default(),
@@ -401,6 +403,14 @@ impl ServicesState {
 
     fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
         self.crt_arguments.lock().expect("program arguments")
+    }
+
+    pub(crate) fn xinput_input_enabled(&self) -> bool {
+        self.xinput_enabled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_xinput_input_enabled(&self, enabled: bool) {
+        self.xinput_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub(crate) fn file_apis_use_ansi(&self) -> bool {
@@ -916,22 +926,31 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             .fetch_add(aligned_size as u64, Ordering::SeqCst);
 
         Ok(mem
-            .map_virtual_allocation(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
+            .map_xmem_allocation(alloc_addr, aligned_size, MemoryPermissions::READ_WRITE)
             .unwrap_or(0))
     };
     registry.register("xmem.dll", "XMemAlloc", handler);
     registry.set_status("xmem.dll", "XMemAlloc", ServiceStatus::Partial);
 
     // 9. XMemFree(pAddress, dwAllocAttributes) -> VOID (Xbox Scarlett in xmem.dll)
+    // The public contract has no error return. Xenora therefore releases only
+    // the exact base of an allocation its XMemAlloc service created; any other
+    // ownership claim is a runtime-limit violation rather than a silent no-op
+    // that could hide use-after-free corruption. Attribute bits are not yet
+    // interpreted because allocation attributes themselves remain unsupported.
     let handler = move |args: &crate::imports::Win64Args,
                         _cpu: &mut crate::cpu::CpuState,
                         mem: &mut GuestMemory|
           -> Result<u64, ExitReason> {
-        let _addr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let addr = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+        let _attr = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
+        if !mem.release_xmem_allocation(addr) {
+            return Err(ExitReason::IllegalInstruction(0xFE));
+        }
         Ok(0)
     };
     registry.register("xmem.dll", "XMemFree", handler);
-    registry.set_status("xmem.dll", "XMemFree", ServiceStatus::Stub);
+    registry.set_status("xmem.dll", "XMemFree", ServiceStatus::Partial);
 
     // 10. Synthetic Test Graphics Device Creation (xenora_fixture.dll)
     // Prototype graphics device creation for original integration fixtures.

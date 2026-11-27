@@ -67,7 +67,9 @@ pub const XENORA_XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
 pub use frame_loop::ControllerInput as xenora_controller_input;
 pub use frame_loop::InputState as xenora_input_state;
+pub use frame_loop::XINPUT_FEATURE_VIBRATION as XENORA_XINPUT_FEATURE_VIBRATION;
 pub use frame_loop::XInputSnapshot as xenora_xinput_state;
+pub use frame_loop::XInputVibration as xenora_xinput_vibration;
 
 pub const XENORA_FIXTURE_FRAME_WIDTH: u32 = 4;
 pub const XENORA_FIXTURE_FRAME_HEIGHT: u32 = 3;
@@ -493,6 +495,32 @@ pub unsafe extern "C" fn xenora_session_send_xinput_state(
         match session_loop(session) {
             Ok(Some(running)) if running.send_xinput(user_index, input) => XENORA_OK,
             Ok(_) => XENORA_INVALID_STATE,
+            Err(status) => status,
+        }
+    })
+}
+
+/// # Safety
+/// `output` must be a valid pointer to one writable `xenora_xinput_vibration`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xenora_session_poll_xinput_vibration(
+    session: u64,
+    user_index: u32,
+    output: *mut frame_loop::XInputVibration,
+) -> i32 {
+    guarded(|| {
+        if output.is_null() || user_index >= 4 {
+            return XENORA_INVALID_ARGUMENT;
+        }
+        match session_loop(session) {
+            Ok(Some(running)) => {
+                let Some(command) = running.xinput_vibration(user_index) else {
+                    return XENORA_INVALID_ARGUMENT;
+                };
+                unsafe { output.write(command) };
+                XENORA_OK
+            }
+            Ok(None) => XENORA_INVALID_STATE,
             Err(status) => status,
         }
     })
@@ -2185,17 +2213,58 @@ mod tests {
             XENORA_INVALID_ARGUMENT
         );
         let bad_reserved = xenora_xinput_state {
-            reserved: [1, 0, 0],
+            reserved: [1, 0],
             ..input
         };
         assert_eq!(
             unsafe { xenora_session_send_xinput_state(0, 0, &bad_reserved) },
             XENORA_INVALID_ARGUMENT
         );
+        let bad_features = xenora_xinput_state {
+            features: 2,
+            ..input
+        };
+        assert_eq!(
+            unsafe { xenora_session_send_xinput_state(0, 0, &bad_features) },
+            XENORA_INVALID_ARGUMENT
+        );
+        let mut vibration = xenora_xinput_vibration::default();
+        assert_eq!(
+            unsafe { xenora_session_poll_xinput_vibration(0, 0, null_mut()) },
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { xenora_session_poll_xinput_vibration(0, 4, &mut vibration) },
+            XENORA_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            unsafe { xenora_session_poll_xinput_vibration(0, 0, &mut vibration) },
+            XENORA_INVALID_HANDLE
+        );
         assert_eq!(
             unsafe { xenora_session_send_xinput_state(0, 0, &input) },
             XENORA_INVALID_HANDLE
         );
+    }
+
+    #[test]
+    fn xinput_vibration_polling_requires_a_running_loop() {
+        let _serial = serial();
+        let handle = create();
+        let mut vibration = xenora_xinput_vibration {
+            sequence: u32::MAX,
+            left_motor: u16::MAX,
+            right_motor: u16::MAX,
+            connected: 1,
+            enabled: 1,
+            reserved: [1; 2],
+        };
+        assert_eq!(
+            unsafe { xenora_session_poll_xinput_vibration(handle, 0, &mut vibration) },
+            XENORA_INVALID_STATE
+        );
+        assert_eq!(vibration.sequence, u32::MAX);
+        assert_eq!(xenora_session_destroy(handle), XENORA_OK);
     }
 
     #[test]

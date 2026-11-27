@@ -258,6 +258,23 @@ zero size. The guest memory map tracks allocation ownership and bounds live
 virtual allocations to 64 MiB. Decommit, executable pages, and console-specific
 allocation lifecycle remain unsupported.
 
+`xmem.dll!XMemAlloc` uses the same bounded backing store for its narrow
+data-only allocation subset, while `XMemFree` releases only the exact base of
+a live XMem-owned allocation. XMem and VirtualAlloc ownership are distinct in
+the memory map, so one API cannot release the other's allocation. Because the
+public free routine returns void, a null, interior, foreign or already-freed
+address stops with Xenora's explicit runtime-limit fault instead of inventing
+an error channel or silently accepting ownership corruption. Allocator IDs,
+graphics memory types, page-size selection, alignment attributes and physical
+Xbox memory behavior remain unsupported; attribute bits are currently not
+interpreted.
+
+References include Microsoft's public
+[XMemAlloc](https://docs.xbox.com/reference/system/xmem/functions/xmemalloc_routine)
+and [XMemFree](https://docs.xbox.com/reference/system/xmem/functions/xmemfree_routine)
+routine signatures. The behavior above is Xenora's bounded ownership model,
+not GDK or Xbox-hardware comparison evidence.
+
 References include Microsoft's
 [thread handle](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-openthread),
 [thread ID](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadid),
@@ -432,8 +449,14 @@ them. Nothing was compared with Windows.
 
 ### XInput controller state
 
-`XInputGetState` resolves through `xinput1_4.dll`, `xinput9_1_0.dll` and
-`xinputuap.dll`. The public structure layout is 16 bytes: a 32-bit packet
+`XInputGetState` resolves through the legacy DirectX redistributable
+`xinput1_3.dll` name as well as `xinput1_4.dll`, `xinput9_1_0.dll` and
+`xinputuap.dll`. Undocumented ordinal 100 (`XInputGetStateEx` in public
+reverse-engineering literature) resolves only on `xinput1_3.dll` and
+`xinput1_4.dll`; it uses the same evidenced 16-byte output layout but preserves
+the guide-button bit `0x0400`, while named `XInputGetState` masks that bit.
+This ordinal behavior is compatibility evidence from public reverse-engineering
+reports, not a Microsoft-documented contract or Xbox-hardware observation. The public structure layout is 16 bytes: a 32-bit packet
 number followed by the packed 12-byte gamepad state. A host may install one explicit snapshot per slot through
 `ServicesState::set_xinput_controller`. The runtime applies no deadzones and
 stores the documented units directly: the XInput button bitmask, triggers from
@@ -455,7 +478,9 @@ evidence.
 The native application interface carries one explicit host snapshot through
 `xenora_session_send_xinput_state`: a 16-byte wire structure with public XInput
 button bits, triggers already scaled to 0 through 255, both thumbstick axes, a
-connected flag constrained to 0 or 1 and zeroed reserved bytes. The interface
+connected flag constrained to 0 or 1, a feature byte and two zeroed reserved
+bytes. Bit zero of the feature byte is host-reported vibration support; all
+other feature bits must be zero. The interface
 accepts user slots zero through three and validates session state, null
 pointers, indexes, the connected flag and reserved bytes. The frame-loop
 session owns its `ServicesState`, so a snapshot accepted there is what a guest
@@ -466,17 +491,135 @@ overloaded as stick axes.
 The macOS app's existing GameController polling maps extended and micro
 gamepads into those XInput units. Menu and options map to start and back where
 available; the documented face, shoulder, thumbstick-button and directional-pad
-bits map directly. Thumbsticks are scaled without applying the legacy fixture
-deadzone, with -1 reaching -32768 and +1 reaching 32767. Triggers scale to 0
-through 255. The app currently submits the selected controller as user slot
-zero only. Its on-screen directional control can act as a virtual host input
-and replace only the horizontal directional bits, mirroring the legacy fixture
-control.
+bits map directly; an extended gamepad's home button maps to the ordinal-100
+guide bit even though named `XInputGetState` masks it. Thumbsticks are scaled
+without applying the legacy fixture deadzone, with -1 reaching -32768 and +1 reaching 32767. Triggers scale to 0
+through 255.
 
-Vibration/haptics output, capabilities, keystrokes, headset and battery
-interfaces, physical-controller hotplug policy beyond the app's existing
-polling, multiplayer assignment, arbitrary game execution and real-game
-compatibility remain unsupported. This chain proves conversion and delivery
+The app discovers up to four playable GameController devices for the XInput
+bridge. Discovery orders extended gamepads before micro gamepads, preferring
+the current controller within each class and otherwise following the order
+returned by GameController. The frame loop then keeps session-local slot
+assignments by controller object identity: an assigned controller keeps its
+slot while it remains present, a disconnected controller vacates its slot, and
+a newly discovered controller uses the lowest empty slot. This stable
+session-local policy is Xenora host behavior, not Windows or Xbox assignment
+evidence.
+Slot zero remains the primary controller for the legacy fixture input, the
+on-screen virtual input and vibration output. If slot zero is empty, the
+lowest occupied slot supplies legacy input, but vibration remains tied to the
+controller actually assigned to slot zero. The on-screen directional control
+can act as a virtual host input on slot zero and replace only the horizontal
+directional bits, mirroring the legacy fixture control. No physical
+multiplayer hardware verification has been performed.
+
+`XInputSetState` accepts the exact four-byte public vibration layout for a
+connected virtual slot and records the latest motor command with a sequence
+number. Disconnected slots, invalid indexes and invalid input memory fail
+before mutation. Disconnecting a slot clears the motors and sequence. The
+native interface exposes the latest command through
+`xenora_session_poll_xinput_vibration`: a 12-byte structure containing the
+sequence, left and right motor speeds, a connected byte, an enabled byte and
+two zeroed reserved bytes. Polling is non-consuming. A disconnected slot succeeds with a zeroed
+command so the host can stop output; invalid indexes, null output, invalid
+sessions and sessions without a running loop are rejected before writing.
+
+The macOS frame-loop fixture polls each XInput slot that has an assigned
+physical controller, plus a previously connected slot once after removal so its
+actuator can stop. Changed sequences for each slot pass to an independent
+GameController/Core Haptics output sink. When the selected controller exposes
+left- and right-handle localities, the XInput left and right motor speeds map
+to continuous haptic intensity on those respective actuators. When it does
+not, Xenora uses the guaranteed default locality once with the stronger motor
+intensity; this is an explicit approximation, not independent motor emulation.
+Motor speed maps to intensity only. Xenora does not claim the XInput low- and
+high-frequency motor characters, trigger actuators, exact force response or a
+hardware-verified effect. Engine or player failures are surfaced in the app;
+commands are best-effort host output evidence only. When the host input
+snapshot reports vibration support, the runtime advertises the force-feedback
+capability bit and 16-bit motor resolution for that slot. That is host
+capability metadata and best-effort output plumbing, not evidence that a
+physical pulse was observed. Without that host bit, motor resolutions remain
+zero.
+
+`XInputEnable` is available on `xinput1_3.dll`, `xinput1_4.dll` and
+`xinputuap.dll`, matching the public export sets, and is absent from reduced `xinput9_1_0.dll`. It tracks
+one global reporting state, initially enabled. While disabled,
+`XInputGetState` still reports connected slots but returns neutral gamepad
+data. Public documentation does not define the packet number in this mode;
+Xenora explicitly chooses zero because the visible neutral state is constant,
+and this is not Windows comparison evidence. `XInputSetState` commands remain
+registered and sequence-numbered while disabled, but the FFI vibration poll
+reports `enabled = 0`, so host actuators must stop. When reporting is
+re-enabled, the same stored command is exposed with `enabled = 1`, implementing
+the documented replay of the latest vibration request. The macOS frame-loop
+fixture applies that enabled bit through its haptic sink. This is only the
+guest API state machine; the app does not yet integrate physical window-focus
+policy with it.
+
+`XInputGetKeystroke` is available on `xinput1_3.dll`, `xinput1_4.dll` and
+`xinputuap.dll`, matching the public export sets; it is deliberately absent from the reduced
+`xinput9_1_0.dll` surface. The implementation validates indexes zero through
+three or `XUSER_INDEX_ANY`, requires the reserved parameter to be zero and
+checks the full eight-byte output range before looking at device state. A
+specific disconnected slot, or `XUSER_INDEX_ANY` with no connected slots,
+returns `ERROR_DEVICE_NOT_CONNECTED`. Connected slots currently return the
+documented `ERROR_EMPTY` result because Xenora has no host keystroke-event
+source yet. No key press, repeat, release, Unicode value or HID code is
+fabricated and the output buffer is not mutated for an empty result.
+
+`XInputGetBatteryInformation` is available on `xinput1_3.dll`,
+`xinput1_4.dll` and `xinputuap.dll`, matching the public export metadata, and is absent from
+reduced `xinput9_1_0.dll`. It validates the two-byte output range and accepts
+only the documented gamepad/headset device-type values. A disconnected slot or
+the unsupported headset reports `BATTERY_TYPE_DISCONNECTED` with empty level.
+A connected virtual gamepad reports `BATTERY_TYPE_UNKNOWN` with empty level:
+Xenora does not know the host controller's chemistry, wired/wireless class or
+charge and does not invent those properties. Public documentation says the
+level is meaningful only for wireless devices with a known battery type, so
+the empty byte is a serialization placeholder rather than measured charge.
+Physical battery integration remains future host work.
+
+`XInputGetAudioDeviceIds` is available only on `xinput1_4.dll` and
+`xinputuap.dll`; it is absent from `xinput1_3.dll` and reduced
+`xinput9_1_0.dll`. The implementation extracts the fifth Win64 argument from
+the guest stack, validates the slot and every supplied count pointer before
+mutation, and treats a supplied nonzero count as requiring a writable buffer
+of at least one wide character. Public documentation does not define those
+malformed-pointer cases, so they are Xenora's memory-safety boundary rather
+than Windows comparison evidence. A connected virtual controller succeeds with
+zero counts and empty strings where capacity exists because Xenora exposes no
+headset endpoint. A disconnected slot returns `ERROR_DEVICE_NOT_CONNECTED`.
+Omitted optional count pointers leave the corresponding buffers untouched. No
+WASAPI endpoint identifier is invented and no audio render/capture path is
+implemented.
+
+`XInputGetDSoundAudioDeviceGuids` is available only on the legacy
+`xinput1_3.dll` and `xinput9_1_0.dll` surfaces, matching public documentation;
+it is absent from `xinput1_4.dll` and `xinputuap.dll`. Both GUID output ranges
+are validated before mutation. A connected virtual controller succeeds with
+two `GUID_NULL` values because Xenora exposes no headset endpoint, while a
+disconnected slot returns `ERROR_DEVICE_NOT_CONNECTED`. This is only the
+legacy identifier boundary: no DirectSound device, audio render path, capture
+path or headset is implemented. The ordinal-only xinput1_3 exports remain
+unsupported because their public contracts are undocumented.
+
+`XInputGetCapabilities` is available on the same four library names for a
+connected virtual slot. It accepts flags zero or `XINPUT_FLAG_GAMEPAD` and
+writes the exact 20-byte public structure. Xenora reports the virtual surface
+as `XINPUT_DEVTYPE_GAMEPAD`/`XINPUT_DEVSUBTYPE_GAMEPAD`, every standard input
+button bit, trigger resolution 255 and thumbstick resolution 32767. Motor
+resolution and the force-feedback feature flag reflect only host-reported
+haptic support as described above; the runtime does not pretend that wireless,
+voice, plug-in module or physical force-feedback properties are known.
+Disconnected slots return `ERROR_DEVICE_NOT_CONNECTED`, and invalid slots,
+flags or output ranges return `ERROR_BAD_ARGUMENTS` before mutation.
+
+Hardware-verified vibration output, keystroke event capture, physical battery
+metadata, actual headset/audio endpoints and audio render/capture,
+physical-controller hotplug policy beyond the app's existing
+polling, ordinal 101/102/103 guide-wait/poweroff functions,
+arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery
 into runtime services; it does not prove physical Xbox controller behavior and
 was not compared with Windows or Xbox hardware.
 

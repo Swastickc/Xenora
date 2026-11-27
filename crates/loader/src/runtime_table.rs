@@ -8,7 +8,7 @@ use crate::runtime::{Call, Parameter, Return, ServiceContext, ServiceMetadata};
 use crate::services::{ServicesState, handlers};
 use std::sync::Arc;
 
-pub static SERVICES: [ServiceMetadata; 266] = [
+pub static SERVICES: [ServiceMetadata; 282] = [
     ServiceMetadata {
         library: "kernel32.dll",
         symbol: "SetProcessPriorityBoost",
@@ -1218,6 +1218,182 @@ pub static SERVICES: [ServiceMetadata; 266] = [
         failure: "never",
         reference: "wctype.h towupper",
         tests: &["wide_characters_convert_in_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isalpha",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isalpha",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isdigit",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isdigit",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isalnum",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isalnum",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "islower",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h islower",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isupper",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isupper",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isspace",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isspace",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "ispunct",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h ispunct",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "iscntrl",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h iscntrl",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isprint",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isprint",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isgraph",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isgraph",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isblank",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isblank",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "isxdigit",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h isxdigit",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "tolower",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h tolower",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "toupper",
+        parameters: &[Parameter { name: "character", kind: "i32" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-string-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never",
+        reference: "ctype.h toupper",
+        tests: &["narrow_classification_is_the_c_locale"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "atoi",
+        parameters: &[Parameter { name: "text", kind: "ptr" }],
+        result: "i32",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-convert-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never; stops the guest for memory it cannot read",
+        reference: "stdlib.h atoi",
+        tests: &["narrow_decimal_parses_follow_the_c_contract"],
+    },
+    ServiceMetadata {
+        library: "ucrtbase.dll",
+        symbol: "atof",
+        parameters: &[Parameter { name: "text", kind: "ptr" }],
+        result: "f64",
+        status: ServiceStatus::Implemented,
+        aliases: &["api-ms-win-crt-convert-l1-1-0.dll", "msvcrt.dll"],
+        failure: "never; stops the guest for memory it cannot read",
+        reference: "stdlib.h atof",
+        tests: &["narrow_decimal_parses_follow_the_c_contract"],
     },
     ServiceMetadata {
         library: "ucrtbase.dll",
@@ -3922,6 +4098,134 @@ pub fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         let a0 = call.u32(0)?;
         let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
         let result: u32 = handlers::towupper(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isalpha", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isalpha(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isdigit", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isdigit(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isalnum", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isalnum(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "islower", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::islower(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isupper", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isupper(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isspace", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isspace(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "ispunct", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::ispunct(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "iscntrl", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::iscntrl(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isprint", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isprint(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isgraph", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isgraph(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isblank", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isblank(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "isxdigit", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::isxdigit(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "tolower", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::tolower(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "toupper", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.i32(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::toupper(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "atoi", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: i32 = handlers::atoi(&mut context, a0)?;
+        Ok(result.place(cpu))
+    });
+    let s = state.clone();
+    registry.register_with_status("ucrtbase.dll", "atof", ServiceStatus::Implemented, move |args, cpu, memory| {
+        let call = Call::new(args, cpu, memory);
+        let a0 = call.u64(0)?;
+        let mut context = ServiceContext { state: &s, memory, teb: cpu.gs_base };
+        let result: crate::runtime::Float64 = handlers::atof(&mut context, a0)?;
         Ok(result.place(cpu))
     });
     let s = state.clone();

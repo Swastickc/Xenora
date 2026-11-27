@@ -19,6 +19,7 @@ mod crt;
 mod crt_arguments;
 mod crt_callbacks;
 mod crt_clock;
+mod crt_ctype;
 mod crt_files;
 mod crt_format;
 mod crt_jump;
@@ -3779,6 +3780,86 @@ pub(crate) mod handlers {
         count: u64,
     ) -> Outcome<u64> {
         crt_wide::wcsncat(context.memory, context.teb, start, end, count)
+    }
+
+    // The narrow ctype.h of the C locale, `atoi` and `atof` (#459 measured
+    // gap): `crt_ctype.rs` documents the honest edges.
+    pub fn isalpha(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isalpha(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isdigit(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isdigit(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isalnum(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isalnum(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn islower(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::islower(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isupper(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isupper(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isspace(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isspace(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn ispunct(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::ispunct(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn iscntrl(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::iscntrl(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isprint(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isprint(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isgraph(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isgraph(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isblank(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isblank(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isxdigit(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isxdigit(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn tolower(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::tolower(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn toupper(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::toupper(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn atoi(context: &mut ServiceContext<'_>, text: u64) -> Outcome<i32> {
+        crt_ctype::atoi(context.memory, context.teb, text).map(|value| value as u32 as i32)
+    }
+
+    pub fn atof(context: &mut ServiceContext<'_>, text: u64) -> Outcome<Float64> {
+        crt_ctype::atof(context.memory, context.teb, text).map(Float64)
     }
 
     pub fn wcscpy(context: &mut ServiceContext<'_>, start: u64, end: u64) -> Outcome<u64> {

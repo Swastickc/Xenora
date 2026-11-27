@@ -975,6 +975,150 @@ service ucrtbase.dll towupper(wide: u32) -> u32
     ref wctype.h towupper
     test wide_characters_convert_in_the_c_locale
 
+service ucrtbase.dll isalpha(character: i32) -> i32
+    handler isalpha
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isalpha
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isdigit(character: i32) -> i32
+    handler isdigit
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isdigit
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isalnum(character: i32) -> i32
+    handler isalnum
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isalnum
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll islower(character: i32) -> i32
+    handler islower
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h islower
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isupper(character: i32) -> i32
+    handler isupper
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isupper
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isspace(character: i32) -> i32
+    handler isspace
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isspace
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll ispunct(character: i32) -> i32
+    handler ispunct
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h ispunct
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll iscntrl(character: i32) -> i32
+    handler iscntrl
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h iscntrl
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isprint(character: i32) -> i32
+    handler isprint
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isprint
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isgraph(character: i32) -> i32
+    handler isgraph
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isgraph
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isblank(character: i32) -> i32
+    handler isblank
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isblank
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll isxdigit(character: i32) -> i32
+    handler isxdigit
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h isxdigit
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll tolower(character: i32) -> i32
+    handler tolower
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h tolower
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll toupper(character: i32) -> i32
+    handler toupper
+    status implemented
+    alias api-ms-win-crt-string-l1-1-0.dll
+    alias msvcrt.dll
+    fails never
+    ref ctype.h toupper
+    test narrow_classification_is_the_c_locale
+
+service ucrtbase.dll atoi(text: ptr) -> i32
+    handler atoi
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; stops the guest for memory it cannot read
+    ref stdlib.h atoi
+    test narrow_decimal_parses_follow_the_c_contract
+
+service ucrtbase.dll atof(text: ptr) -> f64
+    handler atof
+    status implemented
+    alias api-ms-win-crt-convert-l1-1-0.dll
+    alias msvcrt.dll
+    fails never; stops the guest for memory it cannot read
+    ref stdlib.h atof
+    test narrow_decimal_parses_follow_the_c_contract
+
 service ucrtbase.dll wcsncat(start: ptr, end: ptr, count: u64) -> ptr
     handler wcsncat
     status implemented

@@ -504,7 +504,7 @@ fn validate_reservations(
         }
         images[image_index]
             .pe
-            .image_base_field_address(images[image_index].bytes, reservation.base)
+            .validate_mapping_at(images[image_index].bytes, reservation.base)
             .map_err(|source| ModuleIatError::ImageNotMappableAtReservation {
                 image_index,
                 base: reservation.base,

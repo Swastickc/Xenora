@@ -597,6 +597,13 @@ impl ParsedPe {
         })
     }
 
+    /// Validate without mutation that these exact bytes can be mapped at
+    /// `base` under the same header, extent, budget, arithmetic and entry rules
+    /// used by `map_into_memory`.
+    pub(crate) fn validate_mapping_at(&self, bytes: &[u8], base: u64) -> Result<(), PeError> {
+        self.mapping_plan(bytes, base).map(|_| ())
+    }
+
     pub(crate) fn image_base_field_address(&self, bytes: &[u8], base: u64) -> Result<u64, PeError> {
         Ok(self.mapping_plan(bytes, base)?.image_base_field)
     }

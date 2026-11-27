@@ -6,7 +6,7 @@
 //! - Time: UTC file time and a monotonic performance counter
 //! - Process and thread identity and guest process priority boost policy
 //! - Error slots: `GetLastError`, `SetLastError`
-//! - Virtual memory: `VirtualAlloc`, `VirtualFree`
+//! - Virtual memory: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`, `VirtualQuery`
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
 mod advapi;
@@ -42,7 +42,7 @@ mod gdk_queue;
 mod graphics;
 mod heap;
 mod locale;
-mod modules;
+pub(crate) mod modules;
 mod platform_fixture;
 mod process;
 mod registry;
@@ -66,7 +66,9 @@ pub use xinput::{XInputBatteryChargeState, XInputBatteryState, XInputControllerS
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
-use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
+use crate::memory::{
+    ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions, ProtectionError,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -1136,9 +1138,6 @@ pub(crate) mod handlers {
 
     // The Itanium C++ ABI guard protocol lives in `services/cxx_abi.rs`.
     pub(crate) use super::cxx_abi::{cxx_guard_abort, cxx_guard_acquire, cxx_guard_release};
-
-    /// The exit for a request the runtime does not model.
-    const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
 
     pub fn set_process_priority_boost(
         context: &mut ServiceContext<'_>,
@@ -3400,30 +3399,141 @@ pub(crate) mod handlers {
         Ok(true)
     }
 
-    // Stubs (#388). A program built with the mingw-w64 runtime imports these
-    // three and does not call them on a normal run: the first two serve its
-    // runtime pseudo-relocations and the third is the language handler Windows
-    // calls while dispatching a structured exception. None is modelled, so a
-    // call stops the guest with the runtime-limit fault. Returning a made-up
-    // result would let the program run on with wrong state.
-
-    pub fn virtual_protect(
-        _: &mut ServiceContext<'_>,
-        _address: u64,
-        _size: u64,
-        _protect: u32,
-        _old: OutPtr<4>,
-    ) -> Outcome<bool> {
-        Err(RUNTIME_LIMIT)
+    fn protect_value(permissions: MemoryPermissions) -> u32 {
+        match (permissions.read, permissions.write, permissions.execute) {
+            (false, false, false) => 0x01,
+            (true, false, false) => 0x02,
+            (true, true, false) => 0x04,
+            (true, false, true) => 0x20,
+            (true, true, true) => 0x40,
+            // Xenora never creates write-only or execute-only regions.
+            _ => 0,
+        }
     }
 
+    fn protection_failure<T>(
+        context: &ServiceContext<'_>,
+        error: ProtectionError,
+        value: T,
+    ) -> Outcome<T> {
+        let error = match error {
+            ProtectionError::Unmapped(_) => ERROR_INVALID_ADDRESS,
+            ProtectionError::CrossesAllocations | ProtectionError::Overflow => {
+                ERROR_INVALID_PARAMETER
+            }
+            ProtectionError::UnsupportedAllocation => ERROR_NOT_SUPPORTED,
+        };
+        context.state.fail(context.teb, error, value)
+    }
+
+    /// Change protection of committed pages. Xenora models page-granular
+    /// permissions but no guard pages, mapped-file access modes or executable
+    /// cache invalidation, so only the three non-executable base protections
+    /// accepted by `VirtualAlloc` are supported.
+    pub fn virtual_protect(
+        context: &mut ServiceContext<'_>,
+        address: u64,
+        size: u64,
+        protect: u32,
+        old: OutPtr<4>,
+    ) -> Outcome<bool> {
+        let state = context.state;
+        if size == 0 || old.0 == 0 {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let permissions = match protect {
+            0x01 => MemoryPermissions::NO_ACCESS,
+            0x02 => MemoryPermissions::READ_ONLY,
+            0x04 => MemoryPermissions::READ_WRITE,
+            0x10 | 0x20 | 0x40 | 0x80 => {
+                return state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
+            }
+            _ => return state.fail(context.teb, ERROR_INVALID_PARAMETER, false),
+        };
+        let Some(last) = address.checked_add(size - 1) else {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        };
+        let start = address & !(PAGE_SIZE - 1);
+        let Some(end) = last
+            .checked_add(1)
+            .and_then(|end| end.checked_next_multiple_of(PAGE_SIZE))
+        else {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        };
+        let previous = match context
+            .memory
+            .validate_committed_protection_range(start, end)
+        {
+            Ok(previous) => previous,
+            Err(error) => return protection_failure(context, error, false),
+        };
+        if !context.memory.can_write(old.0, 4) {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, false);
+        }
+        // The old protection must be written before changing the pages: the
+        // output variable is allowed to lie inside the range being made
+        // inaccessible. Validation cannot become stale while this call owns
+        // the guest memory, so the protection change cannot fail afterwards.
+        if context
+            .memory
+            .write_bytes(old.0, &protect_value(previous).to_le_bytes())
+            .is_err()
+        {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, false);
+        }
+        match context
+            .memory
+            .protect_committed_range(start, end, permissions)
+        {
+            Ok(_) => {}
+            Err(error) => return protection_failure(context, error, false),
+        }
+        Ok(true)
+    }
+
+    /// Query the committed region containing an address. Xenora's committed
+    /// regions are already uniform, so the reported size is the representable
+    /// region rather than a claim about Windows reservation bookkeeping.
     pub fn virtual_query(
-        _: &mut ServiceContext<'_>,
-        _address: u64,
-        _information: OutPtr<48>,
-        _length: u64,
+        context: &mut ServiceContext<'_>,
+        address: u64,
+        information: OutPtr<48>,
+        length: u64,
     ) -> Outcome<u64> {
-        Err(RUNTIME_LIMIT)
+        let state = context.state;
+        if length == 0 {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        let Some(region) = context.memory.committed_region_info(address) else {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
+        };
+        let take = usize::try_from(length.min(48)).unwrap_or(48);
+        if !context.memory.can_write(information.0, take) {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
+        }
+        let protect = protect_value(region.permissions);
+        let kind: u32 = if region.image {
+            0x0100_0000
+        } else {
+            0x0002_0000
+        };
+        let mut bytes = [0u8; 48];
+        bytes[0..8].copy_from_slice(&region.base.to_le_bytes());
+        bytes[8..16].copy_from_slice(&region.allocation_base.to_le_bytes());
+        bytes[16..20].copy_from_slice(&protect.to_le_bytes());
+        // bytes 20..24 are PartitionId and its alignment padding; zero here.
+        bytes[24..32].copy_from_slice(&(region.end - region.base).to_le_bytes());
+        bytes[32..36].copy_from_slice(&0x1000u32.to_le_bytes()); // MEM_COMMIT
+        bytes[36..40].copy_from_slice(&protect.to_le_bytes());
+        bytes[40..44].copy_from_slice(&kind.to_le_bytes());
+        if context
+            .memory
+            .write_bytes(information.0, &bytes[..take])
+            .is_err()
+        {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
+        }
+        Ok(take as u64)
     }
 
     /// The guest MXCSR is not visible to a service, so results use the default

@@ -68,6 +68,17 @@ fn pixels(direction: &str) -> [[u8; 4]; 12] {
 }
 
 fn verify_run(output: Output, backend: &str, sequence: &[&str], journal: &str, native: usize) {
+    verify_workload_run(output, backend, sequence, journal, native, "");
+}
+
+fn verify_workload_run(
+    output: Output,
+    backend: &str,
+    sequence: &[&str],
+    journal: &str,
+    native: usize,
+    workload_suffix: &str,
+) {
     status(&output, 0);
     let mut lines = text(&output).lines();
     for (index, direction) in sequence.iter().enumerate() {
@@ -82,7 +93,7 @@ fn verify_run(output: Output, backend: &str, sequence: &[&str], journal: &str, n
         assert_eq!(lines.next(), Some(line.as_str()), "frame {}", index + 1);
     }
     let terminal = format!(
-        "exit status=0 frames={} journal={journal} handles=0 native_draws={native}",
+        "exit status=0 frames={} journal={journal} handles=0 native_draws={native}{workload_suffix}",
         sequence.len()
     );
     assert_eq!(lines.next(), Some(terminal.as_str()));
@@ -120,13 +131,11 @@ fn verify_exports(directory: &Path, sequence: &[&str]) {
 
 #[test]
 fn reference_default_sequence_renders_exact_pixels() {
-    verify_run(
-        run(["--backend", "reference"]),
-        "reference",
-        &["left", "right", "left"],
-        "LRL",
-        0,
-    );
+    let default = run(["--backend", "reference"]);
+    let explicit = run(["--backend", "reference", "--workload", "persistent"]);
+    status(&explicit, 0);
+    assert_eq!(explicit.stdout, default.stdout);
+    verify_run(default, "reference", &["left", "right", "left"], "LRL", 0);
 }
 
 #[test]
@@ -215,6 +224,7 @@ fn run_with_frames(backend: &str, directory: &Path, args: &[&OsStr]) -> Output {
 
 fn verify_replay_matches_directions(
     backend: &str,
+    reopen: bool,
     direction_file: &[u8],
     directions: &[&str],
     journal: &str,
@@ -224,18 +234,28 @@ fn verify_replay_matches_directions(
     let replay = scratch.0.join("recorded directions.txt");
     std::fs::write(&replay, direction_file).unwrap();
     let replay_frames = scratch.0.join("replayed frames");
-    let replayed = run_with_frames(
-        backend,
-        &replay_frames,
-        &[OsStr::new("--replay"), replay.as_os_str()],
-    );
+    let (workload, workload_suffix): (&[&str], _) = if reopen {
+        (&["--workload", "reopen"], " workload=reopen")
+    } else {
+        (&[], "")
+    };
+    let mut replay_args: Vec<_> = workload.iter().map(OsStr::new).collect();
+    replay_args.extend([OsStr::new("--replay"), replay.as_os_str()]);
+    let replayed = run_with_frames(backend, &replay_frames, &replay_args);
     let positional_frames = scratch.0.join("positional frames");
-    let arguments: Vec<_> = directions.iter().map(OsStr::new).collect();
-    let positional = run_with_frames(backend, &positional_frames, &arguments);
+    let positional_args: Vec<_> = workload.iter().chain(directions).map(OsStr::new).collect();
+    let positional = run_with_frames(backend, &positional_frames, &positional_args);
     status(&replayed, 0);
     status(&positional, 0);
     assert_eq!(replayed.stdout, positional.stdout);
-    verify_run(replayed, backend, directions, journal, native);
+    verify_workload_run(
+        replayed,
+        backend,
+        directions,
+        journal,
+        native,
+        workload_suffix,
+    );
     verify_exports(&replay_frames, directions);
     verify_exports(&positional_frames, directions);
     for index in 1..=directions.len() {
@@ -255,7 +275,7 @@ fn replay_reference_matches_positional_stdout_and_ppms() {
         &b"xenora-session-v1\nright\nleft\nleft\nright\nright\n"[..],
         &b"xenora-session-v1\r\nright\r\nleft\r\nleft\r\nright\r\nright"[..],
     ] {
-        verify_replay_matches_directions("reference", file, &directions, "RLLRR", 0);
+        verify_replay_matches_directions("reference", false, file, &directions, "RLLRR", 0);
     }
 }
 
@@ -264,13 +284,16 @@ fn replay_reference_preserves_all_32_events() {
     let directions: [&str; 32] =
         std::array::from_fn(|index| if index % 2 == 0 { "right" } else { "left" });
     let replay = format!("xenora-session-v1\r\n{}\r\n", directions.join("\r\n"));
-    verify_replay_matches_directions(
-        "reference",
-        replay.as_bytes(),
-        &directions,
-        &"RL".repeat(16),
-        0,
-    );
+    for reopen in [false, true] {
+        verify_replay_matches_directions(
+            "reference",
+            reopen,
+            replay.as_bytes(),
+            &directions,
+            &"RL".repeat(16),
+            0,
+        );
+    }
 }
 
 #[test]
@@ -391,6 +414,69 @@ fn invalid_arguments_are_refused() {
 }
 
 #[test]
+fn invalid_workload_arguments_publish_nothing() {
+    let scratch = Scratch::new();
+    let frame_dir = scratch.0.join("must stay absent");
+    for args in [
+        &["--workload", "unknown"][..],
+        &["--workload", "reopen", "--workload", "persistent"],
+        &["--workload"],
+    ] {
+        let arguments: Vec<_> = args.iter().map(OsStr::new).collect();
+        let result = run_with_frames("reference", &frame_dir, &arguments);
+        status(&result, 2);
+        assert!(result.stdout.is_empty());
+        assert!(!frame_dir.exists());
+    }
+    assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
+}
+
+#[test]
+fn reopen_budget_exhaustion_publishes_nothing() {
+    let scratch = Scratch::new();
+    let frame_dir = scratch.0.join("must stay absent");
+    let args = ["--workload", "reopen", "--steps", "1"].map(OsStr::new);
+    let result = run_with_frames("reference", &frame_dir, &args);
+    status(&result, 125);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("instruction budget exhausted"));
+    assert!(result.stdout.is_empty());
+    assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
+}
+
+#[test]
+fn reopen_budget_failure_after_a_frame_does_not_publish_partial_results() {
+    let options = ["--workload", "reopen", "--steps", "768"];
+    // The same budget allows the shared first event and a clean exit.
+    verify_workload_run(
+        run(["--backend", "reference"]
+            .into_iter()
+            .chain(options)
+            .chain(["left"])),
+        "reference",
+        &["left"],
+        "L",
+        0,
+        " workload=reopen",
+    );
+
+    let scratch = Scratch::new();
+    let frame_dir = scratch.0.join("late reopen failure");
+    let args: Vec<_> = options
+        .into_iter()
+        .chain(["left", "right", "left"])
+        .map(OsStr::new)
+        .collect();
+    let result = run_with_frames("reference", &frame_dir, &args);
+    status(&result, 125);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("instruction budget exhausted"));
+    assert!(
+        result.stdout.is_empty(),
+        "failed run exposed collected frames"
+    );
+    assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
+}
+
+#[test]
 fn existing_export_destinations_are_not_modified() {
     let scratch = Scratch::new();
     let marker = scratch.0.join("frame-0001.ppm");
@@ -454,6 +540,14 @@ fn default_metal_backend_draws_every_frame_natively() {
         "RLRR",
         4,
     );
+    verify_replay_matches_directions(
+        "metal",
+        true,
+        b"xenora-session-v1\nright\nleft\nright\nright",
+        &["right", "left", "right", "right"],
+        "RLRR",
+        4,
+    );
 }
 
 #[test]
@@ -461,6 +555,7 @@ fn default_metal_backend_draws_every_frame_natively() {
 fn replay_metal_matches_positional_stdout_and_ppms() {
     verify_replay_matches_directions(
         "metal",
+        false,
         b"xenora-session-v1\nright\nleft\nright\nright",
         &["right", "left", "right", "right"],
         "RLRR",

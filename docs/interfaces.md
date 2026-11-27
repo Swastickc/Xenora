@@ -270,6 +270,21 @@ refused, and any failure after mapping restores the caller's whole
 `GuestMemory` snapshot. Success returns reservations, per-stage reports and
 IAT diagnostics but runs no guest code: TLS callbacks are discovered only, and
 initialization, unloading and reference counting remain later lifecycle work.
+Preparation does not itself admit the images to the kernel32 dynamic-module
+catalog; that metadata registration is a separate crate-internal hook for the
+later guest-visible load integration.
+
+The original fixture in `fixtures/pe/loadlib` is static evidence for the later
+guest-visible integration, not a working `LoadLibrary` path. Its no-CRT consumer
+imports only `LoadLibraryA`, `GetProcAddress`, `FreeLibrary` and `ExitProcess`,
+loads logical module `xenora_loadlib.dll`, resolves one function and three
+initialization-evidence exports by name, calls the function indirectly and exits
+with status 70 only when the expected values are present. The provider's TLS
+callback and `DllMain` write distinct markers. Two control images keep the same
+embedded logical module name: one omits the function export and one refuses
+`DLL_PROCESS_ATTACH`. The fixture build is reproducible with the native ARM64
+LLVM toolchain. No initializer execution, registry publication, reference
+counting, unloading or end-to-end dynamic loading is implied.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
@@ -412,23 +427,37 @@ References include Microsoft's
 [handle duplication](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-duplicatehandle),
 [handle close](https://learn.microsoft.com/windows/win32/api/handleapi/nf-handleapi-closehandle),
 [virtual allocation](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc),
-and [virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree) contracts.
+[virtual release](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualfree),
+[virtual protection](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect),
+and [virtual query](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-virtualquery) contracts.
 
-### Stubs a hosted C program binds
+### Virtual-memory query and protection
 
-`VirtualProtect` and `VirtualQuery` are declared `stub` in the typed
-registry (`docs/runtime/services.md`). A C program built with the mingw-w64
-runtime imports both and does not call them on a normal run: they serve its
-runtime pseudo-relocations. They exist so that such a program's imports bind.
+`VirtualQuery` reports the 48-byte x64 `MEMORY_BASIC_INFORMATION` layout for
+a committed region of Xenora's guest memory. The answer uses the region's
+current permissions, `MEM_COMMIT` state, private/image type inference and the
+allocation base Xenora actually tracks. A hole, including an uncommitted hole
+inside a retained module image span, fails with `ERROR_INVALID_ADDRESS` rather
+than inventing reserve or free-state bookkeeping the memory model does not
+record. A short output buffer receives only the requested prefix and the
+return value is the number of bytes copied.
 
-A call to either stops the guest with the runtime-limit fault
-(`IllegalInstruction(0xFE)`). The service writes nothing: no output buffer, no
-result and no last-error value. It does not return a made-up success or a
-failure code Windows would not give, so a program that needs one of them
-stops at that call. Neither changes a page protection nor describes a region;
-each needs work the runtime does not have yet (regions that can be split,
-translated-code invalidation for executable pages, recorded allocation
-bases).
+`VirtualProtect` supports the non-executable base protections Xenora already
+models: `PAGE_NOACCESS`, `PAGE_READONLY` and `PAGE_READWRITE`. The affected
+range is rounded to whole pages as documented, including a two-byte range
+straddling a page boundary. Complete committed coverage and one allocation
+ownership domain are validated before mutation; an invalid range leaves all
+pages and the old-protection output unchanged. The old protection of the first
+page is written before the change, so the output variable may itself lie in a
+range being made inaccessible. Split regions preserve the original allocation
+identity, keeping adjacent independent allocations distinct.
+
+Executable protection values, guard pages and mapped-file access modes remain
+unsupported because translated-code invalidation and those ownership models
+are outside the current slice. Heap, thread and Xmem-owned allocations are
+likewise refused rather than confused with `VirtualAlloc` ownership. The
+registrations remain partial; no Windows comparison, independent acceptance
+or game execution is claimed.
 
 ### Structured exceptions and CPU faults
 
@@ -759,6 +788,27 @@ polling, ordinal 101/102/103 guide-wait/poweroff functions,
 arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery
 into runtime services; it does not prove physical Xbox controller behavior and
 was not compared with Windows or Xbox hardware.
+
+### Host input router
+
+Each native application session owns one host input router, from the `xenora-input` crate (Campaign F, [#942](https://github.com/ranveersoni98/Xenora/issues/942)). The router is described in [the input campaign document](coordination/input-campaign.md). The app feeds it through the `xenora_session_input_*` functions:
+
+- physical macOS key codes, up to `0x7F`, as presses and releases;
+- relative mouse deltas and mouse buttons;
+- focus changes;
+- controller connections, each with a family number;
+- optional profile text for a controller;
+- raw GameController values (`xenora_controller_raw`): positional element bits, sticks from -1 to 1, triggers from 0 to 1, a vibration feature bit, and zeroed reserved bytes. These can come with battery evidence in the existing `xenora_xinput_battery` form.
+
+`xenora_controller_recognize` turns a GameController product category and the presence of paddle and Share buttons into a family number. It uses the crate's exact-match rule, so the app does not carry its own copy of that rule.
+
+`xenora_session_input_snapshot` writes the router's four slots in the `xenora_xinput_state` form without touching the guest, so a settings or test screen reads the same router that guest execution uses. `xenora_session_input_publish` installs those four slots into the running frame loop's XInput slots through the existing snapshot-and-battery path. Without a running loop it returns `XENORA_INVALID_STATE`.
+
+Every argument is validated before any state changes. Unknown devices, out-of-range modes, families, key codes and buttons, non-finite deltas, malformed raw structures, malformed batteries and malformed profile text return `XENORA_INVALID_ARGUMENT`. A fifth controller returns `XENORA_LIMIT_EXCEEDED`.
+
+A slot reports the vibration bit and battery evidence only in automatic and physical-only modes, and only when a controller owns that slot. A merged or keyboard-only slot reports neither. This is Xenora host policy.
+
+The router is not yet used by the app's frame loop. That comes with the app wiring.
 
 ### Guest heaps
 
@@ -1105,13 +1155,23 @@ connection handle of the correct type. Validation and insertion happen under
 the same handle-table lock, so another thread cannot close the parent between
 the two steps. Null verb and version strings default to `GET` and `HTTP/1.1`;
 a null object name is transmitted as `/`. The request copies its strings and
-accept types into immutable state, so later guest-memory writes cannot mutate
-the object. Only the zero flags and `WINHTTP_FLAG_SECURE` are accepted. The
-secure flag records that HTTPS was requested but does not implement TLS;
-sending such a request fails with `ERROR_NOT_SUPPORTED` before any network
-use.
+accept types out of guest memory. Its initial header collection includes the
+configured User-Agent, Accept and Referer values. A request accepts zero
+flags or `WINHTTP_FLAG_SECURE`. The latter records that HTTPS was requested.
+Sending that request fails with `ERROR_NOT_SUPPORTED` before network use.
+
+`WinHttpAddRequestHeaders` updates a live request before sending begins. It
+copies a counted or null-terminated UTF-16 header block and accepts CRLF between
+fields, with an optional trailing CRLF. Add, add-if-new, replace, remove and
+comma or semicolon coalescing operate on case-insensitive field names.
+Replacement and coalescing affect the first match. Each update is atomic and
+the configured collection is bounded at 256 fields, 64 KiB serialized and
+8 KiB per field line. Indexed updates, conflicting modifiers and changes to
+transport-managed framing fields fail explicitly.
 
 `WinHttpSendRequest` performs one synchronous cleartext HTTP/1.1 exchange.
+The request includes configured fields followed by the call's additional
+header block.
 It validates and copies additional headers and the optional request body out
 of guest memory before network use. A header length of `-1` means a
 null-terminated UTF-16 header block; otherwise the documented length is a
@@ -1141,10 +1201,11 @@ system resolver. A request may connect to whatever address the resolver
 returns; loopback tests are evidence of the transport mechanics only, not of
 general Internet reachability.
 
-`WinHttpQueryOption` supports only the four DWORD timeout options matching
-those stored values: resolve, connect, send and receive on session or request
-handles. Infinite values are returned as unsigned `0xffffffff` DWORD bits. It
-implements the documented required-size contract by writing four to
+`WinHttpSetOption` takes a four-byte guest DWORD for resolve, connect, send or
+receive timeouts on a session or a request before sending begins. It preserves
+the full unsigned range. Zero and `0xffffffff` disable the timer in this
+transport, and `WinHttpQueryOption` returns the stored DWORD unchanged.
+Querying implements the required-size contract by writing four to
 `lpdwBufferLength` when the output buffer is null or too small and failing
 with `ERROR_INSUFFICIENT_BUFFER`; success writes exactly four bytes. Connection
 handles fail with the incorrect-handle-type error, unknown options fail with
@@ -1309,18 +1370,20 @@ Windows.
 
 The program's module handle is the base address its image was loaded at.
 `GetModuleHandleA` and `GetModuleHandleW` return it for a null name, and
-otherwise recognize the built-in Kernel32, KernelBase and UCRT modules and the
-API sets registered for Kernel32 and the UCRT. Names compare without case, and
-`.dll` is appended to a name without a dot. Paths and the program's own file name
-are not recognized. Built-in handles are identities without an image.
+otherwise recognize the built-in Kernel32, KernelBase and UCRT modules, the
+API sets registered for Kernel32 and the UCRT, and prepared guest modules
+admitted to the in-memory dynamic catalog. Names compare without case; `.dll`
+is appended to a name without a dot, while a trailing dot means exactly that
+extensionless name. Paths and the program's own file name are not recognized.
+Built-in handles are identities without an image.
 
 `GetModuleHandleExA` and `GetModuleHandleExW` also count a reference, pin the
 module, leave the count alone, or find the module by an address. Pinning cannot
 be combined with an unchanged count. The address may lie anywhere in the program's
-image; a built-in module contains only its handle. The program, Kernel32 and
-KernelBase stay loaded whatever the count; the UCRT is unloaded with its last
-reference unless it was pinned. `FreeLibrary` releases only references that were
-counted.
+image or in a registered guest module's half-open image range; a built-in module
+contains only its handle. The program, Kernel32 and KernelBase stay loaded
+whatever the count; the UCRT is unloaded with its last reference unless it was
+pinned. `FreeLibrary` releases only references that were counted.
 
 `K32GetModuleInformation`, and `GetModuleInformation` of `psapi.dll`, give the
 program's base, `SizeOfImage` and entry point. They refuse built-in modules with
@@ -1332,8 +1395,31 @@ guest service trampolines. The catalog is built after every other standard servi
 is registered and leaves out stubs. The program's own export table is not read.
 KernelBase exports only what Microsoft lists for it here. The services resolve
 through the API sets on Microsoft's pages. No host library is ever loaded.
-`crates/loader/tests/modules.rs` runs original C and C++ programs through them;
-nothing was compared with Windows.
+
+A crate-internal registration hook can admit an already prepared guest PE image
+to the same catalog under its closed-world logical file name, base address,
+half-open image size and retained export table. The hook performs no host file
+search, loading, relocation, initialization or execution; the caller must already
+have prepared the image. A registered module's handle is its base. Direct named
+and ordinal exports resolve to `base + RVA` guest image addresses, never service
+trampolines. Forwarder strings follow the package loader's documented last-dot
+grammar, are limited to eight edges, and may terminate in another registered
+guest module or in a captured built-in service export; only the service terminal
+produces a service trampoline. `GetModuleFileName` answers the logical module
+name, never a host path.
+
+Dynamic modules are process-resident in the current lifecycle model. Registration
+adds one loader-owned reference and pins the image because unloading, unmapping
+and reference-count teardown do not exist yet. A guest `FreeLibrary` can release
+counted references, but it never unmaps the image or makes its exports invalid.
+This is a documented deviation from Windows loader teardown, not a claim of full
+`LoadLibrary` support: converting a guest load request into preparation and
+registration remains later work. Original byte-built synthetic modules cover
+handle identity, range containment, direct and ordinal exports, guest and
+kernel32 forwarder terminals, the eight-hop bound, logical file names, collision
+refusal and process-resident bookkeeping. `crates/loader/tests/modules.rs` runs
+original C and C++ programs through the built-in service surface; nothing was
+compared with Windows.
 
 ### Synthetic guest files
 
@@ -1664,11 +1750,15 @@ threads through it. A guest that exits the process still reports its own exit
 status.
 
 A hosted C++ guest additionally needs the C++ runtime services. `libstdc++-6.dll`
-provides `operator new` and `operator delete`, which reuse the same guest heap
-the C runtime's `malloc` and `free` use, `std::string`'s out-of-line
-`_M_dispose` and `_S_copy`, and libstdc++'s error paths. Those error paths are
-noreturn functions: Xenora implements no C++ exception machinery, so they stop
-the guest with the runtime-limit fault instead of returning.
+provides the scalar and array `operator new` and `operator delete` imports,
+which reuse the same guest heap the C runtime's `malloc` and `free` use,
+`std::string`'s out-of-line `_M_dispose` and `_S_copy`, and libstdc++'s error
+paths. On the 64-bit Windows target the public Itanium C++ ABI names the array
+forms `_Znay` and `_ZdaPv`; Xenora implements their allocation and release
+contract, while any array cookie for a non-trivially destructible element type
+is emitted by the compiler. Those error paths are noreturn functions: Xenora
+implements no C++ exception machinery, so they stop the guest with the
+runtime-limit fault instead of returning.
 
 `libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
 thread-local storage. The compiler emits a descriptor holding one variable's

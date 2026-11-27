@@ -49,8 +49,9 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
 - [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.
 
-## Native media middleware
+## Native media and middleware
 
+- [Middleware compatibility coverage](middleware/coverage.md) — Implemented, partial, unsupported and research-only networking, upscaling, acceleration-structure and media surfaces.
 - [Native video playback foundation](video-playback.md) — AVFoundation-backed lifecycle, frame timing, seeking, ownership and explicit codec/Bink limitations.
 
 ## Testing, validation, and benchmarks

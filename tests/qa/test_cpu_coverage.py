@@ -78,6 +78,52 @@ class CpuCoverage(unittest.TestCase):
             "alias",
         )
 
+    def test_strip_test_gated_items_ignores_semicolons_inside_types(self):
+        # Regression: the semicolon of an array type such as [u8; 1] must not
+        # end the removed span, or the test-only registration survives.
+        text = """
+        #[cfg(test)]
+        fn helper(_: [u8; 1]) {
+            registry.register("kernel32.dll", "TestOnly", |_, _, _| Ok(0));
+        }
+        fn production() {
+            registry.register("kernel32.dll", "CreateFileW", |_, _, _| Ok(0));
+        }
+        """
+        names = [e.name for e in scan_imports(text, source="imports.rs")]
+        self.assertIn("CreateFileW", names)
+        self.assertNotIn("TestOnly", names)
+
+    def test_scan_imports_keeps_production_registrations_after_a_test_module(self):
+        # Regression: truncating the file at the first #[cfg(test)] attribute
+        # drops every registration after it; only the gated item may go.
+        text = """
+        registry.register("kernel32.dll", "BeforeTests", |_, _, _| Ok(0));
+        #[cfg(test)]
+        mod tests {
+            #[test]
+            fn synthetic() {
+                let braces = "inside { a string } literal";
+                registry.register("kernel32.dll", "TestOnly", |_, _, _| Ok(0));
+            }
+        }
+        registry.register("kernel32.dll", "AfterTests", |_, _, _| Ok(0));
+        const LATER: &str = "ucrtbase.dll";
+        registry.register(LATER, "fclose", |_, _, _| Ok(0));
+        #[cfg(test)]
+        fn test_helper() {
+            registry.register("kernel32.dll", "HelperOnly", |_, _, _| Ok(0));
+        }
+        registry.register("kernel32.dll", "AfterHelper", |_, _, _| Ok(0));
+        """
+        entries = {(e.dll, e.name) for e in scan_imports(text, source="imports.rs")}
+        self.assertIn(("kernel32.dll", "BeforeTests"), entries)
+        self.assertIn(("kernel32.dll", "AfterTests"), entries)
+        self.assertIn(("ucrtbase.dll", "fclose"), entries)
+        self.assertIn(("kernel32.dll", "AfterHelper"), entries)
+        self.assertNotIn(("kernel32.dll", "TestOnly"), entries)
+        self.assertNotIn(("kernel32.dll", "HelperOnly"), entries)
+
     def test_scan_imports_ignores_arbitrary_literals_and_test_modules(self):
         text = '''
         enum ImportName { Name(String) }

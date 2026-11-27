@@ -270,6 +270,9 @@ refused, and any failure after mapping restores the caller's whole
 `GuestMemory` snapshot. Success returns reservations, per-stage reports and
 IAT diagnostics but runs no guest code: TLS callbacks are discovered only, and
 initialization, unloading and reference counting remain later lifecycle work.
+Preparation does not itself admit the images to the kernel32 dynamic-module
+catalog; that metadata registration is a separate crate-internal hook for the
+later guest-visible load integration.
 
 `xenora probe --mode static` inventories ordinary and delay-loaded PE imports
 without guest execution. Without `--report` it writes to `diagnostics/probe`,
@@ -759,6 +762,27 @@ polling, ordinal 101/102/103 guide-wait/poweroff functions,
 arbitrary game execution and real-game compatibility remain unsupported. This chain proves conversion and delivery
 into runtime services; it does not prove physical Xbox controller behavior and
 was not compared with Windows or Xbox hardware.
+
+### Host input router
+
+Each native application session owns one host input router, from the `xenora-input` crate (Campaign F, [#942](https://github.com/ranveersoni98/Xenora/issues/942)). The router is described in [the input campaign document](coordination/input-campaign.md). The app feeds it through the `xenora_session_input_*` functions:
+
+- physical macOS key codes, up to `0x7F`, as presses and releases;
+- relative mouse deltas and mouse buttons;
+- focus changes;
+- controller connections, each with a family number;
+- optional profile text for a controller;
+- raw GameController values (`xenora_controller_raw`): positional element bits, sticks from -1 to 1, triggers from 0 to 1, a vibration feature bit, and zeroed reserved bytes. These can come with battery evidence in the existing `xenora_xinput_battery` form.
+
+`xenora_controller_recognize` turns a GameController product category and the presence of paddle and Share buttons into a family number. It uses the crate's exact-match rule, so the app does not carry its own copy of that rule.
+
+`xenora_session_input_snapshot` writes the router's four slots in the `xenora_xinput_state` form without touching the guest, so a settings or test screen reads the same router that guest execution uses. `xenora_session_input_publish` installs those four slots into the running frame loop's XInput slots through the existing snapshot-and-battery path. Without a running loop it returns `XENORA_INVALID_STATE`.
+
+Every argument is validated before any state changes. Unknown devices, out-of-range modes, families, key codes and buttons, non-finite deltas, malformed raw structures, malformed batteries and malformed profile text return `XENORA_INVALID_ARGUMENT`. A fifth controller returns `XENORA_LIMIT_EXCEEDED`.
+
+A slot reports the vibration bit and battery evidence only in automatic and physical-only modes, and only when a controller owns that slot. A merged or keyboard-only slot reports neither. This is Xenora host policy.
+
+The router is not yet used by the app's frame loop. That comes with the app wiring.
 
 ### Guest heaps
 
@@ -1309,18 +1333,20 @@ Windows.
 
 The program's module handle is the base address its image was loaded at.
 `GetModuleHandleA` and `GetModuleHandleW` return it for a null name, and
-otherwise recognize the built-in Kernel32, KernelBase and UCRT modules and the
-API sets registered for Kernel32 and the UCRT. Names compare without case, and
-`.dll` is appended to a name without a dot. Paths and the program's own file name
-are not recognized. Built-in handles are identities without an image.
+otherwise recognize the built-in Kernel32, KernelBase and UCRT modules, the
+API sets registered for Kernel32 and the UCRT, and prepared guest modules
+admitted to the in-memory dynamic catalog. Names compare without case; `.dll`
+is appended to a name without a dot, while a trailing dot means exactly that
+extensionless name. Paths and the program's own file name are not recognized.
+Built-in handles are identities without an image.
 
 `GetModuleHandleExA` and `GetModuleHandleExW` also count a reference, pin the
 module, leave the count alone, or find the module by an address. Pinning cannot
 be combined with an unchanged count. The address may lie anywhere in the program's
-image; a built-in module contains only its handle. The program, Kernel32 and
-KernelBase stay loaded whatever the count; the UCRT is unloaded with its last
-reference unless it was pinned. `FreeLibrary` releases only references that were
-counted.
+image or in a registered guest module's half-open image range; a built-in module
+contains only its handle. The program, Kernel32 and KernelBase stay loaded
+whatever the count; the UCRT is unloaded with its last reference unless it was
+pinned. `FreeLibrary` releases only references that were counted.
 
 `K32GetModuleInformation`, and `GetModuleInformation` of `psapi.dll`, give the
 program's base, `SizeOfImage` and entry point. They refuse built-in modules with
@@ -1332,8 +1358,31 @@ guest service trampolines. The catalog is built after every other standard servi
 is registered and leaves out stubs. The program's own export table is not read.
 KernelBase exports only what Microsoft lists for it here. The services resolve
 through the API sets on Microsoft's pages. No host library is ever loaded.
-`crates/loader/tests/modules.rs` runs original C and C++ programs through them;
-nothing was compared with Windows.
+
+A crate-internal registration hook can admit an already prepared guest PE image
+to the same catalog under its closed-world logical file name, base address,
+half-open image size and retained export table. The hook performs no host file
+search, loading, relocation, initialization or execution; the caller must already
+have prepared the image. A registered module's handle is its base. Direct named
+and ordinal exports resolve to `base + RVA` guest image addresses, never service
+trampolines. Forwarder strings follow the package loader's documented last-dot
+grammar, are limited to eight edges, and may terminate in another registered
+guest module or in a captured built-in service export; only the service terminal
+produces a service trampoline. `GetModuleFileName` answers the logical module
+name, never a host path.
+
+Dynamic modules are process-resident in the current lifecycle model. Registration
+adds one loader-owned reference and pins the image because unloading, unmapping
+and reference-count teardown do not exist yet. A guest `FreeLibrary` can release
+counted references, but it never unmaps the image or makes its exports invalid.
+This is a documented deviation from Windows loader teardown, not a claim of full
+`LoadLibrary` support: converting a guest load request into preparation and
+registration remains later work. Original byte-built synthetic modules cover
+handle identity, range containment, direct and ordinal exports, guest and
+kernel32 forwarder terminals, the eight-hop bound, logical file names, collision
+refusal and process-resident bookkeeping. `crates/loader/tests/modules.rs` runs
+original C and C++ programs through the built-in service surface; nothing was
+compared with Windows.
 
 ### Synthetic guest files
 
@@ -1664,11 +1713,15 @@ threads through it. A guest that exits the process still reports its own exit
 status.
 
 A hosted C++ guest additionally needs the C++ runtime services. `libstdc++-6.dll`
-provides `operator new` and `operator delete`, which reuse the same guest heap
-the C runtime's `malloc` and `free` use, `std::string`'s out-of-line
-`_M_dispose` and `_S_copy`, and libstdc++'s error paths. Those error paths are
-noreturn functions: Xenora implements no C++ exception machinery, so they stop
-the guest with the runtime-limit fault instead of returning.
+provides the scalar and array `operator new` and `operator delete` imports,
+which reuse the same guest heap the C runtime's `malloc` and `free` use,
+`std::string`'s out-of-line `_M_dispose` and `_S_copy`, and libstdc++'s error
+paths. On the 64-bit Windows target the public Itanium C++ ABI names the array
+forms `_Znay` and `_ZdaPv`; Xenora implements their allocation and release
+contract, while any array cookie for a non-trivially destructible element type
+is emitted by the compiler. Those error paths are noreturn functions: Xenora
+implements no C++ exception machinery, so they stop the guest with the
+runtime-limit fault instead of returning.
 
 `libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
 thread-local storage. The compiler emits a descriptor holding one variable's

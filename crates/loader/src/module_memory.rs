@@ -276,6 +276,63 @@ impl fmt::Display for ModuleReservationError {
 
 impl std::error::Error for ModuleReservationError {}
 
+/// Shared crate-internal validation failures for a reservation set. Each
+/// batch phase translates these into its own public error type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReservationSetError {
+    ReservationInputMismatch {
+        reservations: usize,
+        module_images: usize,
+    },
+    InvalidReservationIndex {
+        position: usize,
+        image_index: usize,
+    },
+    InvalidReservation {
+        image_index: usize,
+        source: ModuleReservationError,
+    },
+    OverlappingReservations {
+        first_image_index: usize,
+        second_image_index: usize,
+    },
+}
+
+impl From<ReservationSetError> for ModuleRelocationError {
+    fn from(error: ReservationSetError) -> Self {
+        match error {
+            ReservationSetError::ReservationInputMismatch {
+                reservations,
+                module_images,
+            } => Self::ReservationInputMismatch {
+                reservations,
+                module_images,
+            },
+            ReservationSetError::InvalidReservationIndex {
+                position,
+                image_index,
+            } => Self::InvalidReservationIndex {
+                position,
+                image_index,
+            },
+            ReservationSetError::InvalidReservation {
+                image_index,
+                source,
+            } => Self::InvalidReservation {
+                image_index,
+                source,
+            },
+            ReservationSetError::OverlappingReservations {
+                first_image_index,
+                second_image_index,
+            } => Self::OverlappingReservations {
+                first_image_index,
+                second_image_index,
+            },
+        }
+    }
+}
+
 /// Errors that prevent transactional relocation of an explicit module batch.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ModuleRelocationError {
@@ -409,7 +466,8 @@ pub fn relocate_module_batch(
     reservations: &[ModuleReservation],
     memory: &mut GuestMemory,
 ) -> Result<Vec<RelocationReport>, ModuleRelocationError> {
-    let ordered = validate_reservations(images, reservations)?;
+    let ordered =
+        validate_reservations(images, reservations).map_err(ModuleRelocationError::from)?;
     if images.is_empty() {
         return Ok(Vec::new());
     }
@@ -453,12 +511,12 @@ pub fn relocate_module_batch(
     Ok(reports)
 }
 
-fn validate_reservations(
+pub(crate) fn validate_reservations(
     images: &[ExplicitModuleImage<'_>],
     reservations: &[ModuleReservation],
-) -> Result<Vec<ModuleReservation>, ModuleRelocationError> {
+) -> Result<Vec<ModuleReservation>, ReservationSetError> {
     if reservations.len() != images.len() {
-        return Err(ModuleRelocationError::ReservationInputMismatch {
+        return Err(ReservationSetError::ReservationInputMismatch {
             reservations: reservations.len(),
             module_images: images.len(),
         });
@@ -466,7 +524,7 @@ fn validate_reservations(
     let mut positions = vec![None; images.len()];
     for (position, reservation) in reservations.iter().enumerate() {
         if reservation.image_index >= images.len() || positions[reservation.image_index].is_some() {
-            return Err(ModuleRelocationError::InvalidReservationIndex {
+            return Err(ReservationSetError::InvalidReservationIndex {
                 position,
                 image_index: reservation.image_index,
             });
@@ -489,7 +547,7 @@ fn validate_reservations(
     spans.sort_unstable_by_key(|&(image_index, base, end)| (base, end, image_index));
     for pair in spans.windows(2) {
         if pair[1].1 < pair[0].2 {
-            return Err(ModuleRelocationError::OverlappingReservations {
+            return Err(ReservationSetError::OverlappingReservations {
                 first_image_index: pair[0].0,
                 second_image_index: pair[1].0,
             });
@@ -502,8 +560,8 @@ fn validate_reservation(
     image_index: usize,
     image: ExplicitModuleImage<'_>,
     reservation: ModuleReservation,
-) -> Result<(), ModuleRelocationError> {
-    let inconsistent = |source| ModuleRelocationError::InvalidReservation {
+) -> Result<(), ReservationSetError> {
+    let inconsistent = |source| ReservationSetError::InvalidReservation {
         image_index,
         source,
     };

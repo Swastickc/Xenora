@@ -90,6 +90,7 @@ A coding agent claims in the name of the person it works for and follows the sam
 - Run the correctness-gated benchmark suite: `scripts/benchmark.sh` (idle machine, release, validation off)
 - Run source mutation on decoder/shader/ref: `scripts/mutation.sh` (R2 owns triage)
 - Check generated status tables: `python3 scripts/audit/status.py --check`.
+- Check the generated runtime-service inventory: `python3 scripts/audit/runtime_inventory.py --check`.
 - Check claims and dependency direction: `scripts/audit/claims.sh` and `scripts/audit/dependencies.sh`
 - Fuzz one target at a time: `scripts/fuzz.sh <instruction_stream|fixture|reference|runtime_services>` (600 seconds by default). `runtime_services` drives the standard guest service registry.
 

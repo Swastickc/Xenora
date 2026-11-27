@@ -20,6 +20,7 @@ mod crt_callbacks;
 mod crt_clock;
 mod crt_files;
 mod crt_format;
+mod crt_jump;
 mod crt_legacy;
 mod crt_math;
 mod crt_scan;
@@ -48,6 +49,7 @@ mod synch;
 pub mod sysinfo;
 mod task_fixture;
 pub(crate) mod threads;
+mod user32;
 mod winsock;
 
 use crate::runtime::HResult;
@@ -199,6 +201,8 @@ enum GuestObject {
     /// enumeration reads the live state.
     Snapshot,
     ConsoleBuffer(Arc<Mutex<console::ScreenBuffer>>),
+    /// A handle to the machine's one process, opened through OpenProcess.
+    Process,
 }
 
 #[derive(Default)]
@@ -211,6 +215,9 @@ struct ObjectState {
     directories: BTreeSet<String>,
     /// Locked byte ranges per file path, as (owning handle, offset, length, exclusive).
     locks: BTreeMap<String, Vec<(u64, u64, u64, bool)>>,
+    /// Files the CRT `_wchmod` made read-only. Writes, truncation and
+    /// deletion of one fail; `_wstat` and `_access` report the mode.
+    readonly: BTreeSet<String>,
     next_temp: u32,
 }
 
@@ -262,10 +269,18 @@ pub struct ServicesState {
     synch: Mutex<synch::Synch>,
     crt_streams: Mutex<crt_streams::StandardStreams>,
     crt_clock: Mutex<crt_clock::ClockServices>,
+    crt_directory: Mutex<String>,
     pub(crate) threads: Mutex<threads::ThreadTable>,
     pub(crate) hooks: Arc<threads::SchedulerHooks>,
     /// Functions registered with `atexit`, run in reverse order by `_cexit`.
     atexit: Mutex<Vec<u64>>,
+    /// The process environment the kernel32 services maintain, insertion
+    /// ordered with the original name casing preserved. Lookups are
+    /// case-insensitive, as the Windows environment is. Starts empty: no
+    /// host variable passes through. The C runtime's `_environ` does not
+    /// follow it, which is the real Windows behaviour: the CRT keeps its own
+    /// copy, and only `_putenv` would update that one.
+    pub(crate) environment: Mutex<Vec<(String, String)>>,
     /// Emulated thread-local storage: the block each guest thread owns for
     /// each thread-local variable, keyed by the guest thread and then by the
     /// address of the variable's descriptor.
@@ -341,11 +356,13 @@ impl ServicesState {
             synch: Mutex::default(),
             crt_streams: Mutex::default(),
             crt_clock: Mutex::default(),
+            crt_directory: Mutex::new(String::new()),
             console: Mutex::default(),
             com: Mutex::default(),
             threads: Mutex::default(),
             hooks: Arc::default(),
             atexit: Mutex::default(),
+            environment: Mutex::default(),
             emutls: Mutex::default(),
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
@@ -560,6 +577,42 @@ impl ServicesState {
         self.crt_startup().user_math_error()
     }
 
+    /// The value of an environment variable, resolved case-insensitively.
+    pub fn environment_variable_value(&self, name: &str) -> Option<String> {
+        self.environment
+            .lock()
+            .expect("guest environment")
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+    }
+
+    /// Set or delete one environment variable, keeping the insertion order
+    /// and the original casing of a first insertion.
+    pub fn set_environment_variable(&self, name: &str, value: Option<&str>) {
+        let mut environment = self.environment.lock().expect("guest environment");
+        match value {
+            Some(value) => {
+                if let Some(entry) = environment
+                    .iter_mut()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                {
+                    entry.1 = value.to_owned();
+                } else {
+                    environment.push((name.to_owned(), value.to_owned()));
+                }
+            }
+            None => environment.retain(|(key, _)| !key.eq_ignore_ascii_case(name)),
+        }
+    }
+
+    /// The variables of the environment block, sorted upper-case first.
+    pub fn environment_block_entries(&self) -> Vec<(String, String)> {
+        let mut entries = self.environment.lock().expect("guest environment").clone();
+        entries.sort_by_key(|entry| entry.0.to_uppercase());
+        entries
+    }
+
     /// Record a guest error and return the documented failure value.
     fn fail<T>(&self, teb: u64, error: u32, value: T) -> Result<T, ExitReason> {
         self.set_last_error(teb, error);
@@ -594,6 +647,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     threads::register(registry, &state);
     static_cxx::register(registry);
     crate::exceptions::register(registry);
+    crt_jump::register(registry);
 
     // The legacy CRT variables a msvcrt.dll-linked image imports as data
     // (#643). Each cell is the one the modern accessors maintain, so the
@@ -689,6 +743,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
         } else {
             match thread.handles.get(&source) {
                 Some(GuestObject::Thread(rights)) => (*rights, GuestObject::Thread(*rights)),
+                Some(GuestObject::Process) => (0, GuestObject::Process),
                 Some(GuestObject::Waitable { state, access }) => (
                     *access,
                     GuestObject::Waitable {
@@ -739,9 +794,8 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             GuestObject::Search(_)
             | GuestObject::FileMapping { .. }
             | GuestObject::Snapshot
-            | GuestObject::ConsoleBuffer(_) => {
-                unreachable!("these handles cannot be duplicated")
-            }
+            | GuestObject::ConsoleBuffer(_)
+            | GuestObject::Process => unreachable!("these handles cannot be duplicated"),
         }
         thread.insert_handle(handle, object);
         Ok(1)
@@ -759,14 +813,20 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_heap(registry);
     crt::register_errno(registry);
     crt::register_conversions(registry);
+    crt::register_conio(registry);
+    crt::register_spawn_refusal(registry);
     crt::register_utilities(registry);
+    crt::register_directories(registry, &state);
     crt_callbacks::register(registry, &state);
     environment::register(registry, &state);
     errors::register(registry, &state);
     registry::register(registry, &state);
     file_mapping::register(registry, &state);
+    user32::register(registry, &state);
     advapi::register(registry, &state);
     advapi::register_tokens(registry, &state);
+    advapi::register_safer(registry, &state);
+    advapi::register_security_query(registry, &state);
     // The legacy CRT's printf family, which the variadic calling convention
     // keeps out of the typed table (#459).
     crt_streams::register_legacy(registry, &state);
@@ -1152,6 +1212,72 @@ pub(crate) mod handlers {
         Ok(true)
     }
 
+    /// `CreatePipe`. The security attributes are meaningless inside the
+    /// guest — there is no other process to inherit to — and the size hint
+    /// is a hint. Both ends answer together, or neither does.
+    pub fn create_pipe(
+        context: &mut ServiceContext<'_>,
+        read_end: u64,
+        write_end: u64,
+        attributes: u64,
+        size: u32,
+    ) -> Outcome<bool> {
+        let _ = size;
+        if attributes != 0 {
+            return context.state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
+        }
+        if read_end == 0 || write_end == 0 {
+            return context
+                .state
+                .fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        if context.memory.check_write(read_end, 8).is_err()
+            || context.memory.check_write(write_end, 8).is_err()
+        {
+            return context.state.fail(context.teb, ERROR_NOACCESS, false);
+        }
+        let state_shared = std::sync::Arc::new(std::sync::Mutex::new(files::PipeState {
+            write_open: true,
+            ..files::PipeState::default()
+        }));
+        let mut objects = context.state.objects.lock().expect("guest object state");
+        let Some(read_value) = objects.next_handle() else {
+            return context
+                .state
+                .fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, false);
+        };
+        objects.insert_handle(
+            read_value,
+            GuestObject::Pipe {
+                state: std::sync::Arc::clone(&state_shared),
+                write: false,
+            },
+        );
+        let Some(write_value) = objects.next_handle() else {
+            objects.handles.remove(&read_value);
+            return context
+                .state
+                .fail(context.teb, ERROR_NOT_ENOUGH_MEMORY, false);
+        };
+        objects.insert_handle(
+            write_value,
+            GuestObject::Pipe {
+                state: state_shared,
+                write: true,
+            },
+        );
+        drop(objects);
+        context
+            .memory
+            .write_u64(read_end, read_value)
+            .map_err(ExitReason::MemoryFault)?;
+        context
+            .memory
+            .write_u64(write_end, write_value)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(true)
+    }
+
     pub fn close_handle(context: &mut ServiceContext<'_>, handle: u64) -> Outcome<bool> {
         let mut objects = context.state.objects.lock().expect("guest object state");
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
@@ -1250,6 +1376,77 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn fread(
+        context: &mut ServiceContext<'_>,
+        buffer: u64,
+        size: u64,
+        count: u64,
+        stream: u64,
+    ) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.read_items(context.memory, &drive, buffer, size, count, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn fgetc(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.read_character_file(&drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `fseek`: the 32-bit form, as `long` is 32 bits on Win64. It is the
+    /// 64-bit one with the offset narrowed, which loses nothing a 32-bit
+    /// guest argument could have held.
+    pub fn fseek(
+        context: &mut ServiceContext<'_>,
+        stream: u64,
+        offset: i32,
+        origin: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            if origin < 0 {
+                Ok(Err(crt_streams::Failed(-1, crt::EINVAL)))
+            } else {
+                streams.seek(&drive, stream, i64::from(offset), origin as u32)
+            }
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `ftell`: the 32-bit form. A position past what `long` holds is
+    /// `EINVAL`, as the documentation of `_ftelli64` gives no other answer
+    /// for the narrow form there.
+    pub fn ftell(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            match streams.tell(stream)? {
+                Ok(at) => match i32::try_from(at) {
+                    Ok(at) => Ok(Ok(at)),
+                    Err(_) => Ok(Err(crt_streams::Failed(-1_i32, crt::EINVAL))),
+                },
+                Err(crt_streams::Failed(_, errno)) => Ok(Err(crt_streams::Failed(-1_i32, errno))),
+            }
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn rewind(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<()> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.rewind_file(&drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
     // The buffer forms of printf, and the secure forms (#466). They share the
     // formatter through `crt_streams`; the stream state only serves `putchar`
     // and `vfprintf_s`.
@@ -1264,7 +1461,7 @@ pub(crate) mod handlers {
         locale: u64,
         arguments: u64,
     ) -> Outcome<i32> {
-        crt_scan::vsscanf(
+        let outcome = crt_scan::scan_string(
             context.memory,
             options,
             buffer,
@@ -1272,7 +1469,8 @@ pub(crate) mod handlers {
             format,
             locale,
             arguments,
-        )
+        );
+        or_errno(context, outcome)
     }
 
     pub fn vsprintf(
@@ -1350,6 +1548,33 @@ pub(crate) mod handlers {
         // The secure stream form validates what the plain one validates, and
         // `%n` is invalid in both, so they are the same here.
         vfprintf(context, options, stream, format, locale, arguments)
+    }
+
+    // Formatted input (#605): `crt_scan.rs` holds the rules. The string form
+    // needs no stream state; the stream form reads `stdin` or a file.
+
+    pub fn vfscanf(
+        context: &mut ServiceContext<'_>,
+        options: u64,
+        stream: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let drive = context.state.objects.lock().expect("guest object state");
+            streams.scan(
+                context.memory,
+                &drive,
+                options,
+                stream,
+                format,
+                locale,
+                arguments,
+            )
+        };
+        or_errno(context, outcome)
     }
 
     pub fn putchar(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
@@ -1662,6 +1887,134 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _wfopen(context: &mut ServiceContext<'_>, name: u64, mode: u64) -> Outcome<u64> {
+        let outcome = {
+            let mut streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.open_wide(context.memory, &mut drive, name, mode)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _wunlink(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.unlink_file(context.memory, &mut drive, name, true)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _waccess(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.access_file(context.memory, &mut drive, name, true, mode as u32)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _wmkdir(context: &mut ServiceContext<'_>, name: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.make_dir_wide(context.memory, &mut drive, name)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _wchmod(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.chmod_wide(context.memory, &mut drive, name, mode as u32)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _wstat64i32(context: &mut ServiceContext<'_>, name: u64, output: u64) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.stat_wide(context.memory, &mut drive, name, output)
+        };
+        or_errno(context, outcome)
+    }
+
+    pub fn _assert(
+        context: &mut ServiceContext<'_>,
+        expression: u64,
+        file: u64,
+        line: u32,
+    ) -> Outcome<()> {
+        let mut streams = context.state.crt_streams();
+        let mut drive = context.state.objects.lock().expect("guest object state");
+        streams.assert_failure(context.memory, &mut drive, expression, file, line)
+    }
+
+    /// `_beginthreadex`: the CRT spelling of CreateThread. The answer is the
+    /// handle itself, with 0 and an errno for a failure instead of the
+    /// kernel32 INVALID_HANDLE_VALUE and last error. The CRT passes the
+    /// security attributes through, so they are refused exactly as
+    /// CreateThread refuses them; the errno mapping is EINVAL for the
+    /// arguments and the environment, ENOMEM for the machine having no room.
+    pub fn _beginthreadex(
+        context: &mut ServiceContext<'_>,
+        security: u64,
+        stack_size: u64,
+        start: u64,
+        arglist: u64,
+        initflag: u32,
+        thrdaddr: u64,
+    ) -> Outcome<u64> {
+        use crate::services::crt_files::{EINVAL, ENOMEM};
+        fn failure(context: &mut ServiceContext<'_>, errno: u32) -> Result<u64, ExitReason> {
+            crt::set_errno(context.memory, context.teb, errno)?;
+            Ok(0)
+        }
+        if security != 0
+            || initflag & !(threads::CREATE_SUSPENDED | threads::STACK_SIZE_PARAM_IS_A_RESERVATION)
+                != 0
+            || start == 0
+        {
+            return failure(context, EINVAL);
+        }
+        if !context.state.hooks.is_attached() {
+            return failure(context, ENOMEM);
+        }
+        let request = threads::ThreadRequest {
+            stack: stack_size,
+            start,
+            parameter: arglist,
+            suspended: initflag & threads::CREATE_SUSPENDED != 0,
+            reservation: initflag & threads::STACK_SIZE_PARAM_IS_A_RESERVATION != 0,
+            id_output: thrdaddr,
+        };
+        let handle = context
+            .state
+            .create_thread(context.teb, context.memory, &request)?;
+        if handle != 0 {
+            return Ok(handle);
+        }
+        let errno = match context.state.last_error(context.teb) {
+            8 => ENOMEM,
+            _ => EINVAL,
+        };
+        failure(context, errno)
+    }
+
+    /// `_endthreadex`: the CRT spelling of ExitThread. Unlike `_endthread` it
+    /// does not close the thread's handle, which is exactly what the kernel32
+    /// service does not do either, so the two share their semantics.
+    pub fn _endthreadex(context: &mut ServiceContext<'_>, code: u32) -> Outcome<()> {
+        let mut table = context.state.threads.lock().expect("guest thread table");
+        let Some(id) = table.id_of(context.teb) else {
+            return Err(ExitReason::IllegalInstruction(0xFE));
+        };
+        table.threads.get_mut(&id).expect("thread found above").exit = Some(code);
+        Err(ExitReason::GuestThreadExited)
+    }
+
     /// `_mkdir` and `_rmdir` are drive operations the descriptor layer is no
     /// part of: the narrow path resolves as every drive path does.
     pub fn _pipe(context: &mut ServiceContext<'_>, fds: u64, size: u32, mode: i32) -> Outcome<i32> {
@@ -1773,6 +2126,60 @@ pub(crate) mod handlers {
 
     pub fn _isatty(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<i32> {
         let outcome = context.state.crt_streams().is_terminal(fd);
+        or_errno(context, outcome)
+    }
+
+    pub fn ungetc(context: &mut ServiceContext<'_>, c: i32, stream: u64) -> Outcome<i32> {
+        let outcome = context.state.crt_streams().ungetc(c, stream);
+        or_errno(context, outcome)
+    }
+
+    /// `_open_osfhandle`. The descriptor number wrapping the kernel handle,
+    /// which the CRT takes ownership of. The flags are the stream mode bits
+    /// the hosted runtime's descriptors do not carry: the pipe ends know
+    /// their direction already, so only the append bit would matter and no
+    /// pipe honors it.
+    pub fn _open_osfhandle(
+        context: &mut ServiceContext<'_>,
+        osfhandle: u64,
+        flags: i32,
+    ) -> Outcome<i32> {
+        let outcome = {
+            let drive = context.state.objects.lock().expect("guest object state");
+            context
+                .state
+                .crt_streams()
+                .open_osfhandle(&drive, osfhandle)
+        };
+        let _ = flags;
+        or_errno(context, outcome)
+    }
+
+    /// `_get_osfhandle`. The kernel handle a descriptor wraps, or -1 with
+    /// `EBADF` — the CRT's own files have no kernel object behind them.
+    pub fn _get_osfhandle(context: &mut ServiceContext<'_>, fd: i32) -> Outcome<u64> {
+        let outcome = context.state.crt_streams().get_osfhandle(fd);
+        or_errno(context, outcome)
+    }
+
+    /// `_filbuf`. The byte read as an unsigned char, or EOF at the end of
+    /// the stream or for one that is not open and readable. The streams
+    /// here are unbuffered, so the byte is simply the next one.
+    pub fn _filbuf(context: &mut ServiceContext<'_>, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let drive = context.state.objects.lock().expect("guest object state");
+            context.state.crt_streams().filbuf(&drive, stream)
+        };
+        or_errno(context, outcome)
+    }
+
+    /// `_flsbuf`. The byte written, or EOF for a stream that is not open
+    /// and writable.
+    pub fn _flsbuf(context: &mut ServiceContext<'_>, c: i32, stream: u64) -> Outcome<i32> {
+        let outcome = {
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            context.state.crt_streams().flsbuf(&mut drive, c, stream)
+        };
         or_errno(context, outcome)
     }
 
@@ -2665,13 +3072,86 @@ pub(crate) mod handlers {
     // every query misses, which is what an empty environment answers on
     // Windows rather than a stub.
 
-    pub fn environment_variable(
+    pub fn environment_variable_narrow(
         context: &mut ServiceContext<'_>,
-        _name: u64,
-        _buffer: u64,
-        _size: u32,
+        name: u64,
+        buffer: u64,
+        size: u32,
     ) -> Outcome<u32> {
-        context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0)
+        environment_variable_impl(context, name, buffer, size, false)
+    }
+
+    pub fn environment_variable_wide(
+        context: &mut ServiceContext<'_>,
+        name: u64,
+        buffer: u64,
+        size: u32,
+    ) -> Outcome<u32> {
+        environment_variable_impl(context, name, buffer, size, true)
+    }
+
+    /// The shared body of the narrow and wide environment queries: the answer
+    /// is the value length without the terminator when it fits, the size it
+    /// needs with the terminator when it does not.
+    fn environment_variable_impl(
+        context: &mut ServiceContext<'_>,
+        name: u64,
+        buffer: u64,
+        size: u32,
+        wide: bool,
+    ) -> Outcome<u32> {
+        let fault = crate::cpu::ExitReason::MemoryFault;
+        let text = if wide {
+            let mut units = Vec::new();
+            loop {
+                let unit = context
+                    .memory
+                    .read_u16(name + 2 * units.len() as u64)
+                    .map_err(fault)?;
+                if unit == 0 {
+                    break;
+                }
+                units.push(unit);
+                if units.len() > 32768 {
+                    return context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0);
+                }
+            }
+            String::from_utf16_lossy(&units)
+        } else {
+            read_narrow_string(context.memory, name)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())?
+        };
+        let value = match context.state.environment_variable_value(&text) {
+            Some(value) if !value.is_empty() => value,
+            _ => return context.state.fail(context.teb, ERROR_ENVVAR_NOT_FOUND, 0),
+        };
+        let units: Vec<u16> = value.encode_utf16().collect();
+        let length = units.len() as u32;
+        if length + 1 > size {
+            return Ok(length + 1);
+        }
+        if wide {
+            for (index, unit) in units.iter().enumerate() {
+                context
+                    .memory
+                    .write_u16(buffer + 2 * index as u64, *unit)
+                    .map_err(fault)?;
+            }
+            context
+                .memory
+                .write_u16(buffer + 2 * u64::from(length), 0)
+                .map_err(fault)?;
+        } else {
+            context
+                .memory
+                .write_bytes(buffer, value.as_bytes())
+                .map_err(fault)?;
+            context
+                .memory
+                .write_u8(buffer + u64::from(length), 0)
+                .map_err(fault)?;
+        }
+        Ok(length)
     }
 
     /// The hosted runtime has no console window: the answer is a null handle.

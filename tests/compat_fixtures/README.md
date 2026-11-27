@@ -357,6 +357,27 @@ count as a control. `crates/cli/tests/run_program.rs` runs all three through
 `xenora run`, and feeds one 1 MiB + 1 byte to check the refusal. Provenance
 is as for Gate A2.
 
+## Formatted input
+
+`tests/compat_fixtures/crt_scanf.c` (#605) is a hosted C program that reads
+formatted input with `sscanf`, `sscanf_s`, `scanf`, `scanf_s`, `fscanf` and
+`fscanf_s`. Built by `build-crt-scanf.sh` with mingw-w64 (UCRT flavour) and
+`-fno-builtin`, the six functions are mingw-w64 wrappers that call the
+imports `__stdio_common_vsscanf` and `__stdio_common_vfscanf` of
+`api-ms-win-crt-stdio-l1-1-0.dll`. The checks cover integers in each base and
+size, widths, strings, characters, scansets, decimal and hexadecimal floating
+point, `%%`, `%n`, suppression, matching and input failures, and the buffer
+sizes of the secure forms. The host pipes a fixed input in CR LF, which the
+program reads with `scanf` and `getchar`; it then writes a file in text mode
+and reads it back with `fscanf` in text and binary mode, checking each
+position with `_ftelli64`. Every expected value follows from the input and
+from ISO C 7.21.6.2 or Microsoft's pages; it exits with the number of the
+first failed check, or 0. It is built at `-O0` and `-O2`, and once at `-O1`
+with `CRT_SCANF_BREAK`, which expects the carriage return of a CR LF pair to
+survive, so check 17 fails, as a control. `crates/cli/tests/run_program.rs`
+runs all three through `xenora run`. Provenance is as for Gate A2. Nothing
+here has been compared with Windows.
+
 ## C runtime file positions
 
 `tests/compat_fixtures/crt_files.c` (#493) is a hosted C program that writes
@@ -547,5 +568,50 @@ Built by `build-crt-console.sh` with mingw-w64, the calls are imports of
 `kernel32.dll`. It is built at `-O0` and `-O2`, and once at `-O1` with
 `CRT_CONSOLE_BREAK` as a control. `crates/cli/tests/run_program.rs` runs
 all three through `xenora run`.
+
+## The Windows file services
+
+`tests/compat_fixtures/crt_winfiles.c` (package 8 of #459) is a hosted C
+program that creates, copies, moves, enumerates and describes files on the
+synthetic drive through the narrow and wide services, checking the sharing
+between widths, the failures and the unique temporary names. Built by
+`build-crt-winfiles.sh` with mingw-w64, the calls are imports of
+`kernel32.dll`. It is built at `-O0` and `-O2`, and once at `-O1` with
+`CRT_WINFILES_BREAK` as a control. `crates/cli/tests/run_program.rs` runs
+all three through `xenora run`.
+
+## The legacy memory services
+
+`tests/compat_fixtures/crt_winmemory.c` (package 9 of #459) is a hosted C
+program that allocates, writes, zero-checks and frees memory through the
+legacy `GlobalAlloc`/`LocalAlloc` family, checking the null free, the
+documented failure answers and the sharing with the process heap. Built by
+`build-crt-winmemory.sh` with mingw-w64, the calls are imports of
+`kernel32.dll`. It is built at `-O0` and `-O2`, and once at `-O1` with
+`CRT_WINMEMORY_BREAK` as a control. `crates/cli/tests/run_program.rs` runs
+all three through `xenora run`.
+
+## The error, environment and system services
+
+`tests/compat_fixtures/crt_winsys.c` (package 9 of #459) is a hosted C
+program that formats error messages in both widths, exchanges the error
+mode, expands strings over the empty environment, walks the environment
+block and reads the version, directories, computer name and processor
+topology of the simulated machine. Built by `build-crt-winsys.sh` with
+mingw-w64, the calls are imports of `kernel32.dll`. It is built at `-O0`
+and `-O2`, and once at `-O1` with `CRT_WINSYS_BREAK` as a control.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
+Provenance is as for Gate A2: the source and scripts are Xenora's, and the
+executables are test output that contains mingw-w64 startup code.
+
+`tests/compat_fixtures/crt_crtutils.c` (the survey residue of #459) is a
+hosted C program that exercises the small CRT utilities: narrow string
+copying and concatenation, `strrchr`, `_strdup`, the in-place case
+conversions and reversal, the C-locale collation forms, the Annex K copy
+constraints, the character classes, the integer formatting family and
+`getenv_s` over the empty environment. Built by `build-crt-crtutils.sh`
+with mingw-w64, the calls are imports of `ucrtbase.dll`. It is built at
+`-O0` and `-O2`, and once at `-O1` with `CRT_CRTUTILS_BREAK` as a control.
+`crates/cli/tests/run_program.rs` runs all three through `xenora run`.
 Provenance is as for Gate A2: the source and scripts are Xenora's, and the
 executables are test output that contains mingw-w64 startup code.

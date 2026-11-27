@@ -523,9 +523,18 @@ fn bytes_that_are_not_the_parsed_headers_are_refused() {
         refused(&|b| b[OPTIONAL..OPTIONAL + 2].copy_from_slice(&0x010Bu16.to_le_bytes())),
         Some(PeError::InvalidHeaderSize)
     );
-    // A different section count, preferred base or header size.
+    // A different section count, characteristics word, entry point, preferred
+    // base or header size.
     assert_eq!(
         refused(&|b| b[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+    assert_eq!(
+        refused(&|b| b[coff + 18..coff + 20].copy_from_slice(&0u16.to_le_bytes())),
+        Some(PeError::InvalidHeaderSize)
+    );
+    assert_eq!(
+        refused(&|b| b[OPTIONAL + 16] ^= 1),
         Some(PeError::InvalidHeaderSize)
     );
     assert_eq!(

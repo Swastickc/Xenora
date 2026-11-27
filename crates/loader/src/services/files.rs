@@ -11,8 +11,8 @@ use super::{
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::{GuestMemory, MemoryError};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 const FILE_API: &str = "api-ms-win-core-file-l1-1-0.dll";
 const CRT_FILESYSTEM_API: &str = "api-ms-win-crt-filesystem-l1-1-0.dll";
@@ -41,6 +41,18 @@ pub(super) struct OpenFile {
     open_access: u32,
     pub(super) access: u32,
     share: u32,
+}
+
+impl OpenFile {
+    /// The CRT interop reads and writes the object through these, under the
+    /// same serialization the object table gives the kernel calls.
+    pub(super) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(super) fn position(&self) -> &Arc<AtomicU64> {
+        &self.position
+    }
 }
 
 fn read_guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
@@ -365,11 +377,25 @@ fn find_first(
 
 /// The display form of a normalized drive name, `c:\name`, or nothing for
 /// an empty or invalid name.
-fn full_name(name: &str) -> Option<String> {
-    if name.is_empty() || !name.split('\\').all(valid_component) {
+/// Resolve a guest path against the process working directory, lexically,
+/// dot segments included: a drive letter or a leading backslash anchors at
+/// the volume root, anything else hangs under the working directory. The
+/// working directory itself starts at the root, which keeps the resolution
+/// of a fresh process the historical one. The CRT `_chdir` moves it, so the
+/// kernel file operations and the CRT forms stay consistent, the behaviour
+/// a single Windows process exposes.
+fn full_name(cwd: &str, name: &str) -> Option<String> {
+    if name.is_empty() {
         return None;
     }
-    Some(format!("c:\\{name}"))
+    let resolved = super::crt::resolve_directory(cwd, name);
+    if !resolved
+        .split('\\')
+        .all(|part| part.is_empty() || valid_component(part))
+    {
+        return None;
+    }
+    Some(format!("c:\\{resolved}"))
 }
 
 /// The CRT `_finddata64i32_t` layout of mingw-w64: attributes at 0, the
@@ -1244,7 +1270,12 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             let Some(name) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
                 return full.fail(cpu.gs_base, INVALID_NAME, 0);
             };
-            let Some(full_path) = full_name(&name) else {
+            let cwd = full
+                .crt_directory
+                .lock()
+                .expect("CRT working directory")
+                .clone();
+            let Some(full_path) = full_name(&cwd, &name) else {
                 return full.fail(cpu.gs_base, INVALID_NAME, 0);
             };
             // args: rcx input, rdx buffer size in characters, r8 buffer, r9 file-part output.
@@ -1648,7 +1679,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     // small - or a result longer than the 260 characters a null buffer gets -
     // sets ERANGE. The display form is lowercase because the drive's names
     // are case-folded.
-    registry.register(UCRT, "_fullpath", |args, cpu, memory| {
+    let fullpath_state = Arc::clone(state);
+    registry.register(UCRT, "_fullpath", move |args, cpu, memory| {
         let fail = |memory: &mut GuestMemory, error: u32| -> Result<u64, ExitReason> {
             super::crt::set_errno(memory, cpu.gs_base, error)?;
             Ok(0)
@@ -1657,9 +1689,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         else {
             return fail(memory, super::crt_files::EINVAL);
         };
-        let Some(full_path) = full_name(&name) else {
+        let cwd = fullpath_state
+            .crt_directory
+            .lock()
+            .expect("CRT working directory")
+            .clone();
+        let Some(resolved) = full_name(&cwd, &name) else {
             return fail(memory, super::crt_files::EINVAL);
         };
+        // `full_name` already answers the machine's display form - the
+        // lowercase drive letter the case-folded drive uses everywhere.
+        let full_path = resolved;
         let bytes = full_path.as_bytes();
         let needed = bytes.len() + 1;
         let buffer = if args.rcx == 0 {
@@ -1758,54 +1798,6 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.alias(CRT_FILESYSTEM_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }
-
-    let pipes = Arc::clone(state);
-    registry.register(KERNEL32, "CreatePipe", move |args, cpu, memory| {
-        // A size hint of any value is a hint, but the security attributes are
-        // meaningless inside the guest: there is no other process to inherit to.
-        if args.r8 != 0 {
-            return pipes.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
-        }
-        if args.rcx == 0 || args.rdx == 0 {
-            return pipes.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
-        }
-        if memory.check_write(args.rcx, 8).is_err() || memory.check_write(args.rdx, 8).is_err() {
-            return pipes.fail(cpu.gs_base, ERROR_NOACCESS, 0);
-        }
-        let state_shared = Arc::new(Mutex::new(PipeState {
-            write_open: true,
-            ..PipeState::default()
-        }));
-        let mut objects = pipes.objects.lock().expect("guest object state");
-        let Some(read_end) = objects.next_handle() else {
-            return pipes.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
-        };
-        objects.insert_handle(
-            read_end,
-            GuestObject::Pipe {
-                state: Arc::clone(&state_shared),
-                write: false,
-            },
-        );
-        let Some(write_end) = objects.next_handle() else {
-            objects.handles.remove(&read_end);
-            return pipes.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
-        };
-        objects.insert_handle(
-            write_end,
-            GuestObject::Pipe {
-                state: state_shared,
-                write: true,
-            },
-        );
-        memory
-            .write_u64(args.rcx, read_end)
-            .map_err(ExitReason::MemoryFault)?;
-        memory
-            .write_u64(args.rdx, write_end)
-            .map_err(ExitReason::MemoryFault)?;
-        Ok(1)
-    });
 
     let peek = Arc::clone(state);
     registry.register(KERNEL32, "PeekNamedPipe", move |args, cpu, memory| {
@@ -1994,6 +1986,106 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
     });
 
+    // GetFileAttributesEx packs the attributes with the times and size.
+    // The drive tracks no times: they are zero, the 1601 epoch, documented
+    // rather than invented.
+    for (symbol, narrow) in [
+        ("GetFileAttributesExW", false),
+        ("GetFileAttributesExA", true),
+    ] {
+        let attributes_ex = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            // Only GetFileExInfoStandard (0) exists.
+            if args.rdx != 0 {
+                return attributes_ex.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            let reader = if narrow {
+                read_guest_path_a
+            } else {
+                read_guest_path
+            };
+            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+                return attributes_ex.fail(cpu.gs_base, INVALID_NAME, 0);
+            };
+            if !path.split('\\').all(valid_component) {
+                return attributes_ex.fail(cpu.gs_base, INVALID_NAME, 0);
+            }
+            if args.r8 == 0 {
+                return attributes_ex.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+            }
+            let objects = attributes_ex.objects.lock().expect("guest object state");
+            let (attributes, size) = if objects.directories.contains(&path) {
+                (0x10u32, 0u64)
+            } else if let Some(content) = objects.files.get(&path) {
+                (0x80u32, content.len() as u64)
+            } else {
+                let parent = parent(&path);
+                let error = if parent.is_empty() || objects.directories.contains(parent) {
+                    FILE_NOT_FOUND
+                } else {
+                    PATH_NOT_FOUND
+                };
+                return attributes_ex.fail(cpu.gs_base, error, 0);
+            };
+            memory
+                .write_u32(args.r8, attributes)
+                .map_err(ExitReason::MemoryFault)?;
+            // Three zero FILETIMEs: creation, access, write.
+            for offset in [4u64, 12, 20] {
+                memory
+                    .write_u64(args.r8 + offset, 0)
+                    .map_err(ExitReason::MemoryFault)?;
+            }
+            memory
+                .write_u32(args.r8 + 28, (size >> 32) as u32)
+                .map_err(ExitReason::MemoryFault)?;
+            memory
+                .write_u32(args.r8 + 32, size as u32)
+                .map_err(ExitReason::MemoryFault)?;
+            Ok(1)
+        });
+    }
+
+    // IsDBCSLeadByteEx: every code page the machine serves - UTF-8 and the
+    // documented Western pages 1252/437 - is either single-byte or UTF-8,
+    // neither of which has DBCS lead bytes. False is the correct answer for
+    // every byte, not a stub.
+    let lead_byte = Arc::clone(state);
+    registry.register(KERNEL32, "IsDBCSLeadByteEx", move |args, cpu, memory| {
+        let _ = memory;
+        let _ = args;
+        let _ = cpu;
+        let _ = &lead_byte;
+        Ok(0)
+    });
+
+    // SetFileTime would write times the drive does not track: accepting
+    // would be a silent no-op, so it is honestly unsupported. SetSystemTime
+    // would move the injected clock for the one process, machinery the
+    // machine does not have.
+    for symbol in ["SetFileTime", "SetSystemTime"] {
+        let times = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let _ = (args, memory);
+            times.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+        });
+    }
+
+    // DeviceIoControl needs device drivers the machine does not have. The
+    // handle validates - a bad handle is a bad handle - and every control
+    // code is honestly unsupported rather than silently ignored.
+    let device_control = Arc::clone(state);
+    registry.register(KERNEL32, "DeviceIoControl", move |args, cpu, memory| {
+        let _ = memory;
+        {
+            let objects = device_control.objects.lock().expect("guest object state");
+            if !objects.handles.contains_key(&args.rcx) {
+                return device_control.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+            }
+        }
+        device_control.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+    });
+
     for symbol in [
         "CreateFileW",
         "GetFileSizeEx",
@@ -2044,6 +2136,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "GetVolumeNameForVolumeMountPointA",
         "GetVolumePathNamesForVolumeNameW",
         "GetVolumePathNamesForVolumeNameA",
+        "GetFileAttributesExW",
+        "GetFileAttributesExA",
+        "UnlockFile",
+        "IsDBCSLeadByteEx",
+        "SetFileTime",
+        "SetSystemTime",
+        "DeviceIoControl",
     ] {
         registry.alias(FILE_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
@@ -2148,9 +2247,44 @@ impl super::ObjectState {
         self.files.get(path).map(Vec::as_slice)
     }
 
+    pub(super) fn drive_is_readonly(&self, path: &str) -> bool {
+        self.readonly.contains(path)
+    }
+
+    /// `_wchmod`: set or clear the read-only mark of a file the drive holds.
+    pub(super) fn drive_chmod(&mut self, path: &str, readonly: bool) -> bool {
+        if !self.files.contains_key(path) {
+            return false;
+        }
+        if readonly {
+            self.readonly.insert(path.to_owned());
+        } else {
+            self.readonly.remove(path);
+        }
+        true
+    }
+
+    /// Create a directory. False when the parent is missing, the name is
+    /// taken or the drive holds all the directories it can.
+    pub(super) fn drive_create_dir(&mut self, path: &str) -> bool {
+        let parent = parent(path);
+        if self.directories.len() >= MAX_DIRECTORIES
+            || (!parent.is_empty() && !self.directories.contains(parent))
+            || self.directories.contains(path)
+            || self.files.contains_key(path)
+        {
+            return false;
+        }
+        self.directories.insert(path.to_owned());
+        true
+    }
+
     /// Delete a file. False when it does not exist. Streams that have it
     /// open keep their path, so their operations fail afterwards.
     pub(super) fn drive_remove(&mut self, path: &str) -> bool {
+        if self.readonly.contains(path) {
+            return false;
+        }
         self.files.remove(path).is_some()
     }
 
@@ -2164,6 +2298,9 @@ impl super::ObjectState {
 
     /// Empty a file. False when it does not exist.
     pub(super) fn drive_truncate(&mut self, path: &str) -> bool {
+        if self.readonly.contains(path) {
+            return false;
+        }
         self.files.get_mut(path).map(Vec::clear).is_some()
     }
 
@@ -2171,6 +2308,9 @@ impl super::ObjectState {
     /// the file does not exist; `Some(false)`, with nothing written, when the
     /// write would pass the drive's size bound.
     pub(super) fn drive_write(&mut self, path: &str, position: u64, bytes: &[u8]) -> Option<bool> {
+        if self.readonly.contains(path) {
+            return Some(false);
+        }
         let used: usize = self.files.values().map(Vec::len).sum();
         let data = self.files.get_mut(path)?;
         let Some(end) = position

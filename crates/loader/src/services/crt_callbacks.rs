@@ -546,6 +546,23 @@ fn register_exit_tables(registry: &mut ImportRegistry, state: &Arc<ServicesState
         });
     }
 
+    // `_onexit` is the same registration with the legacy contract: the
+    // answer is the function pointer itself on success and zero on failure,
+    // as the Microsoft page documents. busybox links it from msvcrt.dll;
+    // the Universal CRT exports it as well.
+    for module in [UCRT, "msvcrt.dll"] {
+        let s = Arc::clone(state);
+        registry.register(module, "_onexit", move |args, _, _| {
+            let mut functions = s.atexit.lock().expect("guest atexit functions");
+            if args.rcx == 0 || functions.len() as u64 >= MAX_ONEXIT_ENTRIES {
+                return Ok(0);
+            }
+            functions.push(args.rcx);
+            Ok(args.rcx)
+        });
+    }
+    registry.alias("api-ms-win-crt-runtime-l1-1-0.dll", UCRT, "_onexit");
+
     let s = Arc::clone(state);
     registry.register_callback_task(UCRT, "_cexit", ServiceStatus::Partial, move |_, _, _, _| {
         let pending = std::mem::take(&mut *s.atexit.lock().expect("guest atexit functions"));

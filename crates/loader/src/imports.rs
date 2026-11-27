@@ -7,7 +7,7 @@
 //! guest services without exposing raw host function pointers.
 
 use crate::cpu::{CpuState, ExitReason, Register};
-use crate::import_table::{ImportName, ImportTableError, MAX_NAME_LEN, parse_imports};
+use crate::import_table::{ImportKind, ImportName, ImportTableError, MAX_NAME_LEN, parse_imports};
 use crate::memory::{GuestMemory, MemoryError};
 use crate::pe::ParsedPe;
 use std::collections::HashMap;
@@ -161,9 +161,22 @@ impl ServiceStatus {
 /// Registration entry for an imported symbol.
 pub struct ServiceDescriptor {
     pub module: String,
+    /// Display form of the canonical symbol. Use [`Self::kind`] together with
+    /// this field for identity: a name spelled `Ordinal#7` and ordinal 7 have
+    /// the same display form but are different imports.
     pub symbol: String,
+    /// Whether the canonical registration key is a symbolic name or an ordinal.
+    pub kind: ImportKind,
     pub handler: ServiceHandler,
     pub status: ServiceStatus,
+    /// Whether the status came from an explicit status argument or a later
+    /// [`ImportRegistry::set_status`] call. [`ImportRegistry::register`] uses
+    /// `implemented` as its default and leaves this false so audits can tell
+    /// that default apart from a reviewed status.
+    pub status_explicit: bool,
+    /// Whether binding writes the address of a data cell rather than a dispatch
+    /// trampoline. This metadata does not change how a function is dispatched.
+    pub data_import: bool,
 }
 
 #[derive(Clone, Default)]
@@ -405,11 +418,23 @@ impl ImportRegistry {
     }
 
     /// Register a host-provided guest service under a name or an ordinal.
+    /// The caller passes a status explicitly, so it is marked as such.
     pub fn try_register(
         &mut self,
         module: &str,
         name: ImportName,
         status: ServiceStatus,
+        handler: ServiceHandler,
+    ) -> Result<(), RegistryError> {
+        self.try_register_inner(module, name, status, true, handler)
+    }
+
+    fn try_register_inner(
+        &mut self,
+        module: &str,
+        name: ImportName,
+        status: ServiceStatus,
+        status_explicit: bool,
         handler: ServiceHandler,
     ) -> Result<(), RegistryError> {
         Self::check_key(module, &name)?;
@@ -424,14 +449,21 @@ impl ImportRegistry {
         self.handlers.push(ServiceDescriptor {
             module: key.0.clone(),
             symbol: key.1.to_string(),
+            kind: key.1.kind(),
             handler,
             status,
+            status_explicit,
+            data_import: false,
         });
         self.services.insert(key, index);
         Ok(())
     }
 
     /// Register a named service.
+    ///
+    /// The status defaults to `implemented` and is marked as implicit. Use
+    /// [`Self::register_with_status`] or [`Self::set_status`] to record a
+    /// reviewed status.
     ///
     /// # Panics
     ///
@@ -444,7 +476,28 @@ impl ImportRegistry {
             + Sync
             + 'static,
     {
-        self.register_with_status(module, symbol, ServiceStatus::Implemented, handler);
+        self.register_inner(module, symbol, ServiceStatus::Implemented, false, handler);
+    }
+
+    fn register_inner<F>(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        status_explicit: bool,
+        handler: F,
+    ) where
+        F: Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let name = ImportName::Name(symbol.to_owned());
+        if let Err(error) =
+            self.try_register_inner(module, name, status, status_explicit, Box::new(handler))
+        {
+            panic!("{error}");
+        }
     }
 
     /// Describe the canonical binding behind an import without calling it.
@@ -461,6 +514,24 @@ impl ImportRegistry {
         self.handlers
             .iter()
             .map(|d| (d.module.as_str(), d.symbol.as_str(), d.status))
+    }
+
+    /// Iterate every canonical service descriptor exactly once. Unlike
+    /// [`Self::iter_registered`], this exposes the descriptor's metadata, including
+    /// whether its status was explicit.
+    pub fn iter_service_descriptors(&self) -> impl Iterator<Item = &ServiceDescriptor> {
+        self.handlers.iter()
+    }
+
+    /// Iterate every key that can resolve an import: canonical keys, named
+    /// cross-module aliases, same-module aliases and ordinal aliases. The
+    /// descriptor is the canonical service the key resolves to.
+    pub fn iter_resolution_keys(
+        &self,
+    ) -> impl Iterator<Item = (&str, &ImportName, &ServiceDescriptor)> {
+        self.services
+            .iter()
+            .map(|((module, name), &index)| (module.as_str(), name, &self.handlers[index]))
     }
 
     /// Return (alias_module_lowercase, symbol) pairs that resolve to a canonical handler
@@ -490,6 +561,7 @@ impl ImportRegistry {
             .service_index(module, symbol)
             .expect("registered service");
         self.handlers[index].status = status;
+        self.handlers[index].status_explicit = true;
     }
 
     /// Register a named service with an explicit implementation status.
@@ -588,6 +660,7 @@ impl ImportRegistry {
         let index = self
             .service_index(module, symbol)
             .expect("registered data service");
+        self.handlers[index].data_import = true;
         self.data_providers.insert(index, Box::new(provider));
     }
 
@@ -994,5 +1067,164 @@ mod tests {
         );
         args.rsp = u64::MAX - 39;
         assert_eq!(args.get(4, &memory), Err(MemoryError::Overflow));
+    }
+
+    #[test]
+    fn service_status_explicitness_is_tracked_without_changing_the_status() {
+        let mut registry = ImportRegistry::new();
+        registry.register("kernel32.dll", "Defaulted", |_, _, _| Ok(0));
+        let defaulted = registry
+            .binding("KERNEL32.DLL", "Defaulted")
+            .expect("defaulted service");
+        assert_eq!(defaulted.status, ServiceStatus::Implemented);
+        assert!(!defaulted.status_explicit);
+
+        registry.set_status("kernel32.dll", "Defaulted", ServiceStatus::Implemented);
+        let reviewed = registry
+            .binding("kernel32.dll", "Defaulted")
+            .expect("reviewed service");
+        assert_eq!(reviewed.status, ServiceStatus::Implemented);
+        assert!(reviewed.status_explicit);
+
+        registry.register_with_status("kernel32.dll", "Stopped", ServiceStatus::Stub, |_, _, _| {
+            Ok(0)
+        });
+        assert!(
+            registry
+                .binding("kernel32.dll", "Stopped")
+                .expect("explicit service")
+                .status_explicit
+        );
+
+        registry
+            .try_register(
+                "xenora.dll",
+                ImportName::Name("Direct".to_owned()),
+                ServiceStatus::Partial,
+                Box::new(|_, _, _| Ok(0)),
+            )
+            .expect("direct registration");
+        assert!(
+            registry
+                .binding("xenora.dll", "Direct")
+                .expect("try_register service")
+                .status_explicit
+        );
+    }
+
+    #[test]
+    fn resolution_keys_cover_canonical_named_and_ordinal_bindings() {
+        let mut registry = ImportRegistry::new();
+        registry.register("kernel32.dll", "SyntheticExport", |_, _, _| Ok(0));
+        registry
+            .try_alias(
+                "api-ms-win-core-test-l1-1-0.dll",
+                "kernel32.dll",
+                "SyntheticExport",
+            )
+            .expect("named alias");
+        registry
+            .try_ordinal_alias("kernel32.dll", "SyntheticExport", 42)
+            .expect("ordinal alias");
+
+        let rows: Vec<(String, String, ImportKind, String, String, ImportKind)> = registry
+            .iter_resolution_keys()
+            .map(|(module, name, descriptor)| {
+                (
+                    module.to_owned(),
+                    name.to_string(),
+                    name.kind(),
+                    descriptor.module.clone(),
+                    descriptor.symbol.clone(),
+                    descriptor.kind,
+                )
+            })
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for (module, symbol, kind) in [
+            ("kernel32.dll", "SyntheticExport", ImportKind::Name),
+            (
+                "api-ms-win-core-test-l1-1-0.dll",
+                "SyntheticExport",
+                ImportKind::Name,
+            ),
+            ("kernel32.dll", "Ordinal#42", ImportKind::Ordinal),
+        ] {
+            assert!(
+                rows.iter().any(|row| {
+                    row.0 == module
+                        && row.1 == symbol
+                        && row.2 == kind
+                        && row.3 == "kernel32.dll"
+                        && row.4 == "SyntheticExport"
+                        && row.5 == ImportKind::Name
+                }),
+                "missing resolution key {module}!{symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_identity_distinguishes_a_name_spelled_like_an_ordinal() {
+        let mut registry = ImportRegistry::new();
+        registry.register("collision.dll", "Ordinal#7", |_, _, _| Ok(1));
+        registry
+            .try_register(
+                "collision.dll",
+                ImportName::Ordinal(7),
+                ServiceStatus::Partial,
+                Box::new(|_, _, _| Ok(2)),
+            )
+            .expect("ordinal registration");
+
+        let named = registry
+            .resolve("collision.dll", &ImportName::Name("Ordinal#7".into()))
+            .expect("named service");
+        let ordinal = registry
+            .resolve("collision.dll", &ImportName::Ordinal(7))
+            .expect("ordinal service");
+        assert!(!std::ptr::eq(named, ordinal));
+        assert_eq!(named.kind, ImportKind::Name);
+        assert_eq!(ordinal.kind, ImportKind::Ordinal);
+        assert_eq!(named.symbol, "Ordinal#7");
+        assert_eq!(ordinal.symbol, "Ordinal#7");
+
+        let identities: Vec<_> = registry
+            .iter_service_descriptors()
+            .map(|service| {
+                (
+                    service.module.as_str(),
+                    service.kind,
+                    service.symbol.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            identities,
+            [
+                ("collision.dll", ImportKind::Name, "Ordinal#7"),
+                ("collision.dll", ImportKind::Ordinal, "Ordinal#7"),
+            ]
+        );
+        let mut resolution_rows: Vec<_> = registry
+            .iter_resolution_keys()
+            .map(|(module, name, descriptor)| (module.to_owned(), name.clone(), descriptor.kind))
+            .collect();
+        resolution_rows.sort();
+        assert_eq!(
+            resolution_rows,
+            [
+                (
+                    "collision.dll".to_owned(),
+                    ImportName::Name("Ordinal#7".to_owned()),
+                    ImportKind::Name,
+                ),
+                (
+                    "collision.dll".to_owned(),
+                    ImportName::Ordinal(7),
+                    ImportKind::Ordinal,
+                ),
+            ]
+        );
     }
 }

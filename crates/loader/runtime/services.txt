@@ -108,6 +108,14 @@ service kernel32.dll CloseHandle(object: handle) -> bool32
     ref handleapi.h CloseHandle
     test thread_handles_check_access_and_are_rejected_once_closed
 
+service kernel32.dll CreatePipe(read_end: ptr, write_end: ptr, attributes: ptr, size: u32) -> bool32
+    handler create_pipe
+    status implemented
+    fails ERROR_NOT_SUPPORTED for security attributes, ERROR_INVALID_PARAMETER for a null output, ERROR_NOACCESS for memory it cannot write
+    ref namedpipeapi.h CreatePipe
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+
 service kernel32.dll GetSystemTimeAsFileTime(time: out<8>) -> void
     handler get_system_time_as_file_time
     status implemented
@@ -149,6 +157,16 @@ service ucrtbase.dll __stdio_common_vsscanf(options: u64, buffer: ptr, count: u6
     fails EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale
     ref corecrt_stdio_config.h __stdio_common_vsscanf; Microsoft Learn, scanf and the scanf type-field characters
     test legacy_sscanf_follows_the_reference_vectors
+
+service ucrtbase.dll __stdio_common_vfscanf(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32
+    handler vfscanf
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails EOF with errno EINVAL for a null stream or format; EOF with errno EBADF for stdout, stderr or a stream not open for reading; EOF for an input failure before the first conversion; stops the guest for a pointer that is no stream and as __stdio_common_vsscanf does
+    ref corecrt_stdio_config.h __stdio_common_vfscanf; ISO C 7.21.6.2; Microsoft Learn, fscanf and fscanf_s and fopen (text mode)
+    test scanf_reads_stdin_from_where_the_last_read_stopped
+    test fscanf_reads_a_text_file_and_leaves_the_position_after_the_input
+    test fscanf_fails_on_streams_that_cannot_be_read
 
 service ucrtbase.dll __stdio_common_vsprintf(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32
     handler vsprintf
@@ -239,6 +257,47 @@ service ucrtbase.dll setvbuf(stream: ptr, buffer: ptr, mode: i32, size: u64) -> 
     test fflush_and_setvbuf_return_their_documented_results
 
 # Files for a hosted C program, on the in-memory drive the handle services use.
+
+service ucrtbase.dll fread(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64
+    handler fread
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails 0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once
+    ref stdio.h fread
+    test fread_reads_whole_items_from_files_and_stdin
+service ucrtbase.dll fgetc(stream: ptr) -> i32
+    handler fgetc
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with errno EINVAL for a null stream or EBADF for one open for writing
+    ref stdio.h fgetc
+    test fread_reads_whole_items_from_files_and_stdin
+service ucrtbase.dll fseek(stream: ptr, offset: i32, origin: i32) -> i32
+    handler fseek
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream
+    ref stdio.h fseek
+    test fseek_ftell_and_rewind_move_through_file_streams
+service ucrtbase.dll ftell(stream: ptr) -> i32
+    handler ftell
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with errno EINVAL for a null stream or a position past what long holds; stops the guest for a standard stream
+    ref stdio.h ftell
+    test fseek_ftell_and_rewind_move_through_file_streams
+service ucrtbase.dll rewind(stream: ptr) -> void
+    handler rewind
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails errno EINVAL for a null stream; stops the guest for a standard stream
+    ref stdio.h rewind
+    test fseek_ftell_and_rewind_move_through_file_streams
 
 service ucrtbase.dll fopen(name: ptr, mode: ptr) -> ptr
     handler fopen
@@ -497,6 +556,51 @@ service ucrtbase.dll _lseeki64(fd: i32, offset: u64, origin: i32) -> u64
     ref io.h _lseeki64
     test legacy_descriptor_seek_and_tell_positions
 
+service ucrtbase.dll _open_osfhandle(osfhandle: handle, flags: i32) -> i32
+    handler _open_osfhandle
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one
+    ref io.h _open_osfhandle
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+service ucrtbase.dll _get_osfhandle(fd: i32) -> u64
+    handler _get_osfhandle
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails -1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included
+    ref io.h _get_osfhandle
+    test osfhandle_interop_wraps_a_kernel_pipe
+
+service ucrtbase.dll _filbuf(stream: ptr) -> i32
+    handler _filbuf
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here
+    ref stdio.h _filbuf
+    test filbuf_and_flsbuf_move_single_bytes
+
+service ucrtbase.dll _flsbuf(c: i32, stream: ptr) -> i32
+    handler _flsbuf
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF with EBADF for a stream that is not open and writable
+    ref stdio.h _flsbuf
+    test filbuf_and_flsbuf_move_single_bytes
+
+service ucrtbase.dll ungetc(c: i32, stream: ptr) -> i32
+    handler ungetc
+    status implemented
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    alias msvcrt.dll
+    fails EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream
+    ref stdio.h ungetc
+    test ungetc_stacks_bytes_and_steps_the_position_back
+
 service ucrtbase.dll _telli64(fd: i32) -> u64
     handler _telli64
     status implemented
@@ -597,24 +701,6 @@ service ucrtbase.dll _pipe(fds: ptr, size: u32, mode: i32) -> i32
 
 
 
-
-service ucrtbase.dll _access(name: ptr, mode: i32) -> i32
-    handler _access
-    status implemented
-    alias api-ms-win-crt-filesystem-l1-1-0.dll
-    alias msvcrt.dll
-    fails -1 with errno ENOENT for a missing or rejected name, EINVAL for a null or empty name or mode bits other than 0, 2, 4 and 6
-    ref io.h _access
-    test descriptors_share_files_with_streams
-
-service ucrtbase.dll _unlink(name: ptr) -> i32
-    handler _unlink
-    status implemented
-    alias api-ms-win-crt-filesystem-l1-1-0.dll
-    alias msvcrt.dll
-    fails -1 with errno ENOENT missing, EACCES for a directory, EINVAL for a null or empty name; it is remove by another name
-    ref io.h _unlink
-    test descriptors_share_files_with_streams
 
 # The C time services of package 5 of #459. The clock is UTC throughout:
 # Xenora has no answer for what zone the machine stands in, and the docs
@@ -931,6 +1017,94 @@ service ucrtbase.dll _strdup(text: ptr) -> ptr
     ref string.h _strdup
     test legacy_strdup_and_ldexp_run
 
+
+service ucrtbase.dll _wfopen(name: ptr, mode: ptr) -> ptr
+    handler _wfopen
+    status partial
+    alias api-ms-win-crt-stdio-l1-1-0.dll
+    fails null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM
+    ref corecrt_wstdio.h _wfopen
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _unlink(name: ptr) -> i32
+    handler _unlink
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file
+    ref io.h _unlink
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _wunlink(name: ptr) -> i32
+    handler _wunlink
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file
+    ref corecrt_wio.h _wunlink
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _access(name: ptr, mode: i32) -> i32
+    handler _access
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file
+    ref io.h _access
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _waccess(name: ptr, mode: i32) -> i32
+    handler _waccess
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file
+    ref corecrt_wio.h _waccess
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _wmkdir(name: ptr) -> i32
+    handler _wmkdir
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL, ENOENT, ENOSPC or EACCES when the name is taken
+    ref corecrt_wdirect.h _wmkdir
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _wchmod(name: ptr, mode: i32) -> i32
+    handler _wchmod
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL or ENOENT
+    ref corecrt_wio.h _wchmod
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _wstat64i32(name: ptr, output: ptr) -> i32
+    handler _wstat64i32
+    status partial
+    alias api-ms-win-crt-filesystem-l1-1-0.dll
+    fails -1 with errno EINVAL or ENOENT; the times answer -1 because the drive has no time stamps
+    ref corecrt_wio.h _wstat64i32, _mingw_stat64.h struct _stat64i32
+    test the_wide_file_operations_follow_the_drive
+
+service ucrtbase.dll _assert(expression: ptr, file: ptr, line: u32) -> void
+    handler _assert
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails nothing; the message prints on stderr and the process ends with status 3, since no signal handler can exist here
+    ref assert.h _assert
+    test an_assertion_prints_and_ends_the_process
+
+service ucrtbase.dll _beginthreadex(security: ptr, stack_size: u64, start: ptr, arglist: ptr, initflag: u32, thrdaddr: ptr) -> ptr
+    handler _beginthreadex
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails 0 with errno EINVAL for a security descriptor, unknown flags or a null start, ENOMEM when the machine has no room or no scheduler
+    ref corecrt_startup.h _beginthreadex; the thread services of the scheduler
+    test beginthreadex_starts_a_thread_like_createthread
+
+service ucrtbase.dll _endthreadex(code: u32) -> void
+    handler _endthreadex
+    status partial
+    alias api-ms-win-crt-runtime-l1-1-0.dll
+    fails nothing; the thread ends with the code as its exit code
+    ref corecrt_startup.h _endthreadex
+    test beginthreadex_starts_a_thread_like_createthread
 
 service ucrtbase.dll perror(message: ptr) -> void
     handler perror
@@ -1966,25 +2140,26 @@ service msvcrt.dll _amsg_exit(code: i32) -> void
     test legacy_amsg_exit_ends_the_process
 
 # Queries about the hosted process environment and the console identity.
-# The process environment is empty: no host variable passes through, so a
-# query never finds its variable, which is the exact behavior of an empty
-# environment rather than a stub.
+# The process environment starts empty: no host variable passes through.
+# SetEnvironmentVariable adds to it, and a query answers with the documented
+# size semantics, or misses with ERROR_ENVVAR_NOT_FOUND when the variable is
+# undefined - the exact behavior of an unset variable rather than a stub.
 
 service kernel32.dll GetEnvironmentVariableA(name: ptr, buffer: ptr, size: u32) -> u32
-    handler environment_variable
+    handler environment_variable_narrow
     status implemented
     alias api-ms-win-core-processenvironment-l1-1-0.dll
-    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    fails 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty
     ref Microsoft Learn, GetEnvironmentVariable
-    test environment_variables_are_never_found_in_the_empty_environment
+    test environment_variables_round_trip_and_miss_the_undefined_ones
 
 service kernel32.dll GetEnvironmentVariableW(name: ptr, buffer: ptr, size: u32) -> u32
-    handler environment_variable
+    handler environment_variable_wide
     status implemented
     alias api-ms-win-core-processenvironment-l1-1-0.dll
-    fails 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty
+    fails 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty
     ref Microsoft Learn, GetEnvironmentVariable
-    test environment_variables_are_never_found_in_the_empty_environment
+    test environment_variables_round_trip_and_miss_the_undefined_ones
 
 service kernel32.dll GetConsoleWindow() -> handle
     handler console_window

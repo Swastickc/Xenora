@@ -6,14 +6,14 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 
 | Measure | Count |
 | --- | ---: |
-| Services with a declared ABI | 231 |
-| Generated adapters | 231 |
-| Unique handler implementations | 221 |
-| Implemented | 80 |
-| Partial | 149 |
+| Services with a declared ABI | 252 |
+| Generated adapters | 252 |
+| Unique handler implementations | 243 |
+| Implemented | 84 |
+| Partial | 166 |
 | Stub | 2 |
-| Conformance-tested through guest dispatch | 231 |
-| API-set aliases (not services) | 272 |
+| Conformance-tested through guest dispatch | 252 |
+| API-set aliases (not services) | 300 |
 | Independently accepted | 0 |
 
 | Service | Signature | Status | Failure |
@@ -29,10 +29,12 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `kernel32.dll!GetThreadPriority` | `(thread: handle) -> i32` | partial | THREAD_PRIORITY_ERROR_RETURN with ERROR_INVALID_HANDLE or ERROR_ACCESS_DENIED |
 | `kernel32.dll!SetThreadPriority` | `(thread: handle, priority: i32) -> bool32` | partial | 0 with ERROR_INVALID_HANDLE, ERROR_ACCESS_DENIED, ERROR_NOT_SUPPORTED or ERROR_INVALID_PARAMETER |
 | `kernel32.dll!CloseHandle` | `(object: handle) -> bool32` | partial | 0 with ERROR_INVALID_HANDLE |
+| `kernel32.dll!CreatePipe` | `(read_end: ptr, write_end: ptr, attributes: ptr, size: u32) -> bool32` | implemented | ERROR_NOT_SUPPORTED for security attributes, ERROR_INVALID_PARAMETER for a null output, ERROR_NOACCESS for memory it cannot write |
 | `kernel32.dll!GetSystemTimeAsFileTime` | `(time: out<8>) -> void` | implemented | guest fault on an invalid pointer |
 | `ucrtbase.dll!__acrt_iob_func` | `(index: u32) -> ptr` | partial | stops the guest for an index above 2 or when the streams cannot be allocated |
 | `ucrtbase.dll!__stdio_common_vfprintf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or format or an invalid format; stops the guest for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vsscanf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | EOF (-1) when the input ends before the first conversion, 0 for a mismatch; stops the guest for the floating conversions, the wide forms, an unknown option bit or a nonzero locale |
+| `ucrtbase.dll!__stdio_common_vfscanf` | `(options: u64, stream: ptr, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream or format; EOF with errno EBADF for stdout, stderr or a stream not open for reading; EOF for an input failure before the first conversion; stops the guest for a pointer that is no stream and as __stdio_common_vsscanf does |
 | `ucrtbase.dll!__stdio_common_vsprintf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null format or a null buffer with a nonzero count, or an invalid format; -1 without errno for a legacy truncation; stops the guest when both behaviour bits are set or for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vswprintf` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null format or an invalid one; stops the guest for what is not modelled |
 | `ucrtbase.dll!__stdio_common_vsprintf_s` | `(options: u64, buffer: ptr, count: u64, format: ptr, locale: ptr, arguments: ptr) -> i32` | partial | -1 with errno EINVAL for a null buffer, a zero count, a null or invalid format, or ERANGE when the text does not fit, and the buffer becomes empty; the invalid parameter handler is not modelled, so execution always continues |
@@ -43,6 +45,11 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!fputs` | `(text: ptr, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null string or stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fflush` | `(stream: ptr) -> i32` | partial | stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!setvbuf` | `(stream: ptr, buffer: ptr, mode: i32, size: u64) -> i32` | partial | -1 with errno EINVAL for a null stream, an unknown mode or a size outside 2 to INT_MAX; stops the guest for a pointer that is no stream |
+| `ucrtbase.dll!fread` | `(buffer: ptr, size: u64, count: u64, stream: ptr) -> u64` | partial | 0 with errno EINVAL for a null buffer or stream, or EBADF for a stream open for writing; stops the guest for more than this runtime transfers at once |
+| `ucrtbase.dll!fgetc` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream or EBADF for one open for writing |
+| `ucrtbase.dll!fseek` | `(stream: ptr, offset: i32, origin: i32) -> i32` | partial | -1 with errno EINVAL for a null stream, a bad origin or a position before the start; stops the guest for a standard stream |
+| `ucrtbase.dll!ftell` | `(stream: ptr) -> i32` | partial | -1 with errno EINVAL for a null stream or a position past what long holds; stops the guest for a standard stream |
+| `ucrtbase.dll!rewind` | `(stream: ptr) -> void` | partial | errno EINVAL for a null stream; stops the guest for a standard stream |
 | `ucrtbase.dll!fopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM |
 | `ucrtbase.dll!fclose` | `(stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream; stops the guest for a standard stream or a pointer that is no stream |
 | `ucrtbase.dll!fgets` | `(buffer: ptr, count: i32, stream: ptr) -> ptr` | partial | null at end of file; null with errno EINVAL or EBADF; stops the guest for a pointer that is no stream |
@@ -72,6 +79,11 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_fileno` | `(stream: ptr) -> i32` | implemented | -1 with errno EINVAL for a null stream; stops the guest for a pointer that is no stream |
 | `ucrtbase.dll!_isatty` | `(fd: i32) -> i32` | implemented | 0 always, as nothing here is a character device; errno EBADF for a descriptor that is not open |
 | `ucrtbase.dll!_lseeki64` | `(fd: i32, offset: u64, origin: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one, EINVAL for an unknown origin or a position before the start |
+| `ucrtbase.dll!_open_osfhandle` | `(osfhandle: handle, flags: i32) -> i32` | implemented | -1 with EBADF for a handle that is no kernel pipe end; the CRT takes ownership of a good one |
+| `ucrtbase.dll!_get_osfhandle` | `(fd: i32) -> u64` | implemented | -1 with EBADF for a descriptor that wraps no kernel object, the CRT's own files included |
+| `ucrtbase.dll!_filbuf` | `(stream: ptr) -> i32` | implemented | EOF at the end of the stream or with EBADF for one that is not open and readable; the standard streams are not files here |
+| `ucrtbase.dll!_flsbuf` | `(c: i32, stream: ptr) -> i32` | implemented | EOF with EBADF for a stream that is not open and writable |
+| `ucrtbase.dll!ungetc` | `(c: i32, stream: ptr) -> i32` | implemented | EOF for an EOF input or a stream that is not open and readable; errno EBADF for a stream that is not open; byte input orients the stream |
 | `ucrtbase.dll!_telli64` | `(fd: i32) -> u64` | implemented | -1 with errno EBADF for a descriptor that is not open or a standard one |
 | `ucrtbase.dll!_setmode` | `(fd: i32, mode: i32) -> i32` | partial | -1 with errno EBADF for a descriptor that is not open, EINVAL for a mode other than _O_TEXT or _O_BINARY, the wide forms included: the hosted streams are byte-oriented |
 | `ucrtbase.dll!_dup` | `(fd: i32) -> i32` | implemented | -1 with errno EBADF for a descriptor that is not open, EMFILE at 8192 descriptors |
@@ -83,8 +95,6 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_mkdir` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT when the parent does not exist, EEXIST when the name is taken, ENOSPC at 256 directories |
 | `ucrtbase.dll!_rmdir` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT for a missing directory, EEXIST for one still holding files or directories |
 | `ucrtbase.dll!_pipe` | `(fds: ptr, size: u32, mode: i32) -> i32` | partial | a read of an empty pipe whose write end is open stops the guest — blocking is not modelled; the size and mode arguments do not act |
-| `ucrtbase.dll!_access` | `(name: ptr, mode: i32) -> i32` | implemented | -1 with errno ENOENT for a missing or rejected name, EINVAL for a null or empty name or mode bits other than 0, 2, 4 and 6 |
-| `ucrtbase.dll!_unlink` | `(name: ptr) -> i32` | implemented | -1 with errno ENOENT missing, EACCES for a directory, EINVAL for a null or empty name; it is remove by another name |
 | `ucrtbase.dll!_gmtime64` | `(time: ptr) -> ptr` | implemented | null with errno EINVAL for a null pointer or a time outside 1970-to-3000 |
 | `ucrtbase.dll!_localtime64` | `(time: ptr) -> ptr` | implemented | null with errno EINVAL for a null pointer or a time outside 1970-to-3000 |
 | `ucrtbase.dll!_mktime64` | `(tm: ptr) -> ptr` | implemented | -1 with errno EINVAL for a null pointer or a time outside 1970-to-3000 |
@@ -123,6 +133,17 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `ucrtbase.dll!_wcsnicmp` | `(first: ptr, second: ptr, count: u64) -> i32` | implemented | never; the folding is the ASCII one of the C locale, the only locale modelled, and the answer is -1, 0 or 1 as the sign-only contract permits |
 | `ucrtbase.dll!_wcsdup` | `(text: ptr) -> ptr` | implemented | null when the copy cannot be allocated |
 | `ucrtbase.dll!_strdup` | `(text: ptr) -> ptr` | partial | a string longer than 65536 bytes or an allocation failure answers null; errno is not set |
+| `ucrtbase.dll!_wfopen` | `(name: ptr, mode: ptr) -> ptr` | partial | null with errno EINVAL, ENOENT, EACCES, EMFILE, ENOSPC or ENOMEM |
+| `ucrtbase.dll!_unlink` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file |
+| `ucrtbase.dll!_wunlink` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a directory or a read-only file |
+| `ucrtbase.dll!_access` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file |
+| `ucrtbase.dll!_waccess` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL, ENOENT or EACCES for a write mode on a read-only file |
+| `ucrtbase.dll!_wmkdir` | `(name: ptr) -> i32` | partial | -1 with errno EINVAL, ENOENT, ENOSPC or EACCES when the name is taken |
+| `ucrtbase.dll!_wchmod` | `(name: ptr, mode: i32) -> i32` | partial | -1 with errno EINVAL or ENOENT |
+| `ucrtbase.dll!_wstat64i32` | `(name: ptr, output: ptr) -> i32` | partial | -1 with errno EINVAL or ENOENT; the times answer -1 because the drive has no time stamps |
+| `ucrtbase.dll!_assert` | `(expression: ptr, file: ptr, line: u32) -> void` | partial | nothing; the message prints on stderr and the process ends with status 3, since no signal handler can exist here |
+| `ucrtbase.dll!_beginthreadex` | `(security: ptr, stack_size: u64, start: ptr, arglist: ptr, initflag: u32, thrdaddr: ptr) -> ptr` | partial | 0 with errno EINVAL for a security descriptor, unknown flags or a null start, ENOMEM when the machine has no room or no scheduler |
+| `ucrtbase.dll!_endthreadex` | `(code: u32) -> void` | partial | nothing; the thread ends with the code as its exit code |
 | `ucrtbase.dll!perror` | `(message: ptr) -> void` | partial | never |
 | `ucrtbase.dll!putc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
 | `ucrtbase.dll!fputc` | `(character: i32, stream: ptr) -> i32` | partial | EOF with errno EINVAL for a null stream, or EBADF or ENOSPC for a file; stops the guest for stdin or a pointer that is no stream |
@@ -241,8 +262,8 @@ A declared service is not a claim of compatibility. `implemented` and `partial` 
 | `msvcrt.dll!__getmainargs` | `(argc: ptr, argv: ptr, envp: ptr, dowildcard: i32, start_info: ptr) -> i32` | partial | -1 with errno EINVAL when any of the three output pointers is null; the start-up information is not written |
 | `msvcrt.dll!___mb_cur_max_func` | `() -> u32` | partial | never |
 | `msvcrt.dll!_amsg_exit` | `(code: i32) -> void` | partial | never returns; the runtime-error message of the CRT is not written |
-| `kernel32.dll!GetEnvironmentVariableA` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty |
-| `kernel32.dll!GetEnvironmentVariableW` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND for every name: the environment is empty |
+| `kernel32.dll!GetEnvironmentVariableA` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty |
+| `kernel32.dll!GetEnvironmentVariableW` | `(name: ptr, buffer: ptr, size: u32) -> u32` | implemented | 0 with ERROR_ENVVAR_NOT_FOUND when the variable is undefined or empty |
 | `kernel32.dll!GetConsoleWindow` | `() -> handle` | implemented | never; the answer is null, the hosted runtime has no console window |
 | `kernel32.dll!SetConsoleTitleW` | `(title: ptr) -> bool32` | partial | FALSE with ERROR_INVALID_PARAMETER for a null title |
 | `kernel32.dll!GetConsoleTitleW` | `(buffer: ptr, size: u32) -> u32` | partial | 0 with ERROR_INVALID_PARAMETER for a null buffer or a zero size; the answer is the title length even when the buffer holds less, Xenora's documented choice |

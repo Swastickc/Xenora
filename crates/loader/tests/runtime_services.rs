@@ -1254,6 +1254,475 @@ fn vfprintf_s_and_putchar_write_to_the_streams() {
     assert_eq!(guest.errno(), 22);
 }
 
+/// What mingw-w64's `sscanf`, `vsscanf`, `scanf` and `fscanf` pass as the
+/// options of the scanf entry points: `_CRT_INTERNAL_SCANF_LEGACY_WIDE_SPECIFIERS`
+/// (corecrt_stdio_config.h). `sscanf_s` and `scanf_s` pass
+/// `_CRT_INTERNAL_SCANF_SECURECRT` alone.
+const SCANF_OPTIONS: u64 = 0x2;
+const SCANF_SECURE: u64 = 0x1;
+/// Where the scanf tests let the guest's conversions assign.
+const SCANNED: u64 = TEXT + 0x2000;
+const SCANF_EOF: u64 = 0xFFFF_FFFF;
+
+/// Call `__stdio_common_vsscanf` as compiled code does: the input and the
+/// format in guest memory, the locale and the `va_list` pointer in the two
+/// stack slots above the shadow space. The result's low half and the exit.
+fn scan_string_with(
+    guest: &mut Guest,
+    options: u64,
+    input: Option<&[u8]>,
+    count: u64,
+    format: &[u8],
+    slots: &[u64],
+) -> (u64, ExitReason) {
+    let format = place(guest, TEXT, format);
+    let input = input.map_or(0, |input| place(guest, STRINGS, input));
+    for (index, slot) in slots.iter().enumerate() {
+        guest
+            .memory
+            .write_u64(VA_LIST + 8 * index as u64, *slot)
+            .unwrap();
+    }
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+    let (cpu, exit) = guest.run("__stdio_common_vsscanf", &[options, input, count, format]);
+    (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit)
+}
+
+fn scan_string(guest: &mut Guest, input: &[u8], format: &[u8], slots: &[u64]) -> u64 {
+    let (result, exit) =
+        scan_string_with(guest, SCANF_OPTIONS, Some(input), u64::MAX, format, slots);
+    assert_eq!(
+        exit,
+        ExitReason::Halt,
+        "{}",
+        String::from_utf8_lossy(format)
+    );
+    result
+}
+
+/// `sscanf` reads the guest string and assigns each converted item through
+/// the next pointer of the `va_list` (ISO C 7.21.6.2). Expected values are
+/// those the standard's conversions define for the input written here.
+#[test]
+fn sscanf_converts_a_guest_string_and_assigns_through_the_va_list() {
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCANNED, &[0xAA; 0x80]).unwrap();
+    let slots = [
+        SCANNED,
+        SCANNED + 8,
+        SCANNED + 16,
+        SCANNED + 32,
+        SCANNED + 40,
+        SCANNED + 48,
+    ];
+    let result = scan_string(
+        &mut guest,
+        b"  -17 0x1F word 2.5 0x1.8p1 tail",
+        b"%d %i %s %f %la%n",
+        &slots,
+    );
+    assert_eq!(result, 5);
+    let mut bytes = [0u8; 0x40];
+    guest.memory.read_bytes(SCANNED, &mut bytes).unwrap();
+    assert_eq!(bytes[0..4], (-17i32).to_le_bytes());
+    assert_eq!(bytes[4..8], [0xAA; 4], "an int is four bytes");
+    assert_eq!(bytes[8..12], 31i32.to_le_bytes());
+    assert_eq!(bytes[16..21], *b"word\0");
+    assert_eq!(bytes[21], 0xAA);
+    assert_eq!(bytes[32..36], 2.5f32.to_bits().to_le_bytes());
+    assert_eq!(bytes[40..48], 3.0f64.to_bits().to_le_bytes());
+    // %n: the characters read up to it, not counted in the result.
+    assert_eq!(bytes[48..52], 27i32.to_le_bytes());
+
+    // The count of `_snscanf` limits the input as its end would, and the
+    // terminator ends it before the count.
+    let mut guest = buffer_guest();
+    let (result, exit) = scan_string_with(
+        &mut guest,
+        SCANF_OPTIONS,
+        Some(b"1234"),
+        2,
+        b"%d%n",
+        &[SCANNED, SCANNED + 4],
+    );
+    assert_eq!((result, exit), (1, ExitReason::Halt));
+    assert_eq!(guest.memory.read_u32(SCANNED).unwrap(), 12);
+    assert_eq!(guest.memory.read_u32(SCANNED + 4).unwrap(), 2);
+    let (result, _) = scan_string_with(
+        &mut guest,
+        SCANF_OPTIONS,
+        Some(b"56"),
+        100,
+        b"%d%n",
+        &[SCANNED, SCANNED + 4],
+    );
+    assert_eq!(result, 1);
+    assert_eq!(guest.memory.read_u32(SCANNED + 4).unwrap(), 2);
+
+    // Options 0 and the legacy wide-specifier bit change nothing for the
+    // narrow functions.
+    for options in [0, SCANF_OPTIONS] {
+        let mut guest = buffer_guest();
+        let (result, exit) = scan_string_with(
+            &mut guest,
+            options,
+            Some(b"x=9"),
+            u64::MAX,
+            b"x=%u",
+            &[SCANNED],
+        );
+        assert_eq!((result, exit), (1, ExitReason::Halt), "{options:#x}");
+        assert_eq!(guest.memory.read_u32(SCANNED).unwrap(), 9);
+    }
+
+    // An item is assigned when its conversion completes: the first stays
+    // when the second fails to match.
+    let mut guest = buffer_guest();
+    assert_eq!(
+        scan_string(&mut guest, b"8 x", b"%d %d", &[SCANNED, SCANNED + 4]),
+        1
+    );
+    assert_eq!(guest.memory.read_u32(SCANNED).unwrap(), 8);
+
+    // A destination the guest cannot write, and input it cannot read, stop
+    // it with a memory fault.
+    let mut guest = buffer_guest();
+    let (_, exit) = scan_string_with(
+        &mut guest,
+        SCANF_OPTIONS,
+        Some(b"5"),
+        u64::MAX,
+        b"%d",
+        &[0x10],
+    );
+    assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+    let format = place(&mut guest, TEXT, b"%d");
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+    let (_, exit) = guest.run(
+        "__stdio_common_vsscanf",
+        &[SCANF_OPTIONS, 0x10, u64::MAX, format],
+    );
+    assert!(matches!(exit, ExitReason::MemoryFault(_)), "{exit:?}");
+}
+
+/// The result is EOF only for an input failure before the first conversion
+/// has completed (ISO C 7.21.6.2p16). A null buffer or format returns -1 and
+/// sets `errno` to `EINVAL` (Microsoft Learn, sscanf_s). What neither page
+/// defines stops the guest.
+#[test]
+fn sscanf_returns_eof_only_for_an_input_failure_before_any_conversion() {
+    let mut guest = buffer_guest();
+    assert_eq!(scan_string(&mut guest, b"", b"%d", &[SCANNED]), SCANF_EOF);
+    assert_eq!(
+        scan_string(&mut guest, b" \t\n", b"%d", &[SCANNED]),
+        SCANF_EOF
+    );
+    assert_eq!(scan_string(&mut guest, b"x", b"%d", &[SCANNED]), 0);
+    assert_eq!(scan_string(&mut guest, b"", b"", &[]), 0);
+    assert_eq!(
+        scan_string(&mut guest, b"7", b"%d%d", &[SCANNED, SCANNED + 4]),
+        1
+    );
+
+    // A null buffer, then a null format.
+    let mut guest = buffer_guest();
+    guest.set_errno(0);
+    let (result, exit) =
+        scan_string_with(&mut guest, SCANF_OPTIONS, None, u64::MAX, b"%d", &[SCANNED]);
+    assert_eq!((result, exit), (SCANF_EOF, ExitReason::Halt));
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+    let mut guest = buffer_guest();
+    guest.set_errno(0);
+    let input = place(&mut guest, STRINGS, b"1");
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+    let (cpu, exit) = guest.run(
+        "__stdio_common_vsscanf",
+        &[SCANF_OPTIONS, input, u64::MAX, 0],
+    );
+    assert_eq!(
+        (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit),
+        (SCANF_EOF, ExitReason::Halt)
+    );
+    assert_eq!(guest.errno(), STDIO_EINVAL);
+
+    // Unknown bits and a locale object are not modelled. The msvcrt
+    // compatibility bit is accepted, as the merged string adapter does.
+    for options in [0x8, 1 << 40] {
+        let mut guest = buffer_guest();
+        let (_, exit) =
+            scan_string_with(&mut guest, options, Some(b"1"), u64::MAX, b"%d", &[SCANNED]);
+        assert_eq!(exit, LIMIT, "{options:#x}");
+    }
+    let mut guest = buffer_guest();
+    let format = place(&mut guest, TEXT, b"%d");
+    let input = place(&mut guest, STRINGS, b"1");
+    guest.memory.write_u64(VA_LIST, SCANNED).unwrap();
+    guest.memory.write_u64(STACK_TOP + 32, 0x1234).unwrap();
+    guest.memory.write_u64(STACK_TOP + 40, VA_LIST).unwrap();
+    assert_eq!(
+        guest
+            .run(
+                "__stdio_common_vsscanf",
+                &[SCANF_OPTIONS, input, u64::MAX, format]
+            )
+            .1,
+        LIMIT
+    );
+
+    // ISO C leaves a value the destination cannot hold undefined, and
+    // narrow scanf would need a locale for wide characters.
+    for (input, format) in [
+        (&b"2147483648"[..], &b"%d"[..]),
+        (b"-1", b"%hu"),
+        (b"a", b"%ls"),
+        (b"a", b"%C"),
+        (b"1", b"%0d"),
+    ] {
+        let mut guest = buffer_guest();
+        let (_, exit) = scan_string_with(
+            &mut guest,
+            SCANF_OPTIONS,
+            Some(input),
+            u64::MAX,
+            format,
+            &[SCANNED],
+        );
+        assert_eq!(exit, LIMIT, "{}", String::from_utf8_lossy(format));
+    }
+}
+
+/// `sscanf_s` passes the secure bit alone. Each `c`, `s` and `[` buffer is
+/// followed by its size, "of type unsigned, not size_t", that "includes the
+/// terminal null" for a string (Microsoft Learn, scanf_s). For a field that
+/// does not fit, the page says only that nothing is written; the guest
+/// stops rather than continue on a guessed result.
+#[test]
+fn secure_sscanf_takes_unsigned_buffer_sizes_and_stops_on_overflow() {
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCANNED, &[0xAA; 0x40]).unwrap();
+    let slots = [SCANNED, JUNK_HIGH | 4, SCANNED + 8, 2, SCANNED + 16];
+    let (result, exit) = scan_string_with(
+        &mut guest,
+        SCANF_SECURE,
+        Some(b"abc xy 12"),
+        u64::MAX,
+        b"%s %2c %d",
+        &slots,
+    );
+    assert_eq!((result, exit), (3, ExitReason::Halt));
+    let mut bytes = [0u8; 20];
+    guest.memory.read_bytes(SCANNED, &mut bytes).unwrap();
+    assert_eq!(bytes[0..5], *b"abc\0\xAA");
+    assert_eq!(bytes[8..11], *b"xy\xAA");
+    assert_eq!(bytes[16..20], 12i32.to_le_bytes());
+
+    // Too long for its buffer: the earlier item stays assigned, the buffer
+    // is untouched, and the guest stops.
+    let mut guest = buffer_guest();
+    guest.memory.write_bytes(SCANNED, &[0xAA; 0x40]).unwrap();
+    let (_, exit) = scan_string_with(
+        &mut guest,
+        SCANF_SECURE,
+        Some(b"5 toolong"),
+        u64::MAX,
+        b"%d %s",
+        &[SCANNED, SCANNED + 8, 4],
+    );
+    assert_eq!(exit, LIMIT);
+    assert_eq!(guest.memory.read_u32(SCANNED).unwrap(), 5);
+    assert_eq!(
+        guest.memory.read_u64(SCANNED + 8).unwrap(),
+        u64::from_le_bytes([0xAA; 8])
+    );
+}
+
+/// Call `__stdio_common_vfscanf` as compiled code does: the format in guest
+/// memory, no locale, and the `va_list` pointer in the stack slot above the
+/// shadow space. The result's low half and the exit.
+fn scan_stream_with(
+    guest: &mut Guest,
+    options: u64,
+    stream: u64,
+    format: &[u8],
+    slots: &[u64],
+) -> (u64, ExitReason) {
+    let format = place(guest, TEXT, format);
+    for (index, slot) in slots.iter().enumerate() {
+        guest
+            .memory
+            .write_u64(VA_LIST + 8 * index as u64, *slot)
+            .unwrap();
+    }
+    guest.memory.write_u64(STACK_TOP + 32, VA_LIST).unwrap();
+    let (cpu, exit) = guest.run("__stdio_common_vfscanf", &[options, stream, format, 0]);
+    (cpu.get(Register::Rax) & 0xFFFF_FFFF, exit)
+}
+
+fn scan_stream(guest: &mut Guest, stream: u64, format: &[u8], slots: &[u64]) -> u64 {
+    let (result, exit) = scan_stream_with(guest, SCANF_OPTIONS, stream, format, slots);
+    assert_eq!(
+        exit,
+        ExitReason::Halt,
+        "{}",
+        String::from_utf8_lossy(format)
+    );
+    result
+}
+
+/// `SCANNED` and the bytes after it.
+fn scanned(guest: &Guest, length: usize) -> Vec<u8> {
+    let mut bytes = vec![0; length];
+    guest.memory.read_bytes(SCANNED, &mut bytes).unwrap();
+    bytes
+}
+
+/// `scanf` on the standard input. A conversion leaves the character after
+/// its item unread (ISO C 7.21.6.2), so the next read of any kind starts
+/// there; CR LF arrives as one line feed, as for `fgets`. The end-of-file
+/// indicator is set when a conversion meets the end, even one that
+/// succeeded.
+#[test]
+fn scanf_reads_stdin_from_where_the_last_read_stopped() {
+    let (mut guest, [stdin, _, _]) = stdio_guest();
+    guest.memory.write_bytes(SCANNED, &[0xAA; 0x40]).unwrap();
+    guest
+        .state
+        .set_standard_input(b"12 abc\r\n3.5 rest\nlast 7");
+    assert_eq!(
+        scan_stream(&mut guest, stdin, b"%d%s", &[SCANNED, SCANNED + 8]),
+        2
+    );
+    let bytes = scanned(&guest, 16);
+    assert_eq!(bytes[0..4], 12i32.to_le_bytes());
+    assert_eq!(bytes[8..12], *b"abc\0");
+    assert_eq!(guest.call("getchar", &[]), u64::from(b'\n'), "left unread");
+    assert_eq!(scan_stream(&mut guest, stdin, b"%f", &[SCANNED + 16]), 1);
+    assert_eq!(
+        guest.memory.read_u32(SCANNED + 16).unwrap(),
+        3.5f32.to_bits()
+    );
+    assert_eq!(guest.call("fgets", &[SCRATCH, 16, stdin]), SCRATCH);
+    let mut line = [0u8; 7];
+    guest.memory.read_bytes(SCRATCH, &mut line).unwrap();
+    assert_eq!(line, *b" rest\n\0");
+    assert_eq!(guest.call("feof", &[stdin]), 0);
+    // A literal that does not match stays unread, and nothing is assigned.
+    assert_eq!(scan_stream(&mut guest, stdin, b"x%d", &[SCANNED + 24]), 0);
+    assert_eq!(guest.call("getchar", &[]), u64::from(b'l'));
+    // The number ends at the end of the input: assigned, and the indicator
+    // is set.
+    assert_eq!(scan_stream(&mut guest, stdin, b"%*s%d", &[SCANNED + 24]), 1);
+    assert_eq!(guest.memory.read_u32(SCANNED + 24).unwrap(), 7);
+    assert_ne!(guest.call("feof", &[stdin]), 0);
+    assert_eq!(
+        scan_stream(&mut guest, stdin, b"%d", &[SCANNED + 28]),
+        SCANF_EOF
+    );
+    assert_eq!(
+        guest.memory.read_u32(SCANNED + 28).unwrap(),
+        0xAAAA_AAAA,
+        "nothing assigned at the end"
+    );
+
+    // scanf_s passes SECURECRT: each buffer is followed by its size.
+    let (mut guest, [stdin, _, _]) = stdio_guest();
+    guest.memory.write_bytes(SCANNED, &[0xAA; 0x10]).unwrap();
+    guest.state.set_standard_input(b"hello");
+    let (result, exit) = scan_stream_with(&mut guest, SCANF_SECURE, stdin, b"%s", &[SCANNED, 6]);
+    assert_eq!((result, exit), (1, ExitReason::Halt));
+    assert_eq!(scanned(&guest, 7), b"hello\0\xAA");
+}
+
+/// `fscanf` on a file from `fopen`. In text mode CR LF is read as a line
+/// feed and CTRL+Z ends the input; in binary mode both are characters
+/// (Microsoft Learn, fopen). The position afterwards is the byte offset
+/// after the last character consumed, which `_ftelli64` reports.
+#[test]
+fn fscanf_reads_a_text_file_and_leaves_the_position_after_the_input() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "data.txt", b"10 20\r\nname\x1aafter");
+    guest.memory.write_bytes(SCANNED, &[0xAA; 0x40]).unwrap();
+
+    let text = opened(&mut guest, "data.txt", "r");
+    assert_eq!(
+        scan_stream(&mut guest, text, b"%d %d", &[SCANNED, SCANNED + 4]),
+        2
+    );
+    assert_eq!(scanned(&guest, 8)[..], [10, 0, 0, 0, 20, 0, 0, 0]);
+    assert_eq!(guest.call("_ftelli64", &[text]), 5, "the CR LF is unread");
+    assert_eq!(scan_stream(&mut guest, text, b"%c", &[SCANNED + 8]), 1);
+    assert_eq!(scanned(&guest, 9)[8], b'\n', "CR LF is one line feed");
+    assert_eq!(guest.call("_ftelli64", &[text]), 7, "two bytes consumed");
+    assert_eq!(scan_stream(&mut guest, text, b"%s", &[SCANNED + 16]), 1);
+    assert_eq!(scanned(&guest, 21)[16..], *b"name\0");
+    assert_eq!(guest.call("_ftelli64", &[text]), 11);
+    assert_eq!(
+        scan_stream(&mut guest, text, b"%s", &[SCANNED + 24]),
+        SCANF_EOF,
+        "CTRL+Z is the end of a text stream"
+    );
+    assert_eq!(guest.call("_ftelli64", &[text]), 11);
+    close(&mut guest, text);
+
+    let binary = opened(&mut guest, "data.txt", "rb");
+    assert_eq!(
+        scan_stream(&mut guest, binary, b"%*d %*d%2c", &[SCANNED + 32]),
+        1
+    );
+    assert_eq!(scanned(&guest, 35)[32..], *b"\r\n\xAA");
+    assert_eq!(scan_stream(&mut guest, binary, b"%s", &[SCANNED]), 1);
+    assert_eq!(scanned(&guest, 12)[..], *b"name\x1aafter\0\xAA");
+    assert_eq!(guest.call("_ftelli64", &[binary]), 17);
+    close(&mut guest, binary);
+}
+
+/// What `__stdio_common_vfscanf` refuses. A null stream or format returns
+/// `EOF` with `errno` `EINVAL` (Microsoft Learn, fscanf). The output streams
+/// and a stream opened only for writing cannot be read: `EOF` with `EBADF`,
+/// as `fgets` gives here. A pointer that is no stream and a locale object
+/// stop the guest. Nothing is assigned in any case.
+#[test]
+fn fscanf_fails_on_streams_that_cannot_be_read() {
+    const EBADF: u32 = 9;
+    let (mut guest, [stdin, out, error]) = stdio_guest();
+    guest.state.set_standard_input(b"5");
+    guest.memory.write_bytes(SCANNED, &[0xAA; 8]).unwrap();
+    let written = opened(&mut guest, "out.txt", "w");
+    for (stream, format, errno) in [
+        (0, Some(b"%d".as_slice()), STDIO_EINVAL),
+        (stdin, None, STDIO_EINVAL),
+        (out, Some(b"%d".as_slice()), EBADF),
+        (error, Some(b"%d".as_slice()), EBADF),
+        (written, Some(b"%d".as_slice()), EBADF),
+    ] {
+        guest.set_errno(0);
+        guest.memory.write_u64(STACK_TOP + 32, VA_LIST).unwrap();
+        guest.memory.write_u64(VA_LIST, SCANNED).unwrap();
+        let format = format.map_or(0, |format| place(&mut guest, TEXT, format));
+        let result = guest.call(
+            "__stdio_common_vfscanf",
+            &[SCANF_OPTIONS, stream, format, 0],
+        );
+        assert_eq!(result & 0xFFFF_FFFF, SCANF_EOF, "{stream:x}");
+        assert_eq!(guest.errno(), errno, "{stream:x}");
+    }
+    assert_eq!(scanned(&guest, 8), [0xAA; 8]);
+    let (_, exit) = scan_stream_with(&mut guest, SCANF_OPTIONS, SCANNED, b"%d", &[SCANNED]);
+    assert_eq!(exit, LIMIT, "no stream");
+    let format = place(&mut guest, TEXT, b"%d");
+    guest.memory.write_u64(STACK_TOP + 32, VA_LIST).unwrap();
+    let (_, exit) = guest.run(
+        "__stdio_common_vfscanf",
+        &[SCANF_OPTIONS, stdin, format, SCANNED],
+    );
+    assert_eq!(exit, LIMIT, "a locale object");
+    assert_eq!(scanned(&guest, 8), [0xAA; 8]);
+    assert_eq!(guest.call("getchar", &[]), u64::from(b'5'), "nothing read");
+}
+
 /// What `__stdio_common_vfprintf` refuses. A null stream or format returns -1
 /// with `errno` `EINVAL` (Microsoft Learn, vfprintf). An invalid format calls
 /// the invalid parameter handler on Windows; here it returns the same -1 and
@@ -2475,6 +2944,109 @@ fn a_file_written_through_a_stream_reads_back_line_by_line() {
 /// "a" "creates the file if it doesn't exist" and "all write operations occur
 /// at the end of the file"; "r+" needs the file to exist; "w+" and "a+" also
 /// read. A null or empty name or mode returns null with `EINVAL`.
+#[test]
+fn fread_reads_whole_items_from_files_and_stdin() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "read.bin", b"0123456789abcdef");
+    let file = opened(&mut guest, "read.bin", "rb");
+
+    // Four items of four bytes, then a partial read: only whole items count.
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 4, 4, file]), 4);
+    let mut stored = [0u8; 16];
+    guest.memory.read_bytes(TEXT + 0x4000, &mut stored).unwrap();
+    assert_eq!(&stored, b"0123456789abcdef");
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 4, 4, file]), 0);
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+
+    // A five-byte remainder with four-byte items reads one whole item.
+    close(&mut guest, file);
+    store(&mut guest, "odd.bin", b"abcde");
+    let file = opened(&mut guest, "odd.bin", "rb");
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 4, 4, file]), 1);
+    let mut stored = [0u8; 4];
+    guest.memory.read_bytes(TEXT + 0x4000, &mut stored).unwrap();
+    assert_eq!(&stored, b"abcd");
+
+    // fread may read stdin, a write-only stream may not be read.
+    close(&mut guest, file);
+    let file = opened(&mut guest, "writeonly.bin", "wb");
+    assert_eq!(guest.call("fread", &[TEXT + 0x4000, 1, 4, file]), 0);
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    close(&mut guest, file);
+
+    // A null buffer or stream is EINVAL; no items or no size reads nothing.
+    for args in [[0, 1, 4, 1], [TEXT + 0x4000, 1, 4, 0]] {
+        let file = opened(&mut guest, "odd.bin", "rb");
+        let mut use_args = args;
+        use_args[3] = if args[3] == 1 { file } else { 0 };
+        assert_eq!(guest.call("fread", &use_args), 0);
+        assert_eq!(guest.errno(), EINVAL);
+        guest.set_errno(0);
+        close(&mut guest, file);
+    }
+
+    // fgetc walks the file byte by byte and answers EOF at its end.
+    let file = opened(&mut guest, "odd.bin", "rb");
+    for expected in b"abcde".iter() {
+        assert_eq!(
+            guest.call("fgetc", &[file]) & 0xFFFF_FFFF,
+            u64::from(*expected)
+        );
+    }
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    close(&mut guest, file);
+    assert_eq!(guest.call("fgetc", &[0]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EINVAL);
+    guest.set_errno(0);
+}
+
+#[test]
+fn fseek_ftell_and_rewind_move_through_file_streams() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "seek.bin", b"0123456789abcdef");
+    let file = opened(&mut guest, "seek.bin", "rb");
+
+    // ftell starts at zero; SEEK_SET, SEEK_CUR and SEEK_END move as documented.
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("fseek", &[file, 4, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 4);
+    assert_eq!(guest.call("fseek", &[file, 2, 1]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 6);
+    // SEEK_END minus four: the sign bit of the 32-bit form travels as unsigned.
+    assert_eq!(
+        guest.call("fseek", &[file, 0xFFFF_FFFC, 2]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 12);
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, u64::from(b'c'));
+
+    // Reading past the position the seek set proves the move, and rewind
+    // returns to the start while clearing the end-of-file indicator.
+    assert_eq!(guest.call("fseek", &[file, 16, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    guest.call("rewind", &[file]);
+    assert_eq!(guest.call("ftell", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("fgetc", &[file]) & 0xFFFF_FFFF, u64::from(b'0'));
+
+    // A bad origin, a null stream and a position before the start are EINVAL.
+    for args in [[file, 0, 7], [file, 0xFFFF_FFFF, 0]] {
+        assert_eq!(
+            guest.call("fseek", &args) & 0xFFFF_FFFF,
+            0xFFFF_FFFF,
+            "{args:x?}"
+        );
+        assert_eq!(guest.errno(), EINVAL, "{args:x?}");
+        guest.set_errno(0);
+    }
+    assert_eq!(guest.call("ftell", &[0]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EINVAL);
+    guest.set_errno(0);
+    close(&mut guest, file);
+}
+
 #[test]
 fn fopen_modes_follow_the_documentation() {
     let (mut guest, _) = stdio_guest();
@@ -4642,19 +5214,78 @@ fn legacy_amsg_exit_ends_the_process() {
 }
 
 #[test]
-fn environment_variables_are_never_found_in_the_empty_environment() {
+fn environment_variables_round_trip_and_miss_the_undefined_ones() {
     let mut guest = Guest::new();
+
+    // A fresh environment answers every query with the documented miss.
     guest.memory.write_bytes(SCRATCH, b"PATH\0").unwrap();
     for symbol in ["GetEnvironmentVariableA", "GetEnvironmentVariableW"] {
-        for args in [
-            [SCRATCH, SCRATCH + 0x40, 32],
-            [0, SCRATCH + 0x40, 32],
-            [SCRATCH, 0, 0],
-        ] {
-            assert_eq!(guest.call(symbol, &args) & 0xFFFF_FFFF, 0, "{symbol}");
-            assert_eq!(guest.last_error(), 203, "{symbol} ERROR_ENVVAR_NOT_FOUND");
-        }
+        assert_eq!(
+            guest.call(symbol, &[SCRATCH, SCRATCH + 0x40, 32]) & 0xFFFF_FFFF,
+            0
+        );
+        assert_eq!(guest.last_error(), 203, "{symbol} ERROR_ENVVAR_NOT_FOUND");
     }
+
+    // A defined variable round-trips through both widths, case-insensitively.
+    guest
+        .state
+        .set_environment_variable("XenoraProbe", Some("answer-42"));
+    guest.memory.write_bytes(SCRATCH, b"xenoraprobe\0").unwrap();
+    let got = guest.call("GetEnvironmentVariableA", &[SCRATCH, SCRATCH + 0x20, 32]) & 0xFFFF_FFFF;
+    assert_eq!(got, 9, "the length without the terminator");
+    let mut bytes = [0u8; 10];
+    guest.memory.read_bytes(SCRATCH + 0x20, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"answer-42\0");
+
+    let wide_name: Vec<u16> = "XENORAPROBE".encode_utf16().collect();
+    for (index, unit) in wide_name.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 2 * index as u64, *unit)
+            .unwrap();
+    }
+    guest
+        .memory
+        .write_u16(SCRATCH + 2 * wide_name.len() as u64, 0)
+        .unwrap();
+    let got = guest.call("GetEnvironmentVariableW", &[SCRATCH, SCRATCH + 0x60, 32]) & 0xFFFF_FFFF;
+    assert_eq!(got, 9);
+    assert_eq!(
+        guest.memory.read_u16(SCRATCH + 0x60).unwrap(),
+        u16::from(b'a')
+    );
+
+    // A small buffer answers the size it needs, terminator included.
+    guest.memory.write_bytes(SCRATCH, b"xenoraprobe\0").unwrap();
+    assert_eq!(
+        guest.call("GetEnvironmentVariableA", &[SCRATCH, SCRATCH + 0x40, 4]) & 0xFFFF_FFFF,
+        10,
+        "length 9 plus the terminator"
+    );
+    for (index, unit) in wide_name.iter().enumerate() {
+        guest
+            .memory
+            .write_u16(SCRATCH + 2 * index as u64, *unit)
+            .unwrap();
+    }
+    guest
+        .memory
+        .write_u16(SCRATCH + 2 * wide_name.len() as u64, 0)
+        .unwrap();
+    assert_eq!(
+        guest.call("GetEnvironmentVariableW", &[SCRATCH, SCRATCH + 0x40, 4]) & 0xFFFF_FFFF,
+        10
+    );
+    guest.memory.write_bytes(SCRATCH, b"xenoraprobe\0").unwrap();
+
+    // A deleted variable misses again.
+    guest.state.set_environment_variable("XenoraProbe", None);
+    assert_eq!(
+        guest.call("GetEnvironmentVariableA", &[SCRATCH, SCRATCH + 0x20, 32]) & 0xFFFF_FFFF,
+        0
+    );
+    assert_eq!(guest.last_error(), 203);
 }
 
 #[test]
@@ -7157,4 +7788,260 @@ fn synthetic_lifecycle_queue_teardown_is_terminal_only_with_open_handles() {
         call(1, &[]);
         assert_eq!(call(0, &[]).0, expected);
     }
+}
+
+/// `ungetc`: the pushed bytes come back last-pushed-first through the shared
+/// descriptor, the end-of-file indicator clears, and EOF in is EOF out with
+/// nothing done (ISO C 7.21.7.10).
+#[test]
+fn ungetc_stacks_bytes_and_steps_the_position_back() {
+    let (mut guest, _) = stdio_guest();
+    store(&mut guest, "ungetc.bin", b"abcdef");
+    guest.memory.write_bytes(NAME, b"ungetc.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    let fd = guest.call("_fileno", &[file]) & 0xFFFF_FFFF;
+    let buf = TEXT + 0x200;
+    // Two bytes in, then two pushes come back last-pushed-first and the
+    // file resumes where it stopped.
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ab");
+    assert_eq!(
+        guest.call("ungetc", &[b'X' as u64, file]) & 0xFFFF_FFFF,
+        b'X' as u64
+    );
+    assert_eq!(
+        guest.call("ungetc", &[b'Y' as u64, file]) & 0xFFFF_FFFF,
+        b'Y' as u64
+    );
+    assert_eq!(guest.call("_read", &[fd, buf, 4]) & 0xFFFF_FFFF, 4);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..4], b"YXcd");
+    // EOF in is EOF out and stacks nothing.
+    assert_eq!(
+        guest.call("ungetc", &[0xFFFF_FFFF, file]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.call("_read", &[fd, buf, 2]) & 0xFFFF_FFFF, 2);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"ef");
+    // The end-of-file indicator is a stdio notion: a stdio read at the end
+    // sets it, and a push clears it again.
+    assert!(line(&mut guest, file, 8).is_none(), "at the end");
+    assert_ne!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("ungetc", &[b'Z' as u64, file]) & 0xFFFF_FFFF,
+        b'Z' as u64
+    );
+    assert_eq!(guest.call("feof", &[file]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[fd, buf, 1]) & 0xFFFF_FFFF, 1);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..1], b"Z");
+    // A push on a stream that is not open is EOF with EBADF.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("ungetc", &[b'Q' as u64, TEXT]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+}
+
+/// `_open_osfhandle` and `_get_osfhandle`: a kernel pipe end becomes a
+/// descriptor the CRT reads and writes, the CRT owns the handle once
+/// wrapped, and a write end closing marks the pipe's end of stream.
+#[test]
+fn osfhandle_interop_wraps_a_kernel_pipe() {
+    let (mut guest, _) = stdio_guest();
+    let ends = TEXT + 0x400;
+    let buf = TEXT + 0x500;
+    // A kernel pipe: both ends out.
+    assert_eq!(
+        guest.call("CreatePipe", &[ends, ends + 8, 0, 0]) & 0xFFFF_FFFF,
+        1
+    );
+    let read_end = guest.memory.read_u64(ends).unwrap();
+    let write_end = guest.memory.read_u64(ends + 8).unwrap();
+    assert_ne!(read_end, 0);
+    assert_ne!(write_end, 0);
+    // The write end becomes a descriptor; the handle it wraps comes back.
+    let fd_w = guest.call("_open_osfhandle", &[write_end, 0]) & 0xFFFF_FFFF;
+    assert_ne!(fd_w as i32, -1);
+    assert_eq!(guest.call("_get_osfhandle", &[fd_w]), write_end);
+    // Bytes written through the CRT drain through the CRT on the read end.
+    guest.memory.write_bytes(buf, b"pipe!").unwrap();
+    assert_eq!(guest.call("_write", &[fd_w, buf, 5]) & 0xFFFF_FFFF, 5);
+    let fd_r = guest.call("_open_osfhandle", &[read_end, 0]) & 0xFFFF_FFFF;
+    assert_ne!(fd_r as i32, -1);
+    assert_eq!(guest.call("_read", &[fd_r, buf, 3]) & 0xFFFF_FFFF, 3);
+    let mut verify = [0u8; 8];
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..3], b"pip");
+    // A handle that is no kernel object is EBADF, and so is a fd with none.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_open_osfhandle", &[0xDEAD, 0]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_get_osfhandle", &[77]), u64::MAX);
+    // Closing the write descriptor closes the handle: the kernel no longer
+    // knows it, and the read end drains what remains then answers empty.
+    assert_eq!(guest.call("_close", &[fd_w]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("CloseHandle", &[write_end]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_read", &[fd_r, buf, 8]) & 0xFFFF_FFFF, 2);
+    guest.memory.read_bytes(buf, &mut verify).unwrap();
+    assert_eq!(&verify[..2], b"e!");
+    assert_eq!(guest.call("_read", &[fd_r, buf, 8]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_close", &[fd_r]) & 0xFFFF_FFFF, 0);
+}
+
+/// `_filbuf` and `_flsbuf`: the legacy single-byte forms move one byte at
+/// a time through the stream, the read answering EOF at the end.
+#[test]
+fn filbuf_and_flsbuf_move_single_bytes() {
+    let (mut guest, _) = stdio_guest();
+    guest.memory.write_bytes(NAME, b"bytes.bin\0").unwrap();
+    guest.memory.write_bytes(MODE, b"wb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    // Bytes out one at a time, each answering itself.
+    assert_eq!(
+        guest.call("_flsbuf", &[b'o' as u64, file]) & 0xFFFF_FFFF,
+        b'o' as u64
+    );
+    assert_eq!(
+        guest.call("_flsbuf", &[b'k' as u64, file]) & 0xFFFF_FFFF,
+        b'k' as u64
+    );
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+    // Back in: the bytes come one at a time and the end is EOF.
+    guest.memory.write_bytes(MODE, b"rb\0").unwrap();
+    let file = guest.call("fopen", &[NAME, MODE]);
+    assert_ne!(file, 0);
+    assert_eq!(guest.call("_filbuf", &[file]) & 0xFFFF_FFFF, b'o' as u64);
+    assert_eq!(guest.call("_filbuf", &[file]) & 0xFFFF_FFFF, b'k' as u64);
+    assert_eq!(guest.call("_filbuf", &[file]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    // A write on the read stream is EOF with EBADF, and so is either form
+    // on a pointer that is no stream.
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_flsbuf", &[b'x' as u64, file]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_filbuf", &[TEXT]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.call("fclose", &[file]) & 0xFFFF_FFFF, 0);
+}
+
+#[test]
+fn an_assertion_prints_and_ends_the_process() {
+    let (mut guest, _) = stdio_guest();
+    let expression = place(&mut guest, NAME, b"x == 42");
+    let file = place(&mut guest, MODE, b"sqlite3.c");
+    let (_, exit) = guest.run("_assert", &[expression, file, 1337]);
+    assert_eq!(exit, xenora_loader::cpu::ExitReason::ProcessExit(3));
+    // stderr is the third captured stream: the message went there.
+    assert_eq!(
+        guest.state.standard_error(),
+        b"Assertion failed: x == 42, file sqlite3.c, line 1337\r\n"
+    );
+}
+
+#[test]
+fn beginthreadex_starts_a_thread_like_createthread() {
+    let mut guest = stdio_guest().0;
+    // The CRT form refuses what CreateThread refuses: security descriptors,
+    // unknown flags and a null start, with EINVAL instead of a last error.
+    let start = TEXT; // any non-null guest address
+    assert_eq!(guest.call("_beginthreadex", &[1, 0, start, 0]), 0);
+    assert_eq!(guest.errno(), 22);
+    assert_eq!(guest.call("_beginthreadex", &[0, 0, 0, 0]), 0);
+    assert_eq!(guest.errno(), 22);
+    guest.memory.write_u64(STACK_TOP + 32, 8).unwrap(); // unknown initflag bit
+    assert_eq!(guest.call("_beginthreadex", &[0, 0, start, 0]), 0);
+    assert_eq!(guest.errno(), 22);
+    // Without an attached scheduler the machine has no threads: ENOMEM.
+    guest.memory.write_u64(STACK_TOP + 32, 0).unwrap();
+    assert_eq!(guest.call("_beginthreadex", &[0, 0, start, 0]), 0);
+    assert_eq!(guest.errno(), 12);
+
+    // Thread creation itself is proven end to end by the hosted fixture:
+    // `xenora run` attaches the scheduler, and a thread the fixture starts
+    // with _beginthreadex writes the shared memory the main thread reads
+    // after waiting on its handle.
+}
+
+#[test]
+fn the_wide_file_operations_follow_the_drive() {
+    let (mut guest, _streams) = stdio_guest();
+    // _wfopen opens the same files as fopen, with a wide name and mode.
+    let name = place_wide(&mut guest, NAME, "c:\\wide.txt");
+    let mode = place_wide(&mut guest, MODE, "w");
+    let file = guest.call("_wfopen", &[name, mode]);
+    assert_ne!(file, 0);
+    write(&mut guest, file, b"wide");
+    close(&mut guest, file);
+
+    // _wstat64i32 answers the 48-byte block: regular file, read and write,
+    // one link, the size, times of -1.
+    let stat = TEXT + 0x3800;
+    assert_eq!(guest.call("_wstat64i32", &[name, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.memory.read_u16(stat + 6).unwrap(),
+        0x8000 | 0x100 | 0x80
+    );
+    assert_eq!(guest.memory.read_u16(stat + 8).unwrap(), 1);
+    assert_eq!(guest.memory.read_u32(stat + 20).unwrap(), 4);
+    assert_eq!(guest.memory.read_u64(stat + 24).unwrap(), u64::MAX);
+
+    // _access: the file exists, in every mode, until it is read-only.
+    let narrow = place(&mut guest, TEXT + 0x2000, b"c:\\wide.txt");
+    assert_eq!(guest.call("_access", &[narrow, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_waccess", &[name, 6]) & 0xFFFF_FFFF, 0);
+    // _wchmod without the write bit makes the file read-only.
+    assert_eq!(guest.call("_wchmod", &[name, 0x100]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("_waccess", &[name, 2]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), 13);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0x80, 0x80); // unchanged: not stat'd again
+    assert_eq!(guest.call("_wstat64i32", &[name, stat]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.memory.read_u16(stat + 6).unwrap() & 0x80, 0);
+    // A read-only file cannot be written or unlinked.
+    assert_eq!(guest.call("_wunlink", &[name]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), 13);
+    // Making it writable again restores both.
+    assert_eq!(guest.call("_wchmod", &[name, 0x180]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_unlink", &[narrow]) & 0xFFFF_FFFF, 0);
+    assert_eq!(
+        guest.call("_wstat64i32", &[name, stat]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), 2);
+
+    // _wmkdir creates directories files can live in, once.
+    let dir = place_wide(&mut guest, NAME, "c:\\wdir");
+    assert_eq!(guest.call("_wmkdir", &[dir]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_wmkdir", &[dir]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    let inner = place_wide(&mut guest, NAME + 0x40, "c:\\wdir\\in.txt");
+    let wmode = place_wide(&mut guest, MODE, "w");
+    let file = guest.call("_wfopen", &[inner, wmode]);
+    assert_ne!(file, 0);
+    close(&mut guest, file);
+    // A missing parent fails with ENOENT.
+    let deep = place_wide(&mut guest, NAME + 0x80, "c:\\nope\\dir");
+    assert_eq!(guest.call("_wmkdir", &[deep]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), 2);
+    // Invalid modes fail with EINVAL.
+    let dir_narrow = place(&mut guest, TEXT + 0x2000, b"c:\\wdir");
+    assert_eq!(
+        guest.call("_access", &[dir_narrow, 8]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), 22);
 }

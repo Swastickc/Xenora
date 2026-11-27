@@ -37,11 +37,16 @@ pub const ARG_REUSE_RESULT: u8 = 8;
 pub const ARG_ZERO: u8 = 0;
 
 /// Services that wait on real time, run guest code or reach native Metal are
-/// left out, so each input runs quickly and deterministically.
+/// left out, so each input runs quickly and deterministically. `longjmp` is
+/// left out as well, and for a stronger reason than speed: it is a context
+/// service whose documented behaviour is to replace the callee-saved
+/// registers, so the nonvolatile invariant the driver asserts does not apply
+/// to it. The jump's real contract is covered end to end by the guest fixture
+/// of `guest_crt_jump.rs`.
 fn excluded(module: &str, symbol: &str) -> bool {
     module.eq_ignore_ascii_case("xenora_fixture.dll")
         || module.eq_ignore_ascii_case("xenora_graphics.dll")
-        || matches!(symbol, "WSAPoll" | "XTaskQueueDispatch")
+        || matches!(symbol, "WSAPoll" | "XTaskQueueDispatch" | "longjmp")
 }
 
 /// Outcome of one `Driver::run` against a single corpus input.

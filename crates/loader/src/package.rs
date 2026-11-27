@@ -518,14 +518,24 @@ pub fn run_package_startup(
                 target_address: resolved.target_address,
             },
             BindingOutcome::Unresolved(reason) => {
-                match resolve_service(
-                    &imports,
-                    resolution.requested_module.as_str(),
-                    &resolution.requested_symbol,
-                    &resolution.forwarder_chain,
-                    slot_address,
-                    resolution.slot_rva,
-                ) {
+                // A package image that is present but lacks the export is a
+                // packaging error, not a reason to bind a same-named host
+                // service. Only a reference the package cannot provide at all
+                // may fall back to the registry.
+                let fallback = may_fall_back_to_service(reason);
+                let resolved_service = if fallback {
+                    resolve_service(
+                        &imports,
+                        resolution.requested_module.as_str(),
+                        &resolution.requested_symbol,
+                        &resolution.forwarder_chain,
+                        slot_address,
+                        resolution.slot_rva,
+                    )
+                } else {
+                    Ok(None)
+                };
+                match resolved_service {
                     Ok(Some(mut service)) => {
                         service.image_index = image_index;
                         service_bindings.push(service.clone());
@@ -1078,6 +1088,27 @@ fn classify_unresolved(
                 }
             }
         },
+    }
+}
+
+/// Whether an unresolved package binding may be satisfied by a host service.
+///
+/// The package is authoritative for a module it contains. A missing export or
+/// a malformed provider is therefore a package error, while an absent module,
+/// an API-set contract, or a forwarder whose target is outside the package can
+/// legitimately name a registered service.
+fn may_fall_back_to_service(reason: &UnresolvedBindingReason) -> bool {
+    match reason {
+        UnresolvedBindingReason::Import(reason) => matches!(
+            reason,
+            UnresolvedImportReason::MissingModule { .. }
+                | UnresolvedImportReason::ApiSetContract { .. }
+                | UnresolvedImportReason::ForwarderApiSetContract { .. }
+                | UnresolvedImportReason::ForwarderMissingModule { .. }
+        ),
+        UnresolvedBindingReason::OverlappingIatSlot { .. }
+        | UnresolvedBindingReason::SlotAddressOverflow { .. }
+        | UnresolvedBindingReason::TargetAddressOverflow { .. } => false,
     }
 }
 

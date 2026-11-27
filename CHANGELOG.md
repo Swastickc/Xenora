@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Integer ALU memory-operand verification (#120): original boundary-focused tests cover ADD/OR/AND/SUB/XOR memory destinations and memory sources at 8, 16, 32 and 64 bits, group-one byte immediates including sign-extended wide forms, independently derived flags, register merging and zero-extension, successful read-modify-write access spanning adjacent writable regions, and exact state plus memory preservation when a crossing write is denied. The broad independent form matrix already existed in `x86_integer.rs`; production CPU/DBT code needed no change. Local verification only; independent acceptance pending.
 - The CRT spawn family refuses honestly: `_spawnve` and `_wspawnve` answer minus one with ENOSYS in errno across ucrtbase, msvcrt and the process API set, since the machine is one process and cannot host a child. Local in-module tests cover the refusal shape.
 - `GetSecurityInfo` answers the owner and group of any object as the machine's one identity and honestly refuses access-control-list queries (ERROR_NOT_SUPPORTED in the return value), since the machine models no ACLs. Local in-module tests cover both directions.
 - `getservbyname` resolves service names from the standard Internet assignment table (http, https, ssh, ftp, smtp, domain, and others) with ports in network byte order and misses unknown services honestly. Local in-module tests cover the resolution and the miss.

@@ -24,7 +24,7 @@ Commercial game execution is not supported. Nothing in this document claims it.
 | F1 | Keyboard to virtual Xbox controller | Partial: host-agnostic translator only | `crates/input/tests/keyboard.rs` (#944) |
 | F2 | Mouse and trackpad to the right stick | Partial: host-agnostic translator only | `crates/input/tests/mouse.rs` (#944) |
 | F3 | Host input router | Partial: routing model only, not wired to the app | `crates/input/tests/router.rs`, `review.rs` (#944) |
-| F4 | Versioned mapping profiles | Not started | |
+| F4 | Versioned mapping profiles | Partial: profiles and text format, not wired to the app | `crates/input/tests/profile_format.rs` (#948) |
 | F5 | SwiftUI input settings | Not started | |
 | F6 | Per-application configuration | Not started | |
 | F7 | Window and presentation | Not started | |
@@ -37,7 +37,7 @@ Commercial game execution is not supported. Nothing in this document claims it.
 | F14 | Original interactive guest | Not started | |
 | F15 | Sustained reliability | Not started | |
 | F16 | This document | Active | |
-| F17 | Physical controller support | Existing bridge only (#857, #874, #875, #914) | |
+| F17 | Physical controller support | Partial: recognition and translation with virtual devices; existing bridge (#857, #874, #875, #914) | `crates/input/tests/controller.rs`, `review_profiles.rs` (#948) |
 
 "Partial" means the code exists and its tests pass, but a guest cannot use it yet.
 
@@ -136,9 +136,37 @@ When the window loses focus, the router neutralizes every source and refuses inp
 
 These routing rules are Xenora host policy. They are not Windows or Xbox assignment behavior.
 
+## Physical controller profiles (F17, F4)
+
+`xenora_input::controller` names the GameController elements by position. The `GCExtendedGamepad` header documents the face buttons as A at the bottom, B on the right, X on the left and Y at the top. So every controller family, PlayStation and Nintendo included, reaches the guest in the Xbox logical layout, with no keyboard emulation.
+
+Family recognition matches the documented product category strings exactly:
+
+| Category | Extra evidence | Family |
+| --- | --- | --- |
+| `Xbox One` (`GCProductCategoryXboxOne`) | paddle buttons present (`GCXboxGamepad.h`: Elite) | Xbox Elite |
+| `Xbox One` | Share button present (`GCXboxGamepad.h`: Series X\|S) | Xbox Series X\|S |
+| `Xbox One` | neither | Xbox One |
+| `DualSense` (`GCProductCategoryDualSense`) | | DualSense |
+| `DualShock 4` (`GCProductCategoryDualShock4`) | | DualShock 4 |
+| anything else, extended gamepad | | Generic extended |
+| no extended gamepad | | Micro |
+
+There is no public category for the Switch Pro controller or the DualSense Edge. Neither is recognized automatically. A Switch Pro profile can be chosen explicitly, in positional form or with the printed-label layout, which swaps A with B and X with Y. A DualSense Edge is expected to report as a DualSense, but that is untested.
+
+A profile can change:
+
+- what each element drives: a button, a trigger or a stick direction;
+- each stick's radial dead zone, outer edge, response curve (linear, quadratic or cubic), drift calibration offset, inversion and sensitivity;
+- whether the sticks are swapped;
+- each trigger's threshold, and whether the trigger acts digitally;
+- vibration intensity.
+
+Dead zones default to zero, because XInput applications apply their own. The default profile is a bit-exact per-axis passthrough of the host values, the same as the existing bridge, and `review_profiles.rs` checks that over a sweep of 32-bit values. Profiles are saved in a versioned line-oriented text format, limited to 16 KiB, 256 lines and 64 bindings. Malformed text is refused with a reason. A newer version is refused and named in the message, and a valid profile round-trips exactly.
+
 ## Hardware evidence
 
-No physical controller has been tested in this campaign so far. Every controller family named in the directive is untested here: Xbox Series X|S, Xbox One, Elite Series 2, DualShock 4, DualSense, DualSense Edge, Switch Pro, and third-party USB or Bluetooth controllers.
+No physical controller has been tested in this campaign so far. None was connected to the development Mac: GameController reported zero controllers. Every controller family named in the directive is untested here: Xbox Series X|S, Xbox One, Elite Series 2, DualShock 4, DualSense, DualSense Edge, Switch Pro, and third-party USB or Bluetooth controllers.
 
 ## Acceptance commands
 

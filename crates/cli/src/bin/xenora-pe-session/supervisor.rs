@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
-
 use super::Options;
+use super::host_output::{self, HostOutput, Report};
 use super::wire::{self, MAX_FRAMES, Reply, Request};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -89,6 +88,7 @@ impl WorkerProcess {
         inputs: &Receiver<io::Result<Request>>,
     ) -> Result<Request, Failure> {
         loop {
+            host_output::check_connection()?;
             if let Some(status) = self.child.try_wait()? {
                 return Err(Failure::Session(format!(
                     "worker exited while waiting for input ({status})"
@@ -192,9 +192,8 @@ pub(super) fn run(options: &Options) -> Result<(), Failure> {
     }
 
     let inputs = read_host_requests()?;
-    let mut output = io::stdout().lock();
-    writeln!(output, "ready")?;
-    output.flush()?;
+    let output = HostOutput::start()?;
+    output.publish(Report::Ready, deadline, "startup")?;
     let mut frames = 0;
     loop {
         let request = worker.wait_for_input(&inputs)?;
@@ -202,8 +201,7 @@ pub(super) fn run(options: &Options) -> Result<(), Failure> {
         if matches!(request, Request::Stop) {
             wire::write_request(&mut worker.requests, request)?;
             worker.finish(deadline)?;
-            writeln!(output, "done frames={frames}")?;
-            output.flush()?;
+            output.publish(Report::Done(frames), deadline, "shutdown")?;
             return Ok(());
         }
         if frames == MAX_FRAMES {
@@ -226,18 +224,16 @@ pub(super) fn run(options: &Options) -> Result<(), Failure> {
             ));
         }
         frames += 1;
-        let digest = Sha256::digest(&rgba);
-        write!(
-            output,
-            "frame {frames} width={width} height={height} sha256={digest:x}"
+        output.publish(
+            Report::Frame {
+                sequence: frames,
+                width,
+                height,
+                rgba,
+                pixels: options.pixels,
+            },
+            deadline,
+            "frame",
         )?;
-        if options.pixels {
-            write!(output, " rgba=")?;
-            for byte in rgba {
-                write!(output, "{byte:02x}")?;
-            }
-        }
-        writeln!(output)?;
-        output.flush()?;
     }
 }

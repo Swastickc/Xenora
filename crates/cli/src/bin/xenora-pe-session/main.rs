@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+mod host_output;
 mod supervisor;
 mod wire;
 mod worker;

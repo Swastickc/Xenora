@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 const EXECUTABLE: &str = env!("CARGO_BIN_EXE_xenora-pe-session");
 const TIMEOUT: Duration = Duration::from_secs(20);
+const PIPE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn fixture(name: &str) -> PathBuf {
     static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
@@ -60,6 +61,28 @@ struct Completed {
     diagnostics: String,
 }
 
+fn wait_for_exit(child: &mut Child, timeout: Duration, label: &str) -> ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("wait for session") {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "session did not exit {label}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn collect_diagnostics(child: &mut Child) -> Receiver<String> {
+    let (send, diagnostics) = mpsc::channel();
+    let mut stderr = child.stderr.take().unwrap();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("read session stderr");
+        let _ = send.send(String::from_utf8_lossy(&bytes).into_owned());
+    });
+    diagnostics
+}
+
 impl Completed {
     fn assert_code(&self, expected: i32) {
         assert_eq!(
@@ -89,13 +112,7 @@ impl Session {
                 }
             }
         });
-        let (diagnostics_tx, diagnostics) = mpsc::channel();
-        let mut stderr = child.stderr.take().unwrap();
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes).expect("read session stderr");
-            let _ = diagnostics_tx.send(String::from_utf8_lossy(&bytes).into_owned());
-        });
+        let diagnostics = collect_diagnostics(&mut child);
         Self {
             input: child.stdin.take(),
             child,
@@ -119,14 +136,7 @@ impl Session {
 
     fn finish(mut self) -> Completed {
         drop(self.input.take());
-        let deadline = Instant::now() + TIMEOUT;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("wait for session") {
-                break status;
-            }
-            assert!(Instant::now() < deadline, "session did not exit after EOF");
-            thread::sleep(Duration::from_millis(10));
-        };
+        let status = wait_for_exit(&mut self.child, TIMEOUT, "after EOF");
         let mut lines = Vec::new();
         loop {
             match self.lines.recv_timeout(TIMEOUT) {
@@ -150,6 +160,50 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+struct RawPipeSession(Child);
+
+impl RawPipeSession {
+    // Return the read end intact and stop draining immediately after `ready`.
+    // The child retains its writable stdin pipe so neither test sends EOF.
+    fn start(command: &mut Command) -> (Self, BufReader<ChildStdout>) {
+        let mut session = Self(
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start xenora-pe-session"),
+        );
+        let mut output = BufReader::new(session.0.stdout.take().unwrap());
+        let (send, ready) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            output.read_line(&mut line).expect("read initial ready");
+            let _ = send.send((line, output));
+        });
+        let (line, output) = ready.recv_timeout(TIMEOUT).expect("wait for initial ready");
+        assert_eq!(line, "ready\n");
+        (session, output)
+    }
+
+    fn assert_exit(&mut self, code: i32, label: &str) -> String {
+        let diagnostics = collect_diagnostics(&mut self.0);
+        let status = wait_for_exit(&mut self.0, PIPE_TIMEOUT, label);
+        let stderr = diagnostics
+            .recv_timeout(PIPE_TIMEOUT)
+            .expect("session stderr did not close");
+        assert_eq!(status.code(), Some(code), "{stderr}");
+        stderr
+    }
+}
+
+impl Drop for RawPipeSession {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
 
@@ -297,6 +351,52 @@ fn a_frame_phase_deadline_terminates_the_worker() {
             .contains("frame exceeded the phase deadline"),
         "{}",
         completed.diagnostics
+    );
+}
+
+#[test]
+fn closing_stdout_while_stdin_is_open_terminates_an_idle_session() {
+    let path = fixture("authored-session");
+    let (mut session, output) = RawPipeSession::start(&mut command(&path, None));
+    drop(output);
+    let stderr = session.assert_exit(125, "after the output consumer disconnected");
+    assert!(stderr.contains("host output disconnected"), "{stderr}");
+}
+
+#[test]
+fn an_undrained_large_frame_hits_the_wall_deadline() {
+    let path = fixture("authored-session-large-frame");
+    let mut draining = Session::start(command(&path, None).arg("--pixels"));
+    assert_eq!(draining.next_line(), "ready");
+    draining.send(10);
+    let frame = draining.next_line();
+    assert!(frame.starts_with("frame 1 width=64 height=64 sha256="));
+    assert_eq!(frame.split_once(" rgba=").unwrap().1.len(), 32_768);
+    let completed = draining.finish();
+    completed.assert_code(0);
+    assert_eq!(completed.lines, ["done frames=1"]);
+
+    let (mut stalled, mut output) =
+        RawPipeSession::start(command(&path, None).args(["--pixels", "--phase-seconds", "1"]));
+    // Four supported frames exceed the pipe capacity even if the host
+    // accepts the first few reports before it stops draining.
+    for _ in 0..4 {
+        writeln!(stalled.0.stdin.as_mut().unwrap(), "10")
+            .expect("send input without draining stdout");
+    }
+    let stderr = stalled.assert_exit(124, "while frame output was blocked");
+    assert!(
+        stderr.contains("frame exceeded the phase deadline"),
+        "{stderr}"
+    );
+    // The supervisor has exited, so it is now safe to drain the partial
+    // frame. Its prefix proves the guest rendered before output stalled.
+    let mut partial = String::new();
+    output.read_to_string(&mut partial).unwrap();
+    assert!(partial.starts_with("frame 1 width=64 height=64 sha256="));
+    assert!(
+        partial.len() < 4 * (frame.len() + 1),
+        "all four frames reached the pipe"
     );
 }
 

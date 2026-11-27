@@ -39,8 +39,8 @@ IMPORT int XenoraDestroyCommandAllocator(u64 allocator);
 IMPORT int XenoraDestroyCommandQueue(u64 queue);
 IMPORT int XenoraDestroyDevice(u64 device);
 
-enum { WIDTH = 4, HEIGHT = 3, MAX_FRAMES = 64 };
-enum session_mode { NORMAL, MISSING_PRESENT, EXTRA_PRESENT, LEAK_FILE, STALL_FRAME, DETERMINISTIC_CLOCK };
+enum { WIDTH = 4, HEIGHT = 3, MAX_FRAMES = 64, LARGE_SIZE = 64 };
+enum session_mode { NORMAL, MISSING_PRESENT, EXTRA_PRESENT, LEAK_FILE, STALL_FRAME, DETERMINISTIC_CLOCK, LARGE_FRAME };
 
 struct journal_entry {
     u32 sequence;
@@ -68,6 +68,8 @@ struct graphics {
     u64 allocator;
     u64 buffer;
     u64 target;
+    u32 width;
+    u32 height;
 };
 
 static void set_up(struct graphics *graphics) {
@@ -75,7 +77,7 @@ static void set_up(struct graphics *graphics) {
     CHECK(XenoraCreateCommandQueue(graphics->device, 0, &graphics->queue) == 0, 11);
     CHECK(XenoraCreateCommandAllocator(graphics->device, 0, &graphics->allocator) == 0, 12);
     CHECK(XenoraCreateBuffer(graphics->device, (u64)vertices, sizeof(vertices), &graphics->buffer) == 0, 13);
-    CHECK(XenoraCreateRenderTarget(graphics->device, WIDTH, HEIGHT, &graphics->target) == 0, 14);
+    CHECK(XenoraCreateRenderTarget(graphics->device, graphics->width, graphics->height, &graphics->target) == 0, 14);
 }
 
 static void draw_frame(const struct graphics *graphics, u32 input, u32 sequence, u32 blue) {
@@ -85,13 +87,15 @@ static void draw_frame(const struct graphics *graphics, u32 input, u32 sequence,
     CHECK(XenoraCreateCommandList(graphics->device, graphics->allocator, 0, &list) == 0, 20);
     CHECK(XenoraSetVertexBuffer(list, 0, graphics->buffer, side * sizeof(vertices[0]), sizeof(vertices[0][0])) == 0, 21);
     CHECK(XenoraSetRenderTarget(list, graphics->target, clear) == 0, 22);
-    CHECK(XenoraSetViewport(list, WIDTH, HEIGHT) == 0, 23);
+    CHECK(XenoraSetViewport(list, graphics->width, graphics->height) == 0, 23);
     CHECK(XenoraDraw(list, 3, 1, 0) == 0, 24);
     CHECK(XenoraCloseCommandList(list) == 0 && XenoraExecuteCommandLists(graphics->queue, list) == 0, 25);
-    CHECK(XenoraReadbackResource(graphics->target, (u64)pixels, sizeof(pixels)) == 0, 26);
-    const u32 red_column = side ? WIDTH - 1 : 0;
-    for (u32 pixel = 0; pixel < WIDTH * HEIGHT; ++pixel)
-        CHECK(pixels[pixel] == (pixel % WIDTH == red_column ? 0xff0000ffu : clear), 27);
+    if (graphics->width == WIDTH && graphics->height == HEIGHT) {
+        CHECK(XenoraReadbackResource(graphics->target, (u64)pixels, sizeof(pixels)) == 0, 26);
+        const u32 red_column = side ? WIDTH - 1 : 0;
+        for (u32 pixel = 0; pixel < WIDTH * HEIGHT; ++pixel)
+            CHECK(pixels[pixel] == (pixel % WIDTH == red_column ? 0xff0000ffu : clear), 27);
+    }
     CHECK(XenoraDestroyCommandList(list) == 0, 28);
 }
 
@@ -115,6 +119,8 @@ static void run_session(enum session_mode mode) {
     const u64 file = CreateFileW(journal_path, 0xc0000000u, 0, 0, 2, 0, 0);
     CHECK(file != 0 && file != ~0ull, 1);
     struct graphics graphics;
+    graphics.width = mode == LARGE_FRAME ? LARGE_SIZE : WIDTH;
+    graphics.height = mode == LARGE_FRAME ? LARGE_SIZE : HEIGHT;
     set_up(&graphics);
     if (mode == DETERMINISTIC_CLOCK)
         CHECK(clock_milliseconds() == 0, 48);
@@ -173,3 +179,4 @@ void extra_present_entry(void) { run_session(EXTRA_PRESENT); }
 void leak_entry(void) { run_session(LEAK_FILE); }
 void stall_frame_entry(void) { run_session(STALL_FRAME); }
 void deterministic_clock_entry(void) { run_session(DETERMINISTIC_CLOCK); }
+void large_frame_entry(void) { run_session(LARGE_FRAME); }

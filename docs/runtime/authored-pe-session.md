@@ -29,7 +29,10 @@ be followed by a session failure. Consumers should require the terminal
 The worker verifies the SHA-256 and runs the same bytes from a regular file
 of at most 64 MiB. The phase deadline defaults to 15 seconds for startup,
 each input-to-frame exchange and shutdown. Use `--phase-seconds <1..=60>` to
-change it. Waiting at a confirmed input boundary has no idle deadline.
+change it. Host stdout writes share the active phase deadline, so a
+consumer must continue draining the output pipe. Waiting at a confirmed
+input boundary has no idle deadline. A disconnected output pipe ends the
+session on macOS.
 `--max-steps <1..=10000000>` bounds the guest entry and workers across the
 session, with a default of 2,000,000. The launcher accepts up to 64 inputs
 and frame sizes up to 256×256. Exit code 2 indicates a rejected command

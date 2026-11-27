@@ -86,3 +86,4 @@ build extra_present_entry authored-session-extra-present
 build leak_entry authored-session-leak
 build stall_frame_entry authored-session-stall-frame
 build deterministic_clock_entry authored-session-deterministic-clock
+build large_frame_entry authored-session-large-frame

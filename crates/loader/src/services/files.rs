@@ -19,6 +19,10 @@ const CRT_FILESYSTEM_API: &str = "api-ms-win-crt-filesystem-l1-1-0.dll";
 const INVALID_HANDLE: u64 = u64::MAX;
 const READ: u32 = 0x8000_0000;
 const WRITE: u32 = 0x4000_0000;
+/// FILE_WRITE_ATTRIBUTES, the one granular right the simplified access
+/// model accepts beside the generic pair: opening with it writes times and
+/// nothing else, as Windows orders the rights.
+const WRITE_ATTRIBUTES: u32 = 0x100;
 const FILE_NOT_FOUND: u32 = 2;
 const PATH_NOT_FOUND: u32 = 3;
 const DIRECTORY_NOT_EMPTY: u32 = 145;
@@ -93,6 +97,32 @@ fn strip_root_anchor(name: &str) -> &str {
 
 fn valid_key(name: &str) -> bool {
     !name.is_empty() && name.split('\\').all(valid_component)
+}
+
+/// The bare drive key a guest path names, resolved as the drive resolves
+/// every path: separators of either kind fold, dot segments resolve against
+/// the process working directory, the drive prefix drops, and the empty key
+/// is the volume root. `None` when any component is not a name the drive
+/// accepts.
+fn resolve_bare_path(state: &ServicesState, name: &str) -> Option<String> {
+    let cwd = state
+        .crt_directory
+        .lock()
+        .expect("CRT working directory")
+        .clone();
+    // A drive prefix (`c:`) anchors at the volume; what remains resolves
+    // against the working directory, dot segments included.
+    let stripped = name.replace('/', "\\");
+    let body = stripped.strip_prefix("c:").unwrap_or(&stripped);
+    let resolved = super::crt::resolve_directory(&cwd, body);
+    if resolved
+        .split('\\')
+        .all(|part| part.is_empty() || valid_component(part))
+    {
+        Some(resolved)
+    } else {
+        None
+    }
 }
 
 fn guest_path(memory: &GuestMemory, address: u64) -> Result<Option<String>, MemoryError> {
@@ -225,6 +255,7 @@ struct SearchEntry {
     name: String,
     attributes: u32,
     size: u64,
+    times: [u64; 3],
 }
 
 pub(super) struct Search {
@@ -242,8 +273,14 @@ fn write_find_data(
     }
     // WIN32_FIND_DATAW: attributes, three FILETIMEs, size high/low,
     // two reserved DWORDs, WCHAR[260], then WCHAR[14].
+    // The three FILETIMEs are the times the drive tracks for the entry, or
+    // the fixed Unix epoch for one it does not know - a valid time every
+    // conversion accepts.
     let mut bytes = [0u8; 592];
     bytes[..4].copy_from_slice(&entry.attributes.to_le_bytes());
+    for (slot, offset) in [8usize, 16, 24].into_iter().enumerate() {
+        bytes[offset..offset + 8].copy_from_slice(&entry.times[slot].to_le_bytes());
+    }
     bytes[28..32].copy_from_slice(&((entry.size >> 32) as u32).to_le_bytes());
     bytes[32..36].copy_from_slice(&(entry.size as u32).to_le_bytes());
     for (slot, unit) in bytes[44..564]
@@ -321,6 +358,10 @@ fn valid_component(name: &str) -> bool {
             && device.as_bytes()[3].is_ascii_digit())
 }
 
+/// The fixed Unix epoch in Windows FILETIME form for a file whose times the
+/// drive does not know: creation, access and write slots in one value.
+const EPOCH_FILETIME3: [u64; 3] = [116_444_736_000_000_000; 3];
+
 fn parent(path: &str) -> &str {
     path.rsplit_once('\\').map_or("", |(parent, _)| parent)
 }
@@ -338,18 +379,46 @@ fn find_first(
     path: &str,
     output: u64,
     write: fn(&mut GuestMemory, u64, &SearchEntry) -> Result<(), MemoryError>,
+    search_op: u32,
 ) -> Result<u64, u32> {
-    let directory = parent(path);
-    let pattern = path.rsplit('\\').next().unwrap_or_default();
-    if path.starts_with('\\')
-        || (!directory.is_empty() && !directory.split('\\').all(valid_component))
-        || !valid_component(&pattern.replace(['*', '?'], "x"))
-    {
+    // The search root resolves exactly as opening a file does: separators of
+    // either kind fold, and a relative portion hangs under the process
+    // working directory. Only the trailing component is the wildcard
+    // pattern, so a search of `./*` enumerates the working directory as
+    // Windows does.
+    let folded = path.replace('/', "\\");
+    let (root, pattern) = match folded.rsplit_once('\\') {
+        Some((root, pattern)) => (root, pattern),
+        None => ("", folded.as_str()),
+    };
+    if pattern.is_empty() || !valid_component(&pattern.replace(['*', '?'], "x")) {
         return Err(INVALID_NAME);
     }
     let pattern = if pattern == "*.*" { "*" } else { pattern };
+    let cwd = state
+        .crt_directory
+        .lock()
+        .expect("CRT working directory")
+        .clone();
+    // A bare drive root (`c:` as the whole directory portion) anchors at the
+    // volume root: the wildcard split consumed the separating backslash.
+    let resolved = if root.len() == 2 && root.as_bytes()[1] == b':' {
+        String::new()
+    } else {
+        super::crt::resolve_directory(&cwd, root)
+    };
+    if !resolved
+        .split('\\')
+        .all(|part| part.is_empty() || valid_component(part))
+    {
+        return Err(INVALID_NAME);
+    }
+    // The drive keys are the bare volume-relative form everywhere, with the
+    // empty name for the root, exactly as creating or opening a file keys
+    // them: the search compares like with like.
+    let directory = resolved;
     let mut objects = state.objects.lock().expect("guest object state");
-    if !directory.is_empty() && !objects.directories.contains(directory) {
+    if !directory.is_empty() && !objects.directories.contains(directory.as_str()) {
         return Err(PATH_NOT_FOUND);
     }
     let candidates = objects
@@ -363,13 +432,30 @@ fn find_first(
                 .map(|(path, data)| (path, 0x80, data.len() as u64)),
         );
     let mut entries = Vec::new();
-    for (path, attributes, size) in candidates.filter(|(path, _, _)| parent(path) == directory) {
+    for (path, attributes, size) in
+        candidates.filter(|(path, _, _)| parent(path) == directory.as_str())
+    {
         let name = path.rsplit('\\').next().expect("candidate name");
+        let is_directory = attributes & 0x10 != 0;
+        // FindExSearchLimitToDirectories keeps only directories and
+        // FindExSearchLimitToFiles only files; the name match keeps both.
+        if search_op == 1 && !is_directory {
+            continue;
+        }
+        if search_op == 2 && is_directory {
+            continue;
+        }
         if wildcard_match(pattern, name) {
+            let times = objects
+                .file_times
+                .get(path.as_str())
+                .copied()
+                .unwrap_or(EPOCH_FILETIME3);
             entries.push(SearchEntry {
                 name: name.to_owned(),
                 attributes,
                 size,
+                times,
             });
         }
     }
@@ -433,8 +519,13 @@ fn crt_write_finddata64i32(
     }
     let mut bytes = [0u8; 296];
     bytes[0..4].copy_from_slice(&entry.attributes.to_le_bytes());
-    for slot in [8, 16, 24] {
-        bytes[slot..slot + 8].copy_from_slice(&(-1i64).to_le_bytes());
+    // The CRT form carries seconds: the tracked times convert from Windows
+    // FILETIMEs, and a file the drive does not know answers the zero
+    // time_t, the 1970 epoch every conversion accepts.
+    for (slot, offset) in [8usize, 16, 24].into_iter().enumerate() {
+        let seconds =
+            (entry.times[slot].saturating_sub(116_444_736_000_000_000) / 10_000_000) as i64;
+        bytes[offset..offset + 8].copy_from_slice(&seconds.to_le_bytes());
     }
     bytes[32..36].copy_from_slice(&(entry.size as u32).to_le_bytes());
     let name = entry.name.as_bytes();
@@ -528,9 +619,13 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let flags = args.get(5, memory).map_err(ExitReason::MemoryFault)? as u32;
         let template = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
         if args.r9 != 0
+            // BACKUP_SEMANTICS is accepted beside the zero and normal
+            // attribute flags: on a file it is a no-op on Windows itself, the
+            // machine models no backup privilege, and directories refuse on
+            // their own path below.
             || template != 0
-            || !matches!(flags, 0 | 0x80)
-            || access & !(READ | WRITE) != 0
+            || !matches!(flags & !(0x0200_0000), 0 | 0x80)
+            || access & !(READ | WRITE | WRITE_ATTRIBUTES) != 0
             || share & !3 != 0
         {
             return open.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, INVALID_HANDLE);
@@ -576,6 +671,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return open.fail(cpu.gs_base, DISK_FULL, INVALID_HANDLE);
             }
             objects.files.insert(path.clone(), Vec::new());
+            let now = open.clock.now_filetime();
+            objects.file_times.insert(path.clone(), [now; 3]);
         } else if matches!(disposition, 2 | 5) {
             *objects.files.get_mut(&path).expect("existing file") = Vec::new();
         }
@@ -604,8 +701,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let template = args.get(6, memory).map_err(ExitReason::MemoryFault)?;
         if args.r9 != 0
             || template != 0
-            || !matches!(flags, 0 | 0x80)
-            || access & !(READ | WRITE) != 0
+            || !matches!(flags & !(0x0200_0000), 0 | 0x80)
+            || access & !(READ | WRITE | WRITE_ATTRIBUTES) != 0
             || share & !3 != 0
         {
             return open_a.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, INVALID_HANDLE);
@@ -651,6 +748,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 return open_a.fail(cpu.gs_base, DISK_FULL, INVALID_HANDLE);
             }
             objects.files.insert(path.clone(), Vec::new());
+            let now = open_a.clock.now_filetime();
+            objects.file_times.insert(path.clone(), [now; 3]);
         } else if matches!(disposition, 2 | 5) {
             *objects.files.get_mut(&path).expect("existing file") = Vec::new();
         }
@@ -889,6 +988,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 name: VOLUME_GUID.to_owned(),
                 attributes: 0,
                 size: 0,
+                times: EPOCH_FILETIME3,
             }];
             objects.insert_handle(handle, GuestObject::Search(Search { entries, next: 1 }));
             Ok(handle)
@@ -1084,9 +1184,42 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             } else {
                 write_find_data
             };
-            match find_first(&find, memory, &path, args.rdx, write) {
+            match find_first(&find, memory, &path, args.rdx, write, 0) {
                 Ok(handle) => Ok(handle),
                 Err(error) => find.fail(cpu.gs_base, error, INVALID_HANDLE),
+            }
+        });
+    }
+
+    // `FindFirstFileEx` of either width: the information levels Standard and
+    // Basic share the one output layout, the search operations filter the
+    // snapshot by kind, and the flags are performance hints the answers do
+    // not depend on. An unknown level or operation refuses honestly rather
+    // than guessing.
+    for (symbol, narrow) in [("FindFirstFileExW", false), ("FindFirstFileExA", true)] {
+        let find_ex = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
+            let level = args.rdx as u32;
+            let search_op = args.r9 as u32;
+            if level > 1 || search_op > 2 {
+                return find_ex.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, INVALID_HANDLE);
+            }
+            let reader = if narrow {
+                read_guest_path_a
+            } else {
+                read_guest_path
+            };
+            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+                return find_ex.fail(cpu.gs_base, INVALID_NAME, INVALID_HANDLE);
+            };
+            let write = if narrow {
+                write_find_data_a
+            } else {
+                write_find_data
+            };
+            match find_first(&find_ex, memory, &path, args.r8, write, search_op) {
+                Ok(handle) => Ok(handle),
+                Err(error) => find_ex.fail(cpu.gs_base, error, INVALID_HANDLE),
             }
         });
     }
@@ -1756,7 +1889,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             super::crt::set_errno(memory, cpu.gs_base, super::crt_files::EINVAL)?;
             return Ok(u64::MAX);
         };
-        match find_first(&crt_first, memory, &path, args.rdx, crt_write_finddata64i32) {
+        match find_first(
+            &crt_first,
+            memory,
+            &path,
+            args.rdx,
+            crt_write_finddata64i32,
+            0,
+        ) {
             Ok(handle) => Ok(handle),
             Err(code) => {
                 let errno = match code {
@@ -2019,8 +2159,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
 
     // GetFileAttributesEx packs the attributes with the times and size.
-    // The drive tracks no times: they are zero, the 1601 epoch, documented
-    // rather than invented.
+    // The drive tracks no times: they answer the Unix epoch, a fixed valid
+    // time rather than an invented one.
     for (symbol, narrow) in [
         ("GetFileAttributesExW", false),
         ("GetFileAttributesExA", true),
@@ -2036,17 +2176,18 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             } else {
                 read_guest_path
             };
-            let Some(path) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
+            let Some(raw) = reader(memory, args.rcx).map_err(ExitReason::MemoryFault)? else {
                 return attributes_ex.fail(cpu.gs_base, INVALID_NAME, 0);
             };
-            if !path.split('\\').all(valid_component) {
+            let Some(path) = resolve_bare_path(&attributes_ex, &raw) else {
                 return attributes_ex.fail(cpu.gs_base, INVALID_NAME, 0);
-            }
+            };
             if args.r8 == 0 {
                 return attributes_ex.fail(cpu.gs_base, ERROR_NOACCESS, 0);
             }
             let objects = attributes_ex.objects.lock().expect("guest object state");
-            let (attributes, size) = if objects.directories.contains(&path) {
+            let (attributes, size) = if path.is_empty() || objects.directories.contains(&path) {
+                // The empty key is the volume root, which always is a directory.
                 (0x10u32, 0u64)
             } else if let Some(content) = objects.files.get(&path) {
                 (0x80u32, content.len() as u64)
@@ -2062,10 +2203,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             memory
                 .write_u32(args.r8, attributes)
                 .map_err(ExitReason::MemoryFault)?;
-            // Three zero FILETIMEs: creation, access, write.
-            for offset in [4u64, 12, 20] {
+            // Three FILETIMEs - creation, access, write - the times the
+            // drive tracks for the file, or the fixed Unix epoch for one it
+            // does not know.
+            let times = objects
+                .file_times
+                .get(&path)
+                .copied()
+                .unwrap_or(EPOCH_FILETIME3);
+            for (slot, offset) in [4u64, 12, 20].into_iter().enumerate() {
                 memory
-                    .write_u64(args.r8 + offset, 0)
+                    .write_u64(args.r8 + offset, times[slot])
                     .map_err(ExitReason::MemoryFault)?;
             }
             memory
@@ -2091,17 +2239,48 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Ok(0)
     });
 
-    // SetFileTime would write times the drive does not track: accepting
-    // would be a silent no-op, so it is honestly unsupported. SetSystemTime
-    // would move the injected clock for the one process, machinery the
-    // machine does not have.
-    for symbol in ["SetFileTime", "SetSystemTime"] {
-        let times = Arc::clone(state);
-        registry.register(KERNEL32, symbol, move |args, cpu, memory| {
-            let _ = (args, memory);
-            times.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
-        });
-    }
+    // SetFileTime writes the times the drive now tracks: each non-null
+    // FILETIME pointer replaces its slot of the file's creation, access and
+    // write times, exactly as Windows does. SetSystemTime would move the
+    // injected clock for the one process, machinery the machine does not
+    // have.
+    let set_file_time = Arc::clone(state);
+    registry.register(KERNEL32, "SetFileTime", move |args, cpu, memory| {
+        let mut objects = set_file_time.objects.lock().expect("guest object state");
+        let Some(GuestObject::File(file)) = objects.handles.get(&args.rcx) else {
+            return set_file_time.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
+        };
+        if file.open_access & (WRITE | WRITE_ATTRIBUTES) == 0 {
+            return set_file_time.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
+        }
+        let path = file.path.clone();
+        let mut times = objects
+            .file_times
+            .get(&path)
+            .copied()
+            .unwrap_or(EPOCH_FILETIME3);
+        let mut read_error = false;
+        for (index, pointer) in [args.rdx, args.r8, args.r9].into_iter().enumerate() {
+            if pointer == 0 {
+                continue;
+            }
+            match memory.read_u64(pointer) {
+                Ok(value) => times[index] = value,
+                Err(_) => read_error = true,
+            }
+        }
+        if read_error {
+            return set_file_time.fail(cpu.gs_base, ERROR_NOACCESS, 0);
+        }
+        objects.file_times.insert(path, times);
+        drop(objects);
+        Ok(1)
+    });
+    let set_system_time = Arc::clone(state);
+    registry.register(KERNEL32, "SetSystemTime", move |args, cpu, memory| {
+        let _ = (args, memory);
+        set_system_time.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0)
+    });
 
     // DeviceIoControl needs device drivers the machine does not have. The
     // handle validates - a bad handle is a bad handle - and every control
@@ -2318,7 +2497,12 @@ impl super::ObjectState {
         if self.readonly.contains(path) {
             return false;
         }
-        self.files.remove(path).is_some()
+        if self.files.remove(path).is_some() {
+            self.file_times.remove(path);
+            true
+        } else {
+            false
+        }
     }
 
     /// Give a file a new name. The caller has checked that `from` is a file
@@ -2326,6 +2510,9 @@ impl super::ObjectState {
     pub(super) fn drive_rename(&mut self, from: &str, to: &str) {
         if let Some(data) = self.files.remove(from) {
             self.files.insert(to.to_owned(), data);
+        }
+        if let Some(times) = self.file_times.remove(from) {
+            self.file_times.insert(to.to_owned(), times);
         }
     }
 

@@ -1135,6 +1135,24 @@ reports. Numa, cache and group relationships are not modeled yet:
 enumerating them alone answers zero entries. Nothing was compared with
 Windows.
 
+### Cryptography API: Next Generation random generator
+
+The standard `bcrypt.dll` registry supports the user-mode `RNG` algorithm.
+`BCryptOpenAlgorithmProvider` accepts the default provider or the exact
+`Microsoft Primitive Provider` name. Each guest registry holds up to 64
+live provider tokens. Closing a token invalidates it and frees one slot.
+Tokens cannot be used in another guest registry or after process exit.
+
+`BCryptGenRandom` accepts an open RNG token, the Windows 10 RNG pseudo-handle,
+or a null handle with the system-preferred flag. The Windows 8 and later
+entropy-in-buffer flag is accepted and ignored. A request can write up to
+65,536 bytes. The runtime validates the complete guest span before reading
+host entropy and publishes the bytes only after a successful read. A
+zero-length request with a nonnull pointer writes nothing. The three APIs
+return an NTSTATUS value and leave the caller's Win32 last error intact.
+Provider registration, kernel flags and other algorithms are outside the
+supported subset.
+
 ### WinHTTP synchronous cleartext subset
 
 `winhttp.dll` has a partial, synchronous object and cleartext HTTP/1.1
@@ -1145,6 +1163,16 @@ direct access. Named and automatic proxy modes and every nonzero session flag,
 including asynchronous operation, fail with `ERROR_NOT_SUPPORTED`. Proxy
 strings are not dereferenced in the accepted modes because Microsoft's
 documentation makes them inputs to the named-proxy mode.
+
+`WinHttpCrackUrl` splits canonical HTTP and HTTPS URLs without opening a
+connection. The Win64 `URL_COMPONENTS` record takes counted or terminated
+UTF-16 input up to 32,768 units. An output field can borrow a pointer into
+the input or copy a NUL-terminated component into a caller-provided buffer.
+The result reports the scheme, port and UTF-16 units written before the
+terminator. A zero extra-info length keeps query and fragment text in the
+path. An empty view returns a null pointer and zero units. Short, invalid or
+overlapping output spans fail before any output changes. The supported flags
+are zero and `ICU_REJECT_USERPWD`. Percent escapes remain intact.
 
 `WinHttpConnect` requires a live session handle of the correct type, a
 nonempty ASCII host or address string rather than a URL, a zero reserved field
@@ -1759,6 +1787,20 @@ contract, while any array cookie for a non-trivially destructible element type
 is emitted by the compiler. Those error paths are noreturn functions: Xenora
 implements no C++ exception machinery, so they stop the guest with the
 runtime-limit fault instead of returning.
+
+The scalar and array C++17 aligned allocation operators are also registered:
+`_ZnwySt11align_val_t`, `_ZnaySt11align_val_t`, `_ZdlPvSt11align_val_t` and
+`_ZdaPvSt11align_val_t`. The alignment must be a nonzero power of two. The
+shared guest heap places the block at that alignment when it is representable,
+including alignments above Xenora's 64 KiB allocation granularity, and release
+uses exact block ownership: null deletion is harmless, while an interior or
+foreign pointer faults instead of releasing memory. An invalid alignment makes
+allocation return null with `EINVAL`; invalid aligned deletion stops the guest
+without releasing the block. Sized aligned deletion, exception propagation and
+`std::bad_alloc` remain unimplemented. An original no-CRT C++ fixture exercises
+compiler-emitted scalar and array forms at O0/O1/O2/Os, distinct live blocks,
+zero-size blocks, null deletion and an invalid-interior control. Local
+verification only; no Windows comparison or independent acceptance is claimed.
 
 `libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
 thread-local storage. The compiler emits a descriptor holding one variable's

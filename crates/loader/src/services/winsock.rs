@@ -445,9 +445,12 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         ("shutdown", 22),
         ("socket", 23),
         ("gethostbyname", 52),
+        ("gethostbyaddr", 51),
         ("gethostname", 57),
         ("WSAGetLastError", 111),
+        ("WSASetLastError", 112),
         ("WSAStartup", 115),
+        ("WSACleanup", 116),
         ("__WSAFDIsSet", 151),
     ] {
         registry

@@ -9104,11 +9104,31 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "WSASetLastError",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#112"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
       "canonical_symbol": "WSAStartup",
       "kind": "ordinal",
       "library": "ws2_32.dll",
       "status": "partial",
       "symbol": "Ordinal#115"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "WSACleanup",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#116"
     },
     {
       "api_set": false,
@@ -9279,6 +9299,16 @@
       "library": "ws2_32.dll",
       "status": "partial",
       "symbol": "Ordinal#5"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "gethostbyaddr",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#51"
     },
     {
       "api_set": false,
@@ -18680,7 +18710,7 @@
     }
   ],
   "summary": {
-    "aliases": 934,
+    "aliases": 937,
     "api_set_aliases": 740,
     "canonical_services": 879,
     "data_import_services": 7,
@@ -18689,7 +18719,7 @@
     "implicit_status_services": 76,
     "libraries": 21,
     "manual_services": 583,
-    "ordinal_aliases": 28,
+    "ordinal_aliases": 31,
     "partial": 642,
     "structural_consistency_findings": 0,
     "stub": 0,

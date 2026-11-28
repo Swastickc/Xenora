@@ -15,7 +15,7 @@ use xenora_loader::pe::ParsedPe;
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 
 const MODULE: &str = "ws2_32.dll";
-const ORDINALS: [(&str, u16); 28] = [
+const ORDINALS: [(&str, u16); 31] = [
     ("accept", 1),
     ("bind", 2),
     ("closesocket", 3),
@@ -40,9 +40,12 @@ const ORDINALS: [(&str, u16); 28] = [
     ("shutdown", 22),
     ("socket", 23),
     ("gethostbyname", 52),
+    ("gethostbyaddr", 51),
     ("gethostname", 57),
     ("WSAGetLastError", 111),
+    ("WSASetLastError", 112),
     ("WSAStartup", 115),
+    ("WSACleanup", 116),
     ("__WSAFDIsSet", 151),
 ];
 
@@ -185,6 +188,13 @@ fn ordinal_iat_entries_bind_and_run_representative_socket_calls() {
     assert_eq!(memory.read_u32(SCRATCH + 0x2c0).unwrap(), 7);
     memory.write_bytes(SCRATCH + 0x2e0, b"localhost\0").unwrap();
     assert_ne!(call(&mut memory, 52, &[SCRATCH + 0x2e0]), 0);
+    memory
+        .write_bytes(SCRATCH + 0x2f0, &[127, 0, 0, 1])
+        .unwrap();
+    assert_ne!(call(&mut memory, 51, &[SCRATCH + 0x2f0, 4, 2]), 0);
+    assert_eq!(call(&mut memory, 112, &[42]), 0);
+    assert_eq!(call(&mut memory, 111, &[]), 42);
+    assert_eq!(call(&mut memory, 112, &[0]), 0);
     assert_eq!(call(&mut memory, 16, &[receiver, incoming, 16, 0]), 7);
     let mut received = [0; 7];
     memory.read_bytes(incoming, &mut received).unwrap();
@@ -192,6 +202,7 @@ fn ordinal_iat_entries_bind_and_run_representative_socket_calls() {
     assert_eq!(call(&mut memory, 3, &[sender]), 0);
     assert_eq!(call(&mut memory, 3, &[receiver]), 0);
     assert_eq!(call(&mut memory, 111, &[]), 0);
+    assert_eq!(call(&mut memory, 116, &[]), 0);
 }
 
 #[test]

@@ -51,6 +51,36 @@ int main(void) {
     check(mbsrtowcs(wide, &scan, 1, NULL) == 1 && scan[0] == 'y', "mbsrtowcs advances");
     check(mbsrtowcs(wide, &scan, 4, NULL) == 1 && scan == NULL, "mbsrtowcs consumes");
 
+    // Exact capacity leaves the terminator unconverted; a separate call
+    // copies it and clears the source. Sizing queries make no progress.
+    scan = "xy";
+    check(mbsrtowcs(wide, &scan, 2, NULL) == 2 && scan != NULL && scan[0] == 0,
+          "mbsrtowcs exact capacity");
+    check(mbsrtowcs(wide, &scan, 1, NULL) == 0 && scan == NULL && wide[0] == 0,
+          "mbsrtowcs separate terminator");
+    scan = "abc";
+    check(mbsrtowcs(NULL, &scan, 0, NULL) == 3 && scan != NULL && scan[0] == 'a',
+          "mbsrtowcs sizing query");
+
+    const wchar_t *wscan = L"xy";
+    check(wcsrtombs(text, &wscan, 2, NULL) == 2 && wscan != NULL && wscan[0] == 0,
+          "wcsrtombs exact capacity");
+    check(wcsrtombs(text, &wscan, 1, NULL) == 0 && wscan == NULL && text[0] == 0,
+          "wcsrtombs separate terminator");
+    wscan = L"abc";
+    check(wcsrtombs(NULL, &wscan, 0, NULL) == 3 && wscan != NULL && wscan[0] == L'a',
+          "wcsrtombs sizing query");
+
+    // An unrepresentable wide unit is left as the next input unit.
+    wchar_t bad[] = { L'a', 0x100, L'b', 0 };
+    wscan = bad;
+    check(wcsrtombs(text, &wscan, 8, NULL) == (size_t)-1 && wscan == bad + 1 && text[0] == 'a',
+          "wcsrtombs error progress");
+
+    // Converting a NUL byte stores a zero wide character in a real destination.
+    wide[0] = 0xffff;
+    check(mbtowc(wide, "", 1) == 0 && wide[0] == 0, "mbtowc stores NUL");
+
     // The classification is ASCII's.
     check(iswalpha(L'a') && !iswalpha(L'5'), "iswalpha");
     check(!iswalpha(0xE9), "no class above ASCII");

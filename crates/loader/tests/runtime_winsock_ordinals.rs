@@ -15,7 +15,7 @@ use xenora_loader::pe::ParsedPe;
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 
 const MODULE: &str = "ws2_32.dll";
-const ORDINALS: [(&str, u16); 31] = [
+const ORDINALS: [(&str, u16); 33] = [
     ("accept", 1),
     ("bind", 2),
     ("closesocket", 3),
@@ -40,6 +40,8 @@ const ORDINALS: [(&str, u16); 31] = [
     ("shutdown", 22),
     ("socket", 23),
     ("gethostbyname", 52),
+    ("getprotobyname", 53),
+    ("getprotobynumber", 54),
     ("gethostbyaddr", 51),
     ("gethostname", 57),
     ("WSAGetLastError", 111),
@@ -105,7 +107,7 @@ fn ordinal_lookup_aliases_the_named_implementations() {
             .resolve(MODULE, &ImportName::Name("Ordinal#7".to_owned()))
             .is_none()
     );
-    for ordinal in [24, 53] {
+    for ordinal in [24] {
         assert!(
             registry
                 .resolve(MODULE, &ImportName::Ordinal(ordinal))
@@ -207,7 +209,7 @@ fn ordinal_iat_entries_bind_and_run_representative_socket_calls() {
 
 #[test]
 fn ordinal_iat_entries_without_named_implementations_stay_missing() {
-    for ordinal in [24, 53] {
+    for ordinal in [24] {
         let (bytes, _) = build_ordinal_image(&[(MODULE, ordinal)]);
         assert!(
             matches!(bind_error(&bytes), ImportError::UnresolvedImport { .. }),

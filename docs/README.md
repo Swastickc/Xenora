@@ -42,9 +42,11 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Guest experiment guide](../experiments/x1/README.md) — Bounded x86-64 execution, executable loading, experimental services, native compute, and offscreen rendering.
 - [x86-64 instruction registry](cpu/instruction-registry.md) — Shared decoder, generated tables, semantics, native lowering and how to add a verified instruction form.
 - [Runtime service registry](runtime/registry.md), [typed service coverage](runtime/services.md) and the [live inventory](runtime/inventory.md) — Import resolution, typed Win64 adapters, manual registrations, aliases and status metadata.
+- [Package entry observation](runtime/package-entry-observer.md) — Root executable entry boundaries and the initial guest thread environment block.
 - [COM base services](runtime/com.md) — Partial apartment, GUID, task allocation and class lookup behavior, with explicit object-model limits.
 - [Guest threads](runtime/threads.md) — Deterministic scheduler, thread services, limits and tests.
 - [Guest graphics command path](runtime/guest-graphics.md) — The guest-callable graphics ABI, ordered resource destruction, and the path from a guest program to a rendered framebuffer.
+- [Packaged scene fixture](../fixtures/pe/package-scene/README.md) — Relocate a guest DLL, render two reference frames and export the guest file through the CLI.
 - [Bounded XAudio2 core](runtime/xaudio2.md) — Engine, mastering voice and source voice lifetimes, the source buffer queue, the sample clock and its events, the wave format rules, and what the model deliberately leaves out.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
 - [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.

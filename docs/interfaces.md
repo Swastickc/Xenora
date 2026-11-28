@@ -112,6 +112,11 @@ outcome, with the status, and runs neither the remaining callbacks nor the
 entry point; `StartupResult::tls_callbacks` counts the callbacks that finished.
 Any other stop inside a TLS callback is still a startup error.
 
+The executable's static TLS block follows the alignment in its PE TLS
+directory, up to 8 KiB. Startup rounds the address again when the block must
+move past the reserved thread environment block. An unspecified alignment
+keeps the default layout, and the reserved encoding is rejected.
+
 The engine recognises two return addresses, one under the entry point and one
 under a guest callback, before it executes anything at them. Both are in the
 4 KiB page at `imports::RETURN_SENTINEL_PAGE`, which startup reserves with no
@@ -606,6 +611,12 @@ together, so both names resolve in each.
 `crates/loader/tests/startup_info.rs` runs original C and C++ programs through
 them. Nothing was compared with Windows.
 
+The UCRT and `api-ms-win-crt-runtime-l1-1-0.dll` provide
+`_get_narrow_winmain_command_line`. It returns a pointer into the same
+allocation as `GetCommandLineA`, beginning after the executable name and
+its separator. The tail preserves the serialized quoting and UTF-8 bytes.
+It points at the terminating NUL when there are no arguments.
+
 ### XInput controller state
 
 `XInputGetState` resolves through the legacy DirectX redistributable
@@ -1064,6 +1075,11 @@ only one the emulator has, and its multibyte encoding is documented as
 the answer: every byte is the wide character of the same value,
 zero-extended, and a wide character above 255 fails the conversion with
 `EILSEQ`. The restartable forms have no shift state to keep and say so.
+They check output capacity before reading the next source unit: exact
+capacity leaves the next unit unconsumed, copying the terminator clears the
+source pointer, sizing queries make no source progress, and an
+unrepresentable wide unit is left as the next input unit. These progress
+rules follow [WG14 N2310 section 7.29.6.4](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n2310.pdf).
 The classification is the ASCII table, through `iswctype`'s bits — the
 form mingw-w64 actually imports, as the `isw*` macros inline to it. All
 `implemented`. The wide stream operations and the wide printf forms are
@@ -1135,6 +1151,24 @@ reports. Numa, cache and group relationships are not modeled yet:
 enumerating them alone answers zero entries. Nothing was compared with
 Windows.
 
+### Cryptography API: Next Generation random generator
+
+The standard `bcrypt.dll` registry supports the user-mode `RNG` algorithm.
+`BCryptOpenAlgorithmProvider` accepts the default provider or the exact
+`Microsoft Primitive Provider` name. Each guest registry holds up to 64
+live provider tokens. Closing a token invalidates it and frees one slot.
+Tokens cannot be used in another guest registry or after process exit.
+
+`BCryptGenRandom` accepts an open RNG token, the Windows 10 RNG pseudo-handle,
+or a null handle with the system-preferred flag. The Windows 8 and later
+entropy-in-buffer flag is accepted and ignored. A request can write up to
+65,536 bytes. The runtime validates the complete guest span before reading
+host entropy and publishes the bytes only after a successful read. A
+zero-length request with a nonnull pointer writes nothing. The three APIs
+return an NTSTATUS value and leave the caller's Win32 last error intact.
+Provider registration, kernel flags and other algorithms are outside the
+supported subset.
+
 ### WinHTTP synchronous cleartext subset
 
 `winhttp.dll` has a partial, synchronous object and cleartext HTTP/1.1
@@ -1145,6 +1179,16 @@ direct access. Named and automatic proxy modes and every nonzero session flag,
 including asynchronous operation, fail with `ERROR_NOT_SUPPORTED`. Proxy
 strings are not dereferenced in the accepted modes because Microsoft's
 documentation makes them inputs to the named-proxy mode.
+
+`WinHttpCrackUrl` splits canonical HTTP and HTTPS URLs without opening a
+connection. The Win64 `URL_COMPONENTS` record takes counted or terminated
+UTF-16 input up to 32,768 units. An output field can borrow a pointer into
+the input or copy a NUL-terminated component into a caller-provided buffer.
+The result reports the scheme, port and UTF-16 units written before the
+terminator. A zero extra-info length keeps query and fragment text in the
+path. An empty view returns a null pointer and zero units. Short, invalid or
+overlapping output spans fail before any output changes. The supported flags
+are zero and `ICU_REJECT_USERPWD`. Percent escapes remain intact.
 
 `WinHttpConnect` requires a live session handle of the correct type, a
 nonempty ASCII host or address string rather than a URL, a zero reserved field
@@ -1618,8 +1662,8 @@ initialization use `api-ms-win-core-synch-l1-2-0`; SLists use
 
 A C program's startup code configures the C runtime before `main`. Nine
 services record what it sets and return what their public documentation says.
-They are declared in the typed registry (`docs/runtime/services.md`), all
-`partial`, because nothing acts on a recorded value:
+The startup settings are declared in the typed registry
+(`docs/runtime/services.md`). Each has the scope shown below.
 
 | Service | Returns | Not provided |
 | --- | --- | --- |
@@ -1627,10 +1671,20 @@ They are declared in the typed registry (`docs/runtime/services.md`), all
 | `_set_new_mode(mode)` | the previous mode; -1 and `errno` `EINVAL` unless the mode is 0 or 1 | `malloc` never calls a new handler |
 | `_configthreadlocale(request)` | the setting before the call (1 enabled, 2 disabled; a program starts disabled); -1 and `errno` `EINVAL` unless the request is 0, 1 or 2 | There is no locale |
 | `__setusermatherr(handler)` | nothing | The handler is never called |
-| `_set_invalid_parameter_handler(handler)` | the previous handler, null at first | No service calls it for an invalid argument |
+| `_set_invalid_parameter_handler(handler)` | the previous global handler, null at first | The two explicit invalid-parameter entry points use the global handler. Thread-local overrides are unavailable |
 | `__p__fmode()`, `__p__commode()` | the address of the guest `int` `_fmode` (initially `_O_TEXT`, `0x4000`, as documented) or `_commode` (initially 0; its documentation gives no initial value) | Nothing reads either until stdio exists |
 | `signal(sig, handler)` | the previous handler, `SIG_DFL` at first; `SIG_ERR` and `errno` `EINVAL` for a signal other than `SIGINT`, `SIGILL`, `SIGFPE`, `SIGSEGV`, `SIGTERM` and `SIGABRT` | No signal is ever raised. One table serves the process |
 | `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | Called at the end of an unhandled search (see "Structured exceptions and CPU faults"); no debugger or error-mode handling |
+
+The UCRT and `api-ms-win-crt-runtime-l1-1-0.dll` provide
+`_invalid_parameter_noinfo` and `_invalid_parameter_noinfo_noreturn`. They
+call the installed global handler with five zero arguments. A returning
+handler lets the ordinary call return. The nonreturning entry point
+terminates even if its handler returns. Both terminate when no handler is
+installed. Xenora models termination with `STATUS_INVALID_CRUNTIME_PARAMETER`
+(`0xC0000417`). Existing CRT validations keep their service-specific error
+paths. Fast-fail exceptions, debugger dispatch and Watson reporting are
+outside this model.
 
 `_fmode` and `_commode` share one 8-byte block allocated from the process heap
 on the first call to either. `ServicesState::crt_app_type` and
@@ -1760,6 +1814,20 @@ is emitted by the compiler. Those error paths are noreturn functions: Xenora
 implements no C++ exception machinery, so they stop the guest with the
 runtime-limit fault instead of returning.
 
+The scalar and array C++17 aligned allocation operators are also registered:
+`_ZnwySt11align_val_t`, `_ZnaySt11align_val_t`, `_ZdlPvSt11align_val_t` and
+`_ZdaPvSt11align_val_t`. The alignment must be a nonzero power of two. The
+shared guest heap places the block at that alignment when it is representable,
+including alignments above Xenora's 64 KiB allocation granularity, and release
+uses exact block ownership: null deletion is harmless, while an interior or
+foreign pointer faults instead of releasing memory. An invalid alignment makes
+allocation return null with `EINVAL`; invalid aligned deletion stops the guest
+without releasing the block. Sized aligned deletion, exception propagation and
+`std::bad_alloc` remain unimplemented. An original no-CRT C++ fixture exercises
+compiler-emitted scalar and array forms at O0/O1/O2/Os, distinct live blocks,
+zero-size blocks, null deletion and an invalid-interior control. Local
+verification only; no Windows comparison or independent acceptance is claimed.
+
 `libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
 thread-local storage. The compiler emits a descriptor holding one variable's
 size and alignment and passes the descriptor's address; the runtime returns the
@@ -1874,6 +1942,18 @@ failure, 2 a refused command line), the last `trace stage=` it printed, and
 up to 256 KiB of each output stream. `XENORA_CLI` names another worker, for
 `swift run`.
 
+The optional guest file export takes an absolute path on the synthetic C:
+drive and a new host filename chosen in the Run Program panel. The app passes
+both to `--export-guest-file` before the guest arguments. The CLI exports at
+most 16 MiB from a successful run and preserves any existing destination.
+The Run panel shows export errors in the worker output.
+
+To exercise this path with the original file-writing guest, build it with
+`sh tests/compat_fixtures/build-guest-file-export.sh "$PWD/artifacts/app-guest-export"`,
+then set `XENORA_GUEST_FILE_EXPORT_FIXTURE="$PWD/artifacts/app-guest-export/guest-file-export.exe"`
+and `XENORA_CLI="$PWD/build/Xenora.app/Contents/MacOS/xenora-cli"` when running
+`scripts/build-app.sh --test`.
+
 The Metal HUD switch (View > Show Metal HUD, Shift-Command-H, or the Display
 section) is off by default and is stored in the app's defaults as
 `MetalHUDEnabled`. It overlays the Metal device, frame size, frame counters
@@ -1915,14 +1995,12 @@ tests. Nothing here was compared with Windows or with an Xbox console.
 
 ### The registry is honestly empty
 
-The advapi32 registry services - `RegOpenKeyExA/W`, `RegQueryValueExA/W`
-and `RegCloseKey` - model the machine's registry as empty. The predefined
-roots open because they always exist; every subkey and every value is
-absent with ERROR_FILE_NOT_FOUND, which is what a fresh Windows answers
-for the keys a program would probe. Programs that need registry values to
-exist are not supported. This is implemented behaviour verified through
-the unit tests. Nothing here was compared with Windows or with an Xbox
-console.
+Advapi32 provides `RegOpenKeyW`, `RegOpenKeyExA/W`, `RegQueryValueExA/W`
+and `RegCloseKey` against the synthetic guest registry. A null or empty
+subkey name reopens a predefined root and returns the same handle.
+Every named subkey and value is absent and reports `ERROR_FILE_NOT_FOUND`.
+The registry is independent of the host. A guest PE test verifies the
+three-argument `RegOpenKeyW` entry point alongside the extended forms.
 
 ### Memory mappings and process creation
 
@@ -1937,13 +2015,17 @@ process information structure, because the guest is the only process.
 This is implemented behaviour verified through the unit tests. Nothing
 here was compared with Windows or with an Xbox console.
 
-## XNetworking connectivity hint
+## XNetworking connectivity, statistics and configuration queries
 
 `xgameruntime.dll!XNetworkingGetConnectivityHint` writes the documented 16-byte `XNetworkingConnectivityHint`: three little-endian 32-bit fields followed by four one-byte boolean fields. Xenora reports `networkInitialized` as true because its bounded networking facility exists, `connectivityLevel` as `None` (1), `connectivityCost` as `Unknown` (0), and `ianaInterfaceType` as IANA `softwareLoopback` (24). The data-limit and roaming booleans are false. This is the honest state of the current machine: it has process-local loopback sockets but no external network route, DNS, proxy, TLS or Internet connectivity truth. The query must not be read as evidence that a title endpoint is reachable.
 
-A null, unmapped or partially unwritable output pointer returns `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)` and writes no success result. Registration, change callbacks, security-information queries and configuration settings are not implemented. This is locally verified behavior only; it has not been compared with Windows or Xbox hardware.
+`xgameruntime.dll!XNetworkingQueryStatistics` accepts the three documented TCP queued-receive-buffer statistic type values 0, 1 and 2. Each writes exactly the documented 40-byte `XNetworkingTcpQueuedReceivedBufferUsageStatistics` structure: current, peak, total, configured-maximum-drop and any-failure-drop byte counters. Xenora has no kernel-mode TCP queued-receive-buffer allocator, so all five counters are honestly zero. These counters do not describe the process-local loopback stream FIFOs in Xenora's Winsock model and do not imply external network capability. Bytes beyond the exact 40-byte substructure are preserved, as the public union contract requires.
 
-Sources: [XNetworkingGetConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkinggetconnectivityhint), [XNetworkingConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingconnectivityhint), [XNetworkingConnectivityLevelHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconnectivitylevelhint), and [network initialization and connectivity](https://docs.xbox.com/build/console-features/networking/initialization-connectivity-networking).
+`xgameruntime.dll!XNetworkingQueryConfigurationSetting` accepts the three documented maximum TCP queued-receive-buffer setting values 0, 1 and 2 and writes one little-endian `uint64_t`. Zero is the exact limit of this machine rather than the documented Xbox default, because Xenora has no configurable kernel-mode TCP queued-receive-buffer allocator. `XNetworkingSetConfigurationSetting` is absent rather than pretending that a write can reshape the network implementation.
+
+A null, unmapped or partially unwritable output pointer returns `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)` and writes no success result. Unknown statistic or configuration values return the same invalid-argument `HRESULT` without modifying the output. Registration, change callbacks, security-information queries and configuration mutation are not implemented. This is locally verified behavior only; it has not been compared with Windows or Xbox hardware.
+
+Sources: [XNetworkingGetConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkinggetconnectivityhint), [XNetworkingConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingconnectivityhint), [XNetworkingConnectivityLevelHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconnectivitylevelhint), [XNetworkingQueryStatistics](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkingquerystatistics), [XNetworkingStatisticsType](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingstatisticstype), [XNetworkingTcpQueuedReceivedBufferUsageStatistics](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingtcpqueuedreceivedbufferusagestatistics), [XNetworkingQueryConfigurationSetting](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkingqueryconfigurationsetting), [XNetworkingConfigurationSetting](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconfigurationsetting), and [network initialization and connectivity](https://docs.xbox.com/build/console-features/networking/initialization-connectivity-networking).
 
 ## Opt-in synthetic Gaming Runtime lifecycle
 

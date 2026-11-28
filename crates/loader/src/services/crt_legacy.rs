@@ -3,6 +3,7 @@
 //! creation mask state, the process identifier, and the legacy CRT's
 //! documented multiplicative congruential `rand`.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crate::imports::ImportRegistry;
@@ -24,10 +25,32 @@ fn fault(error: MemoryError) -> crate::cpu::ExitReason {
 
 /// The legacy CRT's `rand` state. Microsoft documents the recurrence in the
 /// CRT itself — `hold = hold * 214013 + 2531011` — and the result is bits 16
-/// to 30 of it, as the widely published reference sequence for seed 1 shows:
-/// 41, 18467, 6334, 26500, 19169. The state is the process's, as the legacy
-/// CRT keeps it, and starts at the same value as an unseeded process: 1.
-struct RandState(Mutex<u64>);
+/// to 30 of it, as the reference sequence for seed 1 shows:
+/// 41, 18467, 6334, 26500, 19169. The calling thread starts at seed 1.
+#[derive(Default)]
+struct RandState(Mutex<BTreeMap<u32, u32>>);
+
+impl RandState {
+    fn update(
+        &self,
+        state: &ServicesState,
+        teb: u64,
+        operation: impl FnOnce(&mut u32) -> u64,
+    ) -> u64 {
+        let threads = state.threads.lock().expect("guest thread table");
+        // Without the scheduler, only the initial guest thread exists.
+        let id = threads.id_of(teb).unwrap_or(state.thread_id);
+        let mut seeds = self.0.lock().expect("legacy rand state");
+        if !seeds.contains_key(&id) {
+            // A worker can inherit a TEB address but never a thread ID.
+            // Drop retired workers when a new caller first needs a seed.
+            seeds.retain(|known, _| {
+                *known == state.thread_id || threads.threads.contains_key(known)
+            });
+        }
+        operation(seeds.entry(id).or_insert(1))
+    }
+}
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     // `__iob_func` answers the legacy CRT's array of three `FILE` objects,
@@ -75,20 +98,21 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     let pid = state.process_id;
     registry.register(MSVCRT, "_getpid", move |_, _, _| Ok(u64::from(pid)));
 
-    // `rand` and `srand`: the documented recurrence above.
-    let rand = Arc::new(RandState(Mutex::new(1)));
-    let generator = Arc::clone(&rand);
-    registry.register(MSVCRT, "rand", move |_, _, _| {
-        let mut hold = generator.0.lock().expect("rand state");
-        // The CRT's own error checking does not apply to rand, but the state
-        // must never fault the process; the multiply cannot overflow the
-        // wrapping arithmetic the documentation describes.
-        *hold = hold.wrapping_mul(214_013).wrapping_add(2_531_011);
-        Ok((*hold >> 16) & 0x7FFF)
+    let generator = Arc::new(RandState::default());
+    let rand = Arc::clone(&generator);
+    let rand_state = Arc::clone(state);
+    registry.register(MSVCRT, "rand", move |_, cpu, _| {
+        Ok(rand.update(&rand_state, cpu.gs_base, |seed| {
+            *seed = seed.wrapping_mul(214_013).wrapping_add(2_531_011);
+            u64::from((*seed >> 16) & 0x7FFF)
+        }))
     });
-    let generator = Arc::clone(&rand);
-    registry.register(MSVCRT, "srand", move |args, _, _| {
-        *generator.0.lock().expect("rand state") = args.rcx;
-        Ok(0)
+
+    let srand_state = Arc::clone(state);
+    registry.register(MSVCRT, "srand", move |args, cpu, _| {
+        Ok(generator.update(&srand_state, cpu.gs_base, |seed| {
+            *seed = args.rcx as u32;
+            0
+        }))
     });
 }

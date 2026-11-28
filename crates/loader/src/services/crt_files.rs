@@ -159,21 +159,16 @@ enum Descriptor {
     /// `_dup` or `_dup2` made it: the state is another descriptor's, as the
     /// CRT shares the file position across the duplication.
     Alias(u32),
-    /// The read end of an anonymous pipe, by the pipe's identifier.
-    PipeRead(u32),
-    /// The write end of one.
-    PipeWrite(u32),
-    /// `_open_osfhandle` made it: the state is a kernel object's, as the
-    /// CRT takes ownership of the handle it wraps.
+    /// `_open_osfhandle` made it - and `_pipe` makes both of its ends this
+    /// way: the state is a kernel object's, as the CRT takes ownership of
+    /// the handle it wraps.
     Handle(u64),
-}
-
-/// An anonymous pipe's shared state: the bytes written and not yet read,
-/// and whether each end is still open. The end of the pipe is only end of
-/// file once the write end has closed.
-pub(super) struct PipeState {
-    buffer: std::collections::VecDeque<u8>,
-    write_open: bool,
+    /// `_dup` or `_dup2` made it from one of the three standard descriptors:
+    /// the state is the standard stream's, which the runtime keeps outside
+    /// the table - so the entry only records which one it is a copy of.
+    /// Closing it removes the copy alone; the stream answers for it exactly
+    /// as it answers for the original.
+    Standard(u32),
 }
 
 #[derive(Default)]
@@ -184,14 +179,43 @@ pub(super) struct FileStreams {
     temporary_counter: u32,
     /// Open file descriptors by their number, from 3.
     descriptors: BTreeMap<u32, Descriptor>,
-    /// Anonymous pipes `_pipe` creates, by identifier.
-    pipes: BTreeMap<u32, PipeState>,
-    pipe_counter: u32,
 }
 
 impl FileStreams {
     pub(super) fn contains(&self, file: u64) -> bool {
         self.open.contains_key(&file)
+    }
+
+    /// The descriptor wiring a spawned child inherits, as the CRT hands the
+    /// parent's descriptors to a `_spawnve` child: every descriptor copies,
+    /// the pipes share their one state across the machine's processes, and
+    /// the `FILE` streams do not carry - they are objects of the parent's
+    /// own address space, which the child does not have.
+    pub(super) fn inherit_for_spawn(&self) -> FileStreams {
+        // Kernel-backed and positional descriptors carry: pipes share the
+        // one state, wrapped handles name machine-wide objects, aliases and
+        // standard wirings are numbers. The file streams a descriptor owns
+        // do not: their positions are the parent's own, and sharing them
+        // across processes is not modelled, so the child starts without
+        // them rather than with positions that would diverge.
+        let descriptors = self
+            .descriptors
+            .iter()
+            .filter_map(|(fd, descriptor)| {
+                let inherited = match descriptor {
+                    Descriptor::Alias(other) => Descriptor::Alias(*other),
+                    Descriptor::Handle(handle) => Descriptor::Handle(*handle),
+                    Descriptor::Standard(fd) => Descriptor::Standard(*fd),
+                    Descriptor::Owned(_) | Descriptor::Shared(_) => return None,
+                };
+                Some((*fd, inherited))
+            })
+            .collect();
+        FileStreams {
+            open: BTreeMap::new(),
+            temporary_counter: self.temporary_counter,
+            descriptors,
+        }
     }
 
     /// `fopen`. Returns the guest address of a new `FILE` object, or the
@@ -702,22 +726,52 @@ impl FileStreams {
         Ok(file)
     }
 
-    /// The pipe identifier and whether it is the write end, for a descriptor
-    /// of one — so the service layer routes the operation before the stream
-    /// paths, which pipes are no part of.
-    pub(super) fn pipe_end(&self, fd: u32) -> Result<Option<(u32, bool)>, u32> {
-        let fd = self.descriptor_terminal(fd)?;
-        Ok(match self.descriptors.get(&fd) {
-            Some(Descriptor::PipeRead(id)) => Some((*id, false)),
-            Some(Descriptor::PipeWrite(id)) => Some((*id, true)),
-            _ => None,
-        })
+    /// The inherited pipe references count, as a spawned child's copies are
+    /// references of its own: the ends they name stay alive until the child
+    /// closes or exits, exactly as a Windows handle inheritance adds to the
+    /// kernel object's count.
+    pub(super) fn count_inherited_pipe_references(&self, drive: &mut ObjectState) {
+        for descriptor in self.descriptors.values() {
+            if let Descriptor::Handle(handle) = descriptor
+                && matches!(drive.handles.get(handle), Some(GuestObject::Pipe { .. }))
+            {
+                drive.pipe_ref_add(*handle);
+            }
+        }
+    }
+
+    /// Process exit closes every descriptor, as the CRT closes the dead
+    /// process's table: the pipe write ends the child held stop counting, so
+    /// a reader sees the write side close as it would once the writer died.
+    /// The object table is machine-wide, so the handles themselves stay for
+    /// the parent's own copies - the parent closes those itself, as the shell
+    /// does. Everything else the descriptors owned dies with the child's own
+    /// memory and needs no work.
+    pub(super) fn close_pipe_ends_for_exit(&mut self, drive: &mut ObjectState) {
+        let descriptors = std::mem::take(&mut self.descriptors);
+        for (_, descriptor) in descriptors {
+            if let Descriptor::Handle(handle) = descriptor
+                && matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. }))
+                && drive.pipe_ref_release(handle)
+            {
+                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
+                    && *write
+                {
+                    state.lock().expect("pipe state").write_open = false;
+                }
+                drive.handles.remove(&handle);
+            }
+        }
     }
 
     /// `_pipe`: the read end and the write end, sharing the one queue as
     /// the CRT's anonymous pipe shares it. The size and mode arguments do
     /// not act: the queue grows as the writes ask.
-    pub(super) fn pipe_create(&mut self) -> Result<(u32, u32), u32> {
+    /// `_pipe` is `CreatePipe` plus two `_open_osfhandle` wrappings, as the
+    /// CRT builds its pipe on the kernel's: the ends are kernel pipe objects
+    /// in the machine-wide object table, so a spawned child inherits them as
+    /// the same handles and `_get_osfhandle` answers them for `poll`.
+    pub(super) fn pipe_create(&mut self, drive: &mut ObjectState) -> Result<(u32, u32), u32> {
         let mut room = 0;
         for fd in 3..MAX_DESCRIPTORS {
             if !self.descriptors.contains_key(&fd) {
@@ -730,54 +784,95 @@ impl FileStreams {
         if room < 2 {
             return Err(EMFILE);
         }
-        self.pipe_counter += 1;
-        let id = self.pipe_counter;
-        self.pipes.insert(
-            id,
-            PipeState {
-                buffer: std::collections::VecDeque::new(),
+        let shared =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::services::files::PipeState {
                 write_open: true,
+                ..crate::services::files::PipeState::default()
+            }));
+        let Some(read_handle) = drive.next_handle() else {
+            return Err(EMFILE);
+        };
+        drive.insert_handle(
+            read_handle,
+            GuestObject::Pipe {
+                state: std::sync::Arc::clone(&shared),
+                write: false,
             },
         );
-        let read = self.insert_descriptor(Descriptor::PipeRead(id))?;
-        let write = self.insert_descriptor(Descriptor::PipeWrite(id))?;
+        let Some(write_handle) = drive.next_handle() else {
+            drive.handles.remove(&read_handle);
+            return Err(EMFILE);
+        };
+        drive.insert_handle(
+            write_handle,
+            GuestObject::Pipe {
+                state: shared,
+                write: true,
+            },
+        );
+        drive.pipe_ref_add(read_handle);
+        drive.pipe_ref_add(write_handle);
+        let read = match self.insert_descriptor(Descriptor::Handle(read_handle)) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                drive.pipe_ref_release(read_handle);
+                drive.pipe_ref_release(write_handle);
+                drive.handles.remove(&read_handle);
+                drive.handles.remove(&write_handle);
+                return Err(errno);
+            }
+        };
+        let write = match self.insert_descriptor(Descriptor::Handle(write_handle)) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                self.descriptors.remove(&read);
+                drive.pipe_ref_release(read_handle);
+                drive.pipe_ref_release(write_handle);
+                drive.handles.remove(&read_handle);
+                drive.handles.remove(&write_handle);
+                return Err(errno);
+            }
+        };
         Ok((read, write))
-    }
-
-    /// Read end bytes: what the queue holds, up to the limit. The empty
-    /// queue is end of file once the write end closed, and `Ok(None)` while
-    /// it has not — a read there would block, which the hosted runtime does
-    /// not model.
-    pub(super) fn pipe_read(&mut self, id: u32, limit: usize) -> Result<Option<Vec<u8>>, u32> {
-        let pipe = self.pipes.get_mut(&id).ok_or(EBADF)?;
-        let mut bytes = Vec::new();
-        while bytes.len() < limit {
-            let Some(byte) = pipe.buffer.pop_front() else {
-                break;
-            };
-            bytes.push(byte);
-        }
-        if bytes.is_empty() && pipe.write_open {
-            return Ok(None);
-        }
-        Ok(Some(bytes))
-    }
-
-    /// Write end bytes: the whole write lands in the queue.
-    pub(super) fn pipe_write(&mut self, id: u32, bytes: &[u8]) -> Result<usize, u32> {
-        let pipe = self.pipes.get_mut(&id).ok_or(EBADF)?;
-        pipe.buffer.extend(bytes.iter().copied());
-        Ok(bytes.len())
     }
 
     /// `_dup`: the lowest free descriptor sharing the file position, as the
     /// CRT's duplication shares it.
     pub(super) fn descriptor_duplicate(&mut self, fd: u32) -> Result<u32, u32> {
-        self.descriptor_terminal(fd)?;
+        let standard = match self.descriptor_terminal(fd) {
+            Ok(_) => None,
+            Err(errno) if fd < 3 && errno == EBADF => Some(fd),
+            Err(errno) => return Err(errno),
+        };
         if !self.has_descriptor_room() {
             return Err(EMFILE);
         }
-        self.insert_descriptor(Descriptor::Alias(fd))
+        match standard {
+            // One of the three the table does not carry: the copy is the
+            // standard stream's entry of its own, as the CRT's table holds
+            // the standard handles in the same entries everything copies.
+            Some(n) => self.insert_descriptor(Descriptor::Standard(n)),
+            None => {
+                // A duplication of a standard copy is another copy of the
+                // stream, not an alias of the first copy: the CRT's entries
+                // are independent, and closing one leaves the others open.
+                if let Some(n) = self.standard_terminal(fd) {
+                    return self.insert_descriptor(Descriptor::Standard(n));
+                }
+                self.insert_descriptor(Descriptor::Alias(fd))
+            }
+        }
+    }
+
+    /// The standard descriptor a duplication chain ends at, for the service
+    /// layer to route back to the standard stream: the streams live outside
+    /// this table, so only the layer owning them can answer for them.
+    pub(super) fn standard_terminal(&self, fd: u32) -> Option<u32> {
+        let terminal = self.descriptor_terminal(fd).ok()?;
+        match self.descriptors.get(&terminal) {
+            Some(Descriptor::Standard(n)) => Some(*n),
+            _ => None,
+        }
     }
 
     /// `_dup2`: `target` becomes the duplication, closed first as the CRT
@@ -789,7 +884,9 @@ impl FileStreams {
         fd: u32,
         target: u32,
     ) -> Result<u32, u32> {
-        self.descriptor_terminal(fd)?;
+        if self.descriptor_terminal(fd).is_err() && fd >= 3 {
+            return Err(EBADF);
+        }
         if target >= MAX_DESCRIPTORS {
             return Err(EBADF);
         }
@@ -799,7 +896,28 @@ impl FileStreams {
         if self.descriptors.contains_key(&target) {
             self.descriptor_close(memory, drive, target);
         }
-        self.descriptors.insert(target, Descriptor::Alias(fd));
+        if let Some(n) = self.standard_terminal(fd) {
+            // A copy of a copy is the stream's own entry, independent of
+            // the one it was made from.
+            self.descriptors.insert(target, Descriptor::Standard(n));
+        } else if let Some(Descriptor::Handle(handle)) = self.descriptors.get(&fd) {
+            // A wrapped kernel handle carries no position: the copy is the
+            // same object, as the CRT's duplication shares it directly.
+            // Copying the variant rather than aliasing keeps the object
+            // alive when the shell closes the original descriptor, which
+            // its pipe redirection always does.
+            let handle = *handle;
+            if matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. })) {
+                drive.pipe_ref_add(handle);
+            }
+            self.descriptors.insert(target, Descriptor::Handle(handle));
+        } else if self.descriptors.contains_key(&fd) {
+            self.descriptors.insert(target, Descriptor::Alias(fd));
+        } else {
+            // The terminal check above passed only for the standard
+            // descriptors the table does not carry.
+            self.descriptors.insert(target, Descriptor::Standard(fd));
+        }
         Ok(target)
     }
 
@@ -1146,42 +1264,34 @@ impl FileStreams {
             }
             Some(Descriptor::Handle(handle)) => {
                 // The CRT owns the handle now: closing the descriptor closes
-                // it, and a write end closing marks the pipe's end of stream,
-                // as CloseHandle does.
-                if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
-                    && *write
-                {
-                    state.lock().expect("pipe state").write_open = false;
+                // it once no copy shares it - a duplication names the same
+                // kernel handle, as the CRT's duplication shares it - and a
+                // write end closing marks the pipe's end of stream, as
+                // CloseHandle does.
+                if matches!(drive.handles.get(&handle), Some(GuestObject::Pipe { .. })) {
+                    // A pipe end dies when its last reference anywhere
+                    // closes - the machine-wide count stands in for the
+                    // per-process handle tables, since a spawned child names
+                    // the same handle through its own inherited descriptor.
+                    // The write end closing for good is the pipe's end of
+                    // stream, as CloseHandle makes it.
+                    if drive.pipe_ref_release(handle) {
+                        if let Some(GuestObject::Pipe { state, write }) = drive.handles.get(&handle)
+                            && *write
+                        {
+                            state.lock().expect("pipe state").write_open = false;
+                        }
+                        drive.handles.remove(&handle);
+                    }
+                    return true;
                 }
                 drive.handles.remove(&handle);
                 true
             }
             Some(Descriptor::Alias(_)) => true,
-            Some(Descriptor::PipeRead(id)) => {
-                // The pipe itself goes once nothing references it: no other
-                // descriptor of it, and the write end closed.
-                if !self
-                    .descriptors
-                    .values()
-                    .any(|entry| matches!(entry, Descriptor::PipeWrite(other) | Descriptor::PipeRead(other) if *other == id))
-                {
-                    self.pipes.remove(&id);
-                }
-                true
-            }
-            Some(Descriptor::PipeWrite(id)) => {
-                if let Some(pipe) = self.pipes.get_mut(&id) {
-                    pipe.write_open = false;
-                }
-                if !self
-                    .descriptors
-                    .values()
-                    .any(|entry| matches!(entry, Descriptor::PipeWrite(other) | Descriptor::PipeRead(other) if *other == id))
-                {
-                    self.pipes.remove(&id);
-                }
-                true
-            }
+            // The copy alone closes: the standard stream is not the
+            // table's to destroy.
+            Some(Descriptor::Standard(_)) => true,
             Some(Descriptor::Shared(file)) => {
                 self.open.remove(&file);
                 memory.release_heap_allocation(PROCESS_HEAP, file);
@@ -1292,7 +1402,8 @@ const FILE_WRITE: u32 = 0x4000_0000;
 /// the only thread that could fill it — so the read answers what is there,
 /// and the end-of-file emptiness is honest only once the write end closes.
 fn handle_read(drive: &super::ObjectState, handle: u64, limit: usize) -> Result<Vec<u8>, u32> {
-    match drive.handles.get(&handle) {
+    let found = drive.handles.get(&handle);
+    match found {
         Some(GuestObject::Pipe { state, write }) => {
             if *write {
                 return Err(EACCES);

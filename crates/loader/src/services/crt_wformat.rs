@@ -15,7 +15,7 @@
 
 use crate::memory::MemoryError;
 use crate::services::crt_format::{
-    Flags, Floats, FormatError, Size, Spec, bounded, int, integer, pad,
+    Flags, Floats, FormatError, MAX_OUTPUT, Size, Spec, bounded, int, integer, pad,
 };
 
 /// What the wide conversions need beyond the narrow ones: the argument
@@ -262,27 +262,27 @@ fn string(
     slot: u64,
     wide: bool,
 ) -> Result<(), FormatError> {
-    let limit = spec.precision.unwrap_or(usize::MAX);
+    // With no precision, read at most one unit beyond the output cap to
+    // distinguish the largest valid string from a string we cannot render.
+    // An explicit precision is the read limit, even without a terminator.
+    let limit = spec.precision.unwrap_or(MAX_OUTPUT + 1);
     let mut units = if slot == 0 {
         // "(null)", as the narrow engine prints it.
         "(null)".encode_utf16().collect::<Vec<u16>>()
     } else if wide {
         source
-            .wide_string(slot, limit.min(MAX_STRING))
+            .wide_string(slot, limit)
             .map_err(FormatError::Fault)?
     } else {
         source
-            .narrow_string(slot, limit.min(MAX_STRING))
+            .narrow_string(slot, limit)
             .map_err(FormatError::Fault)?
-            .iter()
-            .map(|byte| u16::from(*byte))
+            .into_iter()
+            .map(u16::from)
             .collect()
     };
-    units.truncate(limit.min(MAX_STRING));
+    units.truncate(limit);
+    bounded(out.len() + units.len().max(spec.width))?;
     pad_units(out, spec, &units);
     Ok(())
 }
-
-/// The most of a string one conversion reads, as the narrow engine bounds
-/// its own reads.
-const MAX_STRING: usize = 1 << 20;

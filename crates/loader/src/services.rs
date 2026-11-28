@@ -221,6 +221,11 @@ struct ObjectState {
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
+    /// Per-file times as Windows FILETIMEs: creation, access, write. An
+    /// entry appears when the file does and moves with it; a file without
+    /// one reports the fixed Unix epoch, the answer of a drive that does
+    /// not know.
+    file_times: BTreeMap<String, [u64; 3]>,
     directories: BTreeSet<String>,
     /// Locked byte ranges per file path, as (owning handle, offset, length, exclusive).
     locks: BTreeMap<String, Vec<(u64, u64, u64, bool)>>,

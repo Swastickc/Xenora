@@ -9437,6 +9437,20 @@
         "library": "kernel32.dll",
         "source": "manual",
         "status": "implemented",
+        "symbol": "FindFirstFileExA"
+      },
+      {
+        "kind": "name",
+        "library": "kernel32.dll",
+        "source": "manual",
+        "status": "implemented",
+        "symbol": "FindFirstFileExW"
+      },
+      {
+        "kind": "name",
+        "library": "kernel32.dll",
+        "source": "manual",
+        "status": "implemented",
         "symbol": "GetCompressedFileSizeA"
       },
       {
@@ -10867,6 +10881,26 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "FindFirstFileA"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": false,
+      "symbol": "FindFirstFileExA"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": false,
+      "symbol": "FindFirstFileExW"
     },
     {
       "data_import": false,

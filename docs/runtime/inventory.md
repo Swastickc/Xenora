@@ -39,7 +39,7 @@ independent acceptance or compatibility claims.
 | Aliases of every kind | 910 |
 | API-set aliases | 744 |
 | Ordinal aliases | 0 |
-| Statuses never explicitly set | 76 |
+| Statuses never explicitly set | 78 |
 | Duplicate canonical registrations | 0 |
 | Structural consistency findings | 0 |
 
@@ -51,7 +51,7 @@ independent acceptance or compatibility claims.
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
 | <code>bcrypt.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
-| <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 276 | 0 | 26 |
+| <code>kernel32.dll</code> | <code>windows-system</code> | 318 | 59 | 259 | 0 | 42 | 276 | 0 | 28 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
 | <code>libstdc++-6.dll</code> | <code>c++-support</code> | 18 | 3 | 15 | 0 | 15 | 3 | 0 | 0 |
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
@@ -99,6 +99,8 @@ before analysis; structurally valid discrepancies remain visible here.
 | --- | --- | --- |
 | <code>kernel32.dll!CreateFileA (name)</code> | implemented | manual |
 | <code>kernel32.dll!CreateToolhelp32Snapshot (name)</code> | implemented | manual |
+| <code>kernel32.dll!FindFirstFileExA (name)</code> | implemented | manual |
+| <code>kernel32.dll!FindFirstFileExW (name)</code> | implemented | manual |
 | <code>kernel32.dll!GetCompressedFileSizeA (name)</code> | implemented | manual |
 | <code>kernel32.dll!GetDiskFreeSpaceExA (name)</code> | implemented | manual |
 | <code>kernel32.dll!GetDiskFreeSpaceExW (name)</code> | implemented | manual |

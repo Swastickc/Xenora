@@ -155,7 +155,14 @@ pub(super) fn stage_copy(
     state: &ServicesState,
     guest_path: &str,
 ) -> io::Result<()> {
-    let contents = state.file_contents(guest_path).ok_or_else(|| {
+    // One leading separator anchors a guest path at the synthetic C: root.
+    // Preserve two leading separators so the lookup cannot treat UNC paths as local files.
+    let anchored = guest_path
+        .strip_prefix(['\\', '/'])
+        .filter(|rest| !rest.starts_with(['\\', '/']))
+        .map(|_| format!("C:{guest_path}"));
+    let lookup_path = anchored.as_deref().unwrap_or(guest_path);
+    let contents = state.file_contents(lookup_path).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             format!("guest file {guest_path:?} does not exist"),

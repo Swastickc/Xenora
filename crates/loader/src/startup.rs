@@ -10,7 +10,10 @@ use crate::{
     execute_tls_callbacks, parse_tls_directory,
 };
 
+/// Minimum startup stack and the fixed stack used by explicit packages.
 pub(crate) const STACK_SIZE: usize = 64 * 1024;
+const STACK_ALLOCATION_GRANULARITY: u64 = 64 * 1024;
+const MAX_HOSTED_STACK_RESERVE: u64 = 8 * 1024 * 1024;
 const JIT_CAPACITY: usize = 1024 * 1024;
 const RETURN_SENTINEL_PAGE_SIZE: usize = 0x1000;
 /// The TEB is placed this far above the TLS base and spans two 4 KiB pages.
@@ -25,7 +28,9 @@ const TEB_TLS_POINTER: u64 = 0x58;
 /// Guest addresses reserved by the fixture harness.
 pub struct StartupLayout {
     pub image_base: u64,
-    /// End of the fixture stack. Must be 16-byte aligned.
+    /// End of the fixture stack. Must be 16-byte aligned. Single-executable
+    /// startup maps the PE reserve eagerly, with a 64 KiB minimum and an
+    /// 8 MiB limit. The runtime does not grow the stack through guard pages.
     pub stack_top: u64,
     pub tls_base: u64,
 }
@@ -218,17 +223,20 @@ fn run_startup_with(
         )
         .into());
     }
-    // Reject an impossible layout before parsing or mapping anything.
-    let (stack_base, teb_base) = layout_regions(layout.stack_top, layout.tls_base)?;
+    // Reject an impossible minimum layout before parsing or mapping anything.
+    layout_regions(layout.stack_top, layout.tls_base)?;
     #[cfg(test)]
     stage_finished(StartupStage::ValidateLayout);
-    let pe = ParsedPe::parse(bytes)?;
+    let (pe, stack_sizes) = ParsedPe::parse_with_stack_sizes(bytes)?;
     #[cfg(test)]
     stage_finished(StartupStage::Parse);
     observe(StartupEvent::Parsed {
         sections: pe.sections.len(),
         entry_rva: pe.entry_point_rva,
     });
+    let stack_size = hosted_stack_size(stack_sizes)?;
+    let (stack_base, teb_base) =
+        layout_regions_with_stack_size(layout.stack_top, layout.tls_base, stack_size)?;
     let mut image = pe.load_at_base(bytes, layout.image_base, mapped_image_budget)?;
     let pe = &image.pe;
     let image_base_field = image.image_base_field;
@@ -268,6 +276,9 @@ fn run_startup_with(
     .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, why))?;
     #[cfg(test)]
     stage_finished(StartupStage::RegisterExceptions);
+    // This runtime commits the bounded stack up front. Claim it before TLS
+    // and import binding so their allocations cannot overlap its reserve.
+    memory.map_region(stack_base, stack_size, MemoryPermissions::READ_WRITE)?;
     // The thread's TLS array, data block and environment block belong to
     // thread initialization, which Windows performs before the process heap
     // serves its first allocation. Binding imports allocates from the guest
@@ -308,7 +319,6 @@ fn run_startup_with(
     observe(StartupEvent::ImportsBound {
         count: bound_imports,
     });
-    memory.map_region(stack_base, STACK_SIZE, MemoryPermissions::READ_WRITE)?;
     // Keep guest code and data out of the page that holds the return
     // addresses the engine intercepts. An image or layout that already covers
     // it is refused here, and a later guest allocation there fails.
@@ -398,12 +408,45 @@ fn run_startup_with(
 
 /// Validate the harness layout and return `(stack_base, teb_base)`.
 ///
-/// The stack occupies `[stack_top - STACK_SIZE, stack_top)` and the TEB
-/// `[tls_base + TEB_OFFSET, + TEB_SIZE)`. Both ranges must fit in the address
-/// space and must not overlap each other.
+fn hosted_stack_size(sizes: crate::pe::PeStackSizes) -> std::io::Result<usize> {
+    use std::io::{Error, ErrorKind};
+
+    if sizes.reserve != 0 && sizes.commit > sizes.reserve {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "PE stack commit {:#x} exceeds its declared reserve {:#x}",
+                sizes.commit, sizes.reserve
+            ),
+        ));
+    }
+    // Some original PE fixtures leave the reserve zero. Keep the historical
+    // minimum for them and cover any declared commit as well.
+    let reserve = sizes.reserve.max(sizes.commit).max(STACK_SIZE as u64);
+    if reserve > MAX_HOSTED_STACK_RESERVE {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "PE stack reserve {reserve:#x} exceeds the hosted limit {MAX_HOSTED_STACK_RESERVE:#x}"
+            ),
+        ));
+    }
+    Ok((reserve.div_ceil(STACK_ALLOCATION_GRANULARITY) * STACK_ALLOCATION_GRANULARITY) as usize)
+}
+
+/// Calculate the fixed minimum stack and TEB layout used by packages.
 pub(crate) fn layout_regions(stack_top: u64, tls_base: u64) -> Result<(u64, u64), MemoryError> {
+    layout_regions_with_stack_size(stack_top, tls_base, STACK_SIZE)
+}
+
+/// The stack and TEB ranges must fit in the address space and be disjoint.
+fn layout_regions_with_stack_size(
+    stack_top: u64,
+    tls_base: u64,
+    stack_size: usize,
+) -> Result<(u64, u64), MemoryError> {
     let stack_base = stack_top
-        .checked_sub(STACK_SIZE as u64)
+        .checked_sub(stack_size as u64)
         .ok_or(MemoryError::Overflow)?;
     let teb_base = tls_base
         .checked_add(TEB_OFFSET)

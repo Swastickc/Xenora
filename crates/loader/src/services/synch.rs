@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Critical sections, slim reader/writer locks, condition variables, one-time
-//! initialization, interlocked singly linked lists and thread-local storage.
+//! Critical sections, slim reader/writer locks, condition variables, address
+//! waits, one-time initialization, interlocked lists and thread-local storage.
 //!
 //! Ownership is keyed by the calling guest TEB. An operation that has to wait
-//! for another guest thread blocks through the attached scheduler. Without one
-//! it stops the guest with the runtime-limit fault instead of pretending to
-//! synchronize. The synchronization state is locked before the thread table.
+//! for another guest thread blocks through the attached scheduler. Without one,
+//! blocking lock operations report a runtime-limit fault and an address wait
+//! that would block returns `ERROR_NOT_SUPPORTED`. The synchronization state is
+//! locked before the thread table.
 
-use super::threads::{ConditionSleep, Pending, SleepLock, SleepPhase, SrwMode};
+use super::threads::{AddressWait, ConditionSleep, Pending, SleepLock, SleepPhase, SrwMode};
 use super::{
     ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, ERROR_NOT_SUPPORTED, KERNEL32, ServicesState,
 };
@@ -505,6 +506,7 @@ fn write_slist(
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     register_critical_sections(registry, state);
     register_srw_and_conditions(registry, state);
+    register_address_waits(registry, state);
     register_init_once(registry, state);
     register_slist(registry, state);
     register_tls(registry, state);
@@ -826,6 +828,89 @@ fn resume_sleep(
     Some(match sleep.phase {
         SleepPhase::TimedOut => state.fail(teb, ERROR_TIMEOUT, 0),
         SleepPhase::Asleep | SleepPhase::Woken => Ok(1),
+    })
+}
+
+fn register_address_waits(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let wait = Arc::clone(state);
+    registry.register_with_status(
+        SYNCH_API_2,
+        "WaitOnAddress",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let teb = cpu.gs_base;
+            if let Some(result) = resume_address_wait(&wait, teb) {
+                return result;
+            }
+            if !matches!(args.r8, 1 | 2 | 4 | 8) {
+                return wait.fail(teb, ERROR_INVALID_PARAMETER, 0);
+            }
+
+            let width = args.r8 as usize;
+            let mut value = [0; 8];
+            let mut compare = [0; 8];
+            memory
+                .read_bytes(args.rcx, &mut value[..width])
+                .map_err(fault)?;
+            memory
+                .read_bytes(args.rdx, &mut compare[..width])
+                .map_err(fault)?;
+            if value != compare {
+                return Ok(1);
+            }
+
+            let timeout = args.r9 as u32;
+            if timeout == 0 {
+                return wait.fail(teb, ERROR_TIMEOUT, 0);
+            }
+            if !wait.hooks.is_attached() {
+                return wait.fail(teb, ERROR_NOT_SUPPORTED, 0);
+            }
+
+            let mut table = wait.threads.lock().expect("guest thread table");
+            let pending = AddressWait {
+                address: args.rcx,
+                deadline: wait.deadline(timeout),
+                ticket: table.ticket(),
+                woken: false,
+            };
+            table.waits.insert(teb, Pending::Address(pending));
+            Err(ExitReason::GuestBlocked)
+        },
+    );
+    for (symbol, all) in [("WakeByAddressSingle", false), ("WakeByAddressAll", true)] {
+        let wake = Arc::clone(state);
+        registry.register_with_status(
+            SYNCH_API_2,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, _, _| {
+                wake.wake_address(args.rcx, all);
+                Ok(0)
+            },
+        );
+    }
+}
+
+fn resume_address_wait(state: &ServicesState, teb: u64) -> Option<Result<u64, ExitReason>> {
+    let mut table = state.threads.lock().expect("guest thread table");
+    let Some(Pending::Address(wait)) = table.waits.get(&teb) else {
+        return None;
+    };
+    let woken = wait.woken;
+    if !woken
+        && wait
+            .deadline
+            .is_none_or(|deadline| state.clock.performance_count() < deadline)
+    {
+        return Some(Err(ExitReason::GuestBlocked));
+    }
+    table.waits.remove(&teb);
+    drop(table);
+    Some(if woken {
+        Ok(1)
+    } else {
+        state.fail(teb, ERROR_TIMEOUT, 0)
     })
 }
 

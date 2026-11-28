@@ -1146,6 +1146,16 @@ including asynchronous operation, fail with `ERROR_NOT_SUPPORTED`. Proxy
 strings are not dereferenced in the accepted modes because Microsoft's
 documentation makes them inputs to the named-proxy mode.
 
+`WinHttpCrackUrl` splits canonical HTTP and HTTPS URLs without opening a
+connection. The Win64 `URL_COMPONENTS` record takes counted or terminated
+UTF-16 input up to 32,768 units. An output field can borrow a pointer into
+the input or copy a NUL-terminated component into a caller-provided buffer.
+The result reports the scheme, port and UTF-16 units written before the
+terminator. A zero extra-info length keeps query and fragment text in the
+path. An empty view returns a null pointer and zero units. Short, invalid or
+overlapping output spans fail before any output changes. The supported flags
+are zero and `ICU_REJECT_USERPWD`. Percent escapes remain intact.
+
 `WinHttpConnect` requires a live session handle of the correct type, a
 nonempty ASCII host or address string rather than a URL, a zero reserved field
 and a 16-bit `INTERNET_PORT`; only the low sixteen bits of the Win64 argument

@@ -45,11 +45,13 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [COM base services](runtime/com.md) — Partial apartment, GUID, task allocation and class lookup behavior, with explicit object-model limits.
 - [Guest threads](runtime/threads.md) — Deterministic scheduler, thread services, limits and tests.
 - [Guest graphics command path](runtime/guest-graphics.md) — The guest-callable graphics ABI, ordered resource destruction, and the path from a guest program to a rendered framebuffer.
+- [Bounded XAudio2 core](runtime/xaudio2.md) — Engine, mastering voice and source voice lifetimes, the source buffer queue, the sample clock and its events, the wave format rules, and what the model deliberately leaves out.
 - [Guest CPU research](research/cpu-boundary.md) — Public specifications and unresolved console requirements.
 - [Synthetic import fixtures](../tests/compat_fixtures/README.md) — Reproducible PE32+ builds and expected service behavior.
 
-## Native media middleware
+## Native media and middleware
 
+- [Middleware compatibility coverage](middleware/coverage.md) — Implemented, partial, unsupported and research-only networking, upscaling, acceleration-structure and media surfaces.
 - [Native video playback foundation](video-playback.md) — AVFoundation-backed lifecycle, frame timing, seeking, ownership and explicit codec/Bink limitations.
 
 ## Testing, validation, and benchmarks
@@ -63,6 +65,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Baseline acceptance](testing/phase-02-baseline.md), [Phase 01 assurance](testing/phase01-assurance.md), and [independent reviews](testing/review-log.md) — Candidate-specific results and release findings.
 - [Structured startup reports](testing/startup-reports.md) — Interpret the CLI worker’s live startup stages and termination details.
 - [Gate A: a compiled C program](testing/gate-a.md) — The two milestones, what the A1 and A2 tests check and what they do not show.
+- [Application fixture runner](../scripts/compat/README.md) — Run selected original fixture tests and compare their recorded outcomes.
 - [Mutation testing](testing/mutation.md) and [benchmark protocol](testing/benchmarks.md) — Test sensitivity, benchmark inputs, and timing requirements.
 
 ## Research and engineering decisions
@@ -82,6 +85,7 @@ either path. The [changelog](../CHANGELOG.md) records notable changes.
 - [Legal scope](legal.md), [dependency licensing](licenses.md), and [third-party notices](../THIRD_PARTY_NOTICES.md) — Input policy, attribution, and redistribution findings.
 - [Contribution guidelines](../CONTRIBUTING.md) — Original authorship, Developer Certificate of Origin sign-off, and evidence requirements.
 - [Agent task queue](coordination/agent-tasks.md) — Areas, claiming, leases, upstream sync, verification and the security model for parallel contributors and coding agents.
+- [Input and playability campaign](coordination/input-campaign.md) — Campaign F progress: the host input router, keyboard and mouse translation, planned controller, app and replay work, and hardware evidence.
 - [CPU/runtime expansion campaign ledger](coordination/cpu-campaign-ledger.md) — Progress ledger for the Xenora native CPU and runtime compatibility campaign: starting/current commits, completed batches, new forms, verification evidence and the next implementation target.
 - [Infrastructure QA ownership](coordination/infrastructure-qa-ownership.md) — Non-overlapping paths for infrastructure and QA tooling.
 - [Agent queue smoke evidence](coordination/agent-queue-smoke.md) — Live Actions results from the disposable smoke repository.

@@ -8,6 +8,8 @@
 
 use std::fmt::Write as _;
 mod frame_loop;
+mod input;
+mod input_recognize;
 
 use frame_loop::FrameLoop;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -76,6 +78,8 @@ pub use frame_loop::XINPUT_FEATURE_VIBRATION as XENORA_XINPUT_FEATURE_VIBRATION;
 pub use frame_loop::XInputBattery as xenora_xinput_battery;
 pub use frame_loop::XInputSnapshot as xenora_xinput_state;
 pub use frame_loop::XInputVibration as xenora_xinput_vibration;
+pub use input::*;
+pub use input_recognize::*;
 
 pub const XENORA_FIXTURE_FRAME_WIDTH: u32 = 4;
 pub const XENORA_FIXTURE_FRAME_HEIGHT: u32 = 3;
@@ -283,6 +287,8 @@ struct Slot {
     generation: u32,
     /// The session's persistent frame loop, if one was started.
     frame_loop: Option<Arc<FrameLoop>>,
+    /// The session's host input router (Campaign F, #942).
+    input: input::InputHost,
     /// Persistent GPU resources owned by this session (Gate 5, #279).
     resources: Vec<ResourceSlot>,
     /// Bounded audio subsystem (Gate 6, #284).
@@ -335,6 +341,7 @@ pub unsafe extern "C" fn xenora_session_create(abi_version: u32, out_session: *m
                 slots.push(Slot {
                     generation: 0,
                     frame_loop: None,
+                    input: input::InputHost::default(),
                     resources: Vec::new(),
                     audio: AudioSubsystem::default(),
                     vfs: VfsSubsystem::default(),
@@ -345,6 +352,7 @@ pub unsafe extern "C" fn xenora_session_create(abi_version: u32, out_session: *m
             None => return XENORA_LIMIT_EXCEEDED,
         };
         let slot = &mut slots[index];
+        slot.input = input::InputHost::default();
         slot.resources.clear();
         slot.audio = AudioSubsystem::default();
         slot.vfs = VfsSubsystem::default();
@@ -372,6 +380,7 @@ pub extern "C" fn xenora_session_destroy(session: u64) -> i32 {
         let slot = &mut slots[split(session).0];
         slot.generation += 1;
         let running = slot.frame_loop.take();
+        slot.input = input::InputHost::default();
         slot.resources.clear();
         slot.audio = AudioSubsystem::default();
         slot.vfs = VfsSubsystem::default();
@@ -2155,7 +2164,9 @@ fn inspection_report(bytes: &[u8]) -> (i32, String) {
         report.relocations.total_entries,
         report.tls.callback_targets.len()
     );
-    out.push_str("\nExecution of opened files is not available (see #257).\n");
+    out.push_str(
+        "\nInspection is read-only. The experimental runner can attempt execution separately.\n",
+    );
     (XENORA_OK, out)
 }
 
@@ -2614,6 +2625,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("nothing in this file was executed"));
+        assert!(text.contains("experimental runner can attempt execution separately"));
     }
 
     #[test]

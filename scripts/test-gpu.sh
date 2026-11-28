@@ -75,10 +75,20 @@ cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs --no-run
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs -- \
     --nocapture --test-threads=1
 
+# Session input router published into a running native frame loop (Campaign F, #942).
+cargo test --locked -p xenora-ffi --features gpu-tests --test input_router_gpu --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test input_router_gpu -- \
+    --nocapture --test-threads=1
+
 # Verify both the persistent CLI session and the hosted runner's final Metal frame.
 cargo test --locked -p xenora --test persistent_session_cli --no-run
 timeout 30s cargo test --locked -p xenora --test persistent_session_cli -- \
     default_metal_backend_draws_every_frame_natively --ignored --exact --nocapture --test-threads=1
+
+# The threaded session exercises scheduled guest work and native frame exports.
+cargo test --locked -p xenora --test threaded_session_cli --no-run
+timeout 30s cargo test --locked -p xenora --test threaded_session_cli -- \
+    threaded_metal_draws_and_exports_every_frame_for_positional_and_replay --ignored --exact --nocapture --test-threads=1
 
 cargo test --locked -p xenora --test run_program --no-run
 timeout 30s cargo test --locked -p xenora --test run_program -- \

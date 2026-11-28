@@ -19,22 +19,22 @@ struct Exchange {
 }
 
 impl Exchange {
-    fn new() -> Self {
+    fn new(workload: Workload) -> Self {
         let mut registry = ImportRegistry::new();
         let services = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
         register_standard_services(&mut registry, Arc::clone(&services));
         let (commands, pending) = mpsc::channel();
         let (report, reports) = mpsc::channel();
         let presentation = Arc::new(Mutex::new(FramePresentation::default()));
-        let progress = install_exchange(
-            &mut registry,
-            pending,
-            report,
-            Arc::clone(&presentation),
-            Arc::new(AtomicUsize::new(0)),
-            Backend::Reference,
-            Arc::clone(&services),
-        );
+        let guest = Guest {
+            services: Arc::clone(&services),
+            graphics: Arc::new(GuestGraphics {
+                backend: Backend::Reference,
+                presentation: Arc::clone(&presentation),
+                native_draws: Arc::new(AtomicUsize::new(0)),
+            }),
+        };
+        let progress = install_exchange(&mut registry, pending, report, workload, &guest);
         Self {
             registry,
             commands: Some(commands),
@@ -62,6 +62,16 @@ impl Exchange {
             &mut CpuState::new(0x1000, args.rsp),
             &mut GuestMemory::new(),
         )
+    }
+
+    fn open_event(&self) -> u64 {
+        let handle = self.call("kernel32.dll", "CreateEventW", 0).unwrap();
+        assert_ne!(handle, 0);
+        handle
+    }
+
+    fn close_handle(&self, handle: u64) {
+        assert_eq!(self.call("kernel32.dll", "CloseHandle", handle), Ok(1));
     }
 
     fn session_call(&self, symbol: &str, value: u64) -> Result<u64, ExitReason> {
@@ -102,7 +112,9 @@ fn pixels(row: [[u8; 4]; 4]) -> Vec<u8> {
 
 #[test]
 fn rejects_wrong_direction_and_corrupt_channels_before_publishing() {
-    let guest = Exchange::new();
+    let guest = Exchange::new(Workload::Persistent);
+    guest.open_event();
+    guest.open_event();
     guest.send(Direction::Left);
     assert_eq!(guest.session_call("XenoraNextEvent", 0), Ok(1));
 
@@ -135,13 +147,20 @@ fn rejects_wrong_direction_and_corrupt_channels_before_publishing() {
 
 #[test]
 fn final_confirmation_requires_eof_an_exact_count_and_no_live_handles() {
-    let mut guest = Exchange::new();
+    let mut guest = Exchange::new(Workload::Reopen);
     assert_eq!(guest.session_call("XenoraFinish", 0), Err(ABI_ERROR));
     guest.send(Direction::Right);
     assert_eq!(guest.session_call("XenoraNextEvent", 0), Ok(2));
     assert_eq!(guest.session_call("XenoraFinish", 0), Err(ABI_ERROR));
     let right = pixels([CLEAR, CLEAR, CLEAR, RED]);
     guest.set_frame(1, right.clone());
+    assert_eq!(guest.session_call("XenoraPresent", 1), Err(ABI_ERROR));
+    guest.assert_no_report();
+    let handle = guest.open_event();
+    let extra = guest.open_event();
+    assert_eq!(guest.session_call("XenoraPresent", 1), Err(ABI_ERROR));
+    guest.assert_no_report();
+    guest.close_handle(extra);
     assert_eq!(guest.session_call("XenoraPresent", 1), Ok(1));
     guest.assert_frame_report(1, &right);
     assert_eq!(guest.session_call("XenoraFinish", 1), Err(ABI_ERROR));
@@ -152,13 +171,11 @@ fn final_confirmation_requires_eof_an_exact_count_and_no_live_handles() {
     assert_eq!(guest.session_call("XenoraFinish", 0), Err(ABI_ERROR));
     assert_eq!(guest.session_call("XenoraFinish", 2), Err(ABI_ERROR));
 
-    let handle = guest.call("kernel32.dll", "CreateEventW", 0).unwrap();
-    assert_ne!(handle, 0);
     assert_eq!(guest.services.open_handle_count(), 1);
     assert_eq!(guest.session_call("XenoraFinish", 1), Err(ABI_ERROR));
     assert!(!guest.progress.lock().unwrap().finished);
 
-    assert_eq!(guest.call("kernel32.dll", "CloseHandle", handle), Ok(1));
+    guest.close_handle(handle);
     assert_eq!(guest.services.open_handle_count(), 0);
     assert_eq!(guest.session_call("XenoraFinish", 1), Ok(1));
     assert!(guest.progress.lock().unwrap().finished);

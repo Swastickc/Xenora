@@ -151,7 +151,6 @@ fn lock_is_accepted_only_on_lockable_forms_with_a_memory_destination() {
         &[0xF0, 0x01, 0xC8],             // lock add eax, ecx: register destination
         &[0xF0, 0x39, 0x0E],             // lock cmp [rsi], ecx: CMP writes nothing
         &[0xF0, 0x83, 0x3E, 0x01],       // lock cmp dword [rsi], 1
-        &[0xF0, 0x0F, 0xC7, 0x0E],       // lock cmpxchg8b [rsi]: not implemented
         &[0xF0, 0x8B, 0x06],             // lock mov eax, [rsi]: never lockable
         &[0xF0, 0x90],                   // lock nop
         &[0xF0, 0x87, 0xCE],             // lock xchg esi, ecx: register destination

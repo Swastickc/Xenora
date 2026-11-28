@@ -3,7 +3,9 @@
 mod replay;
 mod session;
 
-use session::{Backend, CompletedSession, Direction, Frame, HEIGHT, MAX_EVENTS, MAX_STEPS, WIDTH};
+use session::{
+    Backend, CompletedSession, Direction, Frame, HEIGHT, MAX_EVENTS, MAX_STEPS, WIDTH, Workload,
+};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
@@ -13,17 +15,22 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "Usage: xenora-session [--backend metal|reference] [--steps N] [--frame-dir PATH] [--replay PATH | left|right ...]\n\
-Runs the embedded guest in one bounded session. Defaults to Metal, 1000000 steps and left right left.\n\
+const USAGE: &str = "Usage: xenora-session [--workload persistent|reopen|threaded] [--backend metal|reference] [--steps N] [--frame-dir PATH] [--replay PATH | left|right ...]\n\
+Runs an embedded guest in one bounded session. Defaults to persistent, Metal, 1000000 steps and left right left.\n\
+The reopen workload opens and closes its journal every frame and verifies an auto-reset event.\n\
+The threaded workload moves one column per direction on a four-column scene and journals each resulting column.\n\
 Specify up to 32 directions, or replay a xenora-session-v1 file.\n\
 --frame-dir creates a new directory of PPM frames after a successful session.";
 const WORKER: &str = "--session-worker";
 const WALL_LIMIT: Duration = Duration::from_secs(15);
 const RGBA_BYTES: usize = WIDTH * HEIGHT * 4;
-const REPLY_MAGIC: &[u8; 4] = b"XSP1";
-const MAX_REPLY_BYTES: usize = REPLY_MAGIC.len() + 3 * 4 + MAX_EVENTS * (4 + RGBA_BYTES + 1);
+const REPLY_MAGIC: &[u8; 4] = b"XSP2";
+const REPLY_HEADER_BYTES: usize = REPLY_MAGIC.len() + 4 * 4;
+const REPLY_FRAME_BYTES: usize = 4 + RGBA_BYTES + 1; // sequence, RGBA, journal byte
+const MAX_REPLY_BYTES: usize = REPLY_HEADER_BYTES + MAX_EVENTS * REPLY_FRAME_BYTES;
 
 struct Options {
+    workload: Workload,
     backend: Backend,
     steps: usize,
     directions: Vec<Direction>,
@@ -42,17 +49,18 @@ fn backend_name(backend: &Backend) -> &'static str {
     }
 }
 
+fn workload_name(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Persistent => "persistent",
+        Workload::Reopen => "reopen",
+        Workload::Threaded => "threaded",
+    }
+}
+
 fn direction_name(direction: &Direction) -> &'static str {
     match direction {
         Direction::Left => "left",
         Direction::Right => "right",
-    }
-}
-
-fn direction_byte(direction: &Direction) -> u8 {
-    match direction {
-        Direction::Left => b'L',
-        Direction::Right => b'R',
     }
 }
 
@@ -73,6 +81,7 @@ fn parse_path(value: Option<OsString>, option: &str) -> Result<PathBuf, String> 
 
 fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<Request, String> {
     let mut args = args.into_iter();
+    let mut workload = None;
     let mut backend = None;
     let mut steps = None;
     let mut frame_dir = None;
@@ -83,6 +92,18 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
         match (arg.to_str(), positional) {
             (Some("--help"), false) => return Ok(Request::Help),
             (Some("--"), false) => positional = true,
+            (Some("--workload"), false) if workload.is_none() => {
+                workload = Some(
+                    match args.next().as_deref().and_then(|value| value.to_str()) {
+                        Some("persistent") => Workload::Persistent,
+                        Some("reopen") => Workload::Reopen,
+                        Some("threaded") => Workload::Threaded,
+                        _ => {
+                            return Err("--workload requires persistent, reopen or threaded".into());
+                        }
+                    },
+                );
+            }
             (Some("--backend"), false) if backend.is_none() => {
                 backend = Some(
                     match args.next().as_deref().and_then(|value| value.to_str()) {
@@ -111,7 +132,7 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
             (Some("--replay"), false) if replay_path.is_none() => {
                 replay_path = Some(parse_path(args.next(), "--replay")?);
             }
-            (Some("--backend" | "--steps" | "--frame-dir" | "--replay"), false) => {
+            (Some("--workload" | "--backend" | "--steps" | "--frame-dir" | "--replay"), false) => {
                 return Err(format!("duplicate option {:?}", arg));
             }
             (value, _) => directions.push(
@@ -133,6 +154,7 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
         directions.extend([Direction::Left, Direction::Right, Direction::Left]);
     }
     Ok(Request::Run(Options {
+        workload: workload.unwrap_or(Workload::Persistent),
         backend: backend.unwrap_or(Backend::Metal),
         steps: steps.unwrap_or(MAX_STEPS),
         directions,
@@ -149,11 +171,15 @@ fn expected_native_draws(backend: &Backend, frames: usize) -> usize {
 
 fn check_result(
     result: &CompletedSession,
+    workload: Workload,
     native_draws: usize,
     directions: &[Direction],
 ) -> Result<(), String> {
+    if result.workload != workload {
+        return Err("worker returned the wrong session workload".into());
+    }
     let count = directions.len();
-    if result.exit_status != 0
+    if result.exit_status != workload.expected_exit_status()
         || result.open_handles != 0
         || result.native_draws != native_draws
         || result.frames.len() != count
@@ -161,7 +187,7 @@ fn check_result(
             .journal
             .iter()
             .copied()
-            .eq(directions.iter().map(direction_byte))
+            .eq(workload.expected_journal(directions))
     {
         return Err("worker returned inconsistent session counters or journal".into());
     }
@@ -178,6 +204,11 @@ fn check_result(
 fn encode(result: &CompletedSession, mut output: impl Write) -> io::Result<()> {
     output.write_all(REPLY_MAGIC)?;
     for value in [
+        match result.workload {
+            Workload::Persistent => 0,
+            Workload::Reopen => 1,
+            Workload::Threaded => 2,
+        },
         result.exit_status,
         result.open_handles as u32,
         result.native_draws as u32,
@@ -199,12 +230,23 @@ fn decode(mut input: &[u8], count: usize) -> Result<CompletedSession, String> {
         Ok(u32::from_le_bytes(data))
     }
 
-    let expected = REPLY_MAGIC.len() + 3 * 4 + count * (4 + RGBA_BYTES + 1);
+    let expected = REPLY_HEADER_BYTES + count * REPLY_FRAME_BYTES;
     if input.len() != expected || !input.starts_with(REPLY_MAGIC) {
         return Err("worker sent a malformed or incomplete reply".into());
     }
     input = &input[REPLY_MAGIC.len()..];
     let mut read_reply = || -> io::Result<CompletedSession> {
+        let workload = match read_u32(&mut input)? {
+            0 => Workload::Persistent,
+            1 => Workload::Reopen,
+            2 => Workload::Threaded,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unknown workload",
+                ));
+            }
+        };
         let exit_status = read_u32(&mut input)?;
         let open_handles = read_u32(&mut input)? as usize;
         let native_draws = read_u32(&mut input)? as usize;
@@ -218,6 +260,7 @@ fn decode(mut input: &[u8], count: usize) -> Result<CompletedSession, String> {
             frames.push(Frame { sequence, rgba });
         }
         Ok(CompletedSession {
+            workload,
             frames,
             journal,
             exit_status,
@@ -230,8 +273,13 @@ fn decode(mut input: &[u8], count: usize) -> Result<CompletedSession, String> {
 
 fn worker(options: Options) -> Result<(), String> {
     let native_draws = expected_native_draws(&options.backend, options.directions.len());
-    let result = session::run(options.backend, options.steps, &options.directions)?;
-    check_result(&result, native_draws, &options.directions)?;
+    let result = session::run(
+        options.workload,
+        options.backend,
+        options.steps,
+        &options.directions,
+    )?;
+    check_result(&result, options.workload, native_draws, &options.directions)?;
     encode(&result, io::stdout().lock())
         .map_err(|error| format!("could not send worker reply: {error}"))
 }
@@ -255,6 +303,8 @@ fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
     command
         .args([
             WORKER,
+            "--workload",
+            workload_name(options.workload),
             "--backend",
             backend_name(&options.backend),
             "--steps",
@@ -313,7 +363,8 @@ fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
         .map_err(|error| RunError::Runtime(format!("could not read worker reply: {error}")))?;
     let result = decode(&reply, options.directions.len()).map_err(RunError::Runtime)?;
     let native_draws = expected_native_draws(&options.backend, options.directions.len());
-    check_result(&result, native_draws, &options.directions).map_err(RunError::Runtime)?;
+    check_result(&result, options.workload, native_draws, &options.directions)
+        .map_err(RunError::Runtime)?;
     Ok(result)
 }
 
@@ -381,9 +432,14 @@ fn print_result(
             backend_name(&options.backend),
         )?;
     }
+    let workload = match result.workload {
+        Workload::Persistent => "",
+        Workload::Reopen => " workload=reopen",
+        Workload::Threaded => " workload=threaded",
+    };
     writeln!(
         output,
-        "exit status={} frames={} journal={} handles={} native_draws={}",
+        "exit status={} frames={} journal={} handles={} native_draws={}{workload}",
         result.exit_status,
         result.frames.len(),
         String::from_utf8_lossy(&result.journal),
@@ -494,6 +550,7 @@ mod tests {
     #[test]
     fn incomplete_or_oversized_worker_replies_are_refused() {
         let session = CompletedSession {
+            workload: Workload::Persistent,
             frames: vec![example_frame(1)],
             journal: vec![b'L'],
             exit_status: 0,
@@ -506,6 +563,49 @@ mod tests {
         assert!(decode(&reply[..reply.len() - 1], 1).is_err());
         reply.push(0);
         assert!(decode(&reply, 1).is_err());
+    }
+
+    #[test]
+    fn worker_reply_must_identify_the_requested_workload() {
+        let session = CompletedSession {
+            workload: Workload::Reopen,
+            frames: vec![example_frame(1)],
+            journal: vec![b'L'],
+            exit_status: 0,
+            open_handles: 0,
+            native_draws: 0,
+        };
+        let mut reply = Vec::new();
+        encode(&session, &mut reply).unwrap();
+        let decoded = decode(&reply, 1).unwrap();
+        assert!(check_result(&decoded, Workload::Reopen, 0, &[Direction::Left]).is_ok());
+        assert_eq!(
+            check_result(&decoded, Workload::Persistent, 0, &[Direction::Left]),
+            Err("worker returned the wrong session workload".into())
+        );
+        reply[REPLY_MAGIC.len()..][..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode(&reply, 1).is_err());
+    }
+
+    #[test]
+    fn threaded_reply_requires_the_scene_journal_and_process_exit_code() {
+        let workload = Workload::Threaded;
+        let directions = [Direction::Left];
+        let mut result = CompletedSession {
+            workload,
+            frames: vec![example_frame(1)],
+            journal: vec![b'3'],
+            exit_status: workload.expected_exit_status(),
+            open_handles: 0,
+            native_draws: 0,
+        };
+        assert!(check_result(&result, workload, 0, &directions).is_ok());
+
+        result.journal[0] = b'L';
+        assert!(check_result(&result, workload, 0, &directions).is_err());
+        result.journal[0] = b'3';
+        result.exit_status = 0;
+        assert!(check_result(&result, workload, 0, &directions).is_err());
     }
 
     #[test]

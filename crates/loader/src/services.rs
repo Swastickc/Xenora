@@ -6,7 +6,7 @@
 //! - Time: UTC file time and a monotonic performance counter
 //! - Process and thread identity and guest process priority boost policy
 //! - Error slots: `GetLastError`, `SetLastError`
-//! - Virtual memory: `VirtualAlloc`, `VirtualFree`
+//! - Virtual memory: `VirtualAlloc`, `VirtualFree`, `VirtualProtect`, `VirtualQuery`
 //! - Xbox physical memory: `XMemAlloc`, `XMemFree`
 
 mod advapi;
@@ -19,6 +19,7 @@ mod crt;
 mod crt_arguments;
 mod crt_callbacks;
 mod crt_clock;
+mod crt_ctype;
 mod crt_files;
 mod crt_format;
 mod crt_jump;
@@ -30,6 +31,7 @@ mod crt_streams;
 mod crt_wformat;
 mod crt_wide;
 mod cxx;
+mod cxx_abi;
 mod environment;
 mod errors;
 mod events;
@@ -40,7 +42,7 @@ mod gdk_queue;
 mod graphics;
 mod heap;
 mod locale;
-mod modules;
+pub(crate) mod modules;
 mod platform_fixture;
 mod process;
 mod registry;
@@ -64,7 +66,9 @@ pub use xinput::{XInputBatteryChargeState, XInputBatteryState, XInputControllerS
 
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
-use crate::memory::{ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions};
+use crate::memory::{
+    ALLOCATION_GRANULARITY, GuestMemory, MemoryError, MemoryPermissions, ProtectionError,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -287,10 +291,17 @@ pub struct ServicesState {
     /// follow it, which is the real Windows behaviour: the CRT keeps its own
     /// copy, and only `_putenv` would update that one.
     pub(crate) environment: Mutex<Vec<(String, String)>>,
+    /// The C runtime's own environment copy, separate from the kernel32
+    /// block as it is on Windows: only `_putenv` writes it, and `getenv`
+    /// reads it. Each entry is the variable's original name casing and the
+    /// guest address of the CRT-owned `NAME=VALUE` string copy.
+    pub(crate) crt_environment: Mutex<Vec<(String, u64)>>,
     /// Emulated thread-local storage: the block each guest thread owns for
     /// each thread-local variable, keyed by the guest thread and then by the
     /// address of the variable's descriptor.
     pub(crate) emutls: Mutex<BTreeMap<u64, BTreeMap<u64, u64>>>,
+    /// Itanium C++ ABI guard variables for thread-safe function-local statics.
+    pub(crate) cxx_guards: Mutex<cxx_abi::GuardTable>,
     /// The status the guest process exited with. Set once.
     exit_status: Mutex<Option<u32>>,
     crt_startup: Mutex<crt_startup::CrtStartup>,
@@ -373,7 +384,9 @@ impl ServicesState {
             hooks: Arc::default(),
             atexit: Mutex::default(),
             environment: Mutex::default(),
+            crt_environment: Mutex::default(),
             emutls: Mutex::default(),
+            cxx_guards: Mutex::default(),
             exit_status: Mutex::default(),
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
@@ -675,7 +688,7 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crate::runtime_table::register(registry, &state);
     registry.hooks = Some(Arc::clone(&state.hooks));
     threads::register(registry, &state);
-    static_cxx::register(registry);
+    static_cxx::register(registry, &state);
     crate::exceptions::register(registry);
     crt_jump::register(registry);
     xnetworking::register(registry);
@@ -1123,8 +1136,8 @@ pub(crate) mod handlers {
         string_from_guid2,
     };
 
-    /// The exit for a request the runtime does not model.
-    const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
+    // The Itanium C++ ABI guard protocol lives in `services/cxx_abi.rs`.
+    pub(crate) use super::cxx_abi::{cxx_guard_abort, cxx_guard_acquire, cxx_guard_release};
 
     pub fn set_process_priority_boost(
         context: &mut ServiceContext<'_>,
@@ -1678,6 +1691,11 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn setbuf(context: &mut ServiceContext<'_>, stream: u64, _buffer: u64) -> Outcome<()> {
+        let outcome = context.state.crt_streams().set_buffer_legacy(stream);
+        or_errno(context, outcome)
+    }
+
     pub fn fopen(context: &mut ServiceContext<'_>, name: u64, mode: u64) -> Outcome<u64> {
         let outcome = {
             let mut streams = context.state.crt_streams();
@@ -1966,6 +1984,15 @@ pub(crate) mod handlers {
         or_errno(context, outcome)
     }
 
+    pub fn _chmod(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
+        let outcome = {
+            let streams = context.state.crt_streams();
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.chmod(context.memory, &mut drive, name, mode as u32)
+        };
+        or_errno(context, outcome)
+    }
+
     pub fn _wchmod(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let outcome = {
             let streams = context.state.crt_streams();
@@ -2229,8 +2256,8 @@ pub(crate) mod handlers {
     pub fn _access(context: &mut ServiceContext<'_>, name: u64, mode: i32) -> Outcome<i32> {
         let outcome = {
             let streams = context.state.crt_streams();
-            let drive = context.state.objects.lock().expect("guest object state");
-            streams.access(context.memory, &drive, name, mode)
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.access_file(context.memory, &mut drive, name, false, mode as u32)
         };
         or_errno(context, outcome)
     }
@@ -3372,30 +3399,141 @@ pub(crate) mod handlers {
         Ok(true)
     }
 
-    // Stubs (#388). A program built with the mingw-w64 runtime imports these
-    // three and does not call them on a normal run: the first two serve its
-    // runtime pseudo-relocations and the third is the language handler Windows
-    // calls while dispatching a structured exception. None is modelled, so a
-    // call stops the guest with the runtime-limit fault. Returning a made-up
-    // result would let the program run on with wrong state.
-
-    pub fn virtual_protect(
-        _: &mut ServiceContext<'_>,
-        _address: u64,
-        _size: u64,
-        _protect: u32,
-        _old: OutPtr<4>,
-    ) -> Outcome<bool> {
-        Err(RUNTIME_LIMIT)
+    fn protect_value(permissions: MemoryPermissions) -> u32 {
+        match (permissions.read, permissions.write, permissions.execute) {
+            (false, false, false) => 0x01,
+            (true, false, false) => 0x02,
+            (true, true, false) => 0x04,
+            (true, false, true) => 0x20,
+            (true, true, true) => 0x40,
+            // Xenora never creates write-only or execute-only regions.
+            _ => 0,
+        }
     }
 
+    fn protection_failure<T>(
+        context: &ServiceContext<'_>,
+        error: ProtectionError,
+        value: T,
+    ) -> Outcome<T> {
+        let error = match error {
+            ProtectionError::Unmapped(_) => ERROR_INVALID_ADDRESS,
+            ProtectionError::CrossesAllocations | ProtectionError::Overflow => {
+                ERROR_INVALID_PARAMETER
+            }
+            ProtectionError::UnsupportedAllocation => ERROR_NOT_SUPPORTED,
+        };
+        context.state.fail(context.teb, error, value)
+    }
+
+    /// Change protection of committed pages. Xenora models page-granular
+    /// permissions but no guard pages, mapped-file access modes or executable
+    /// cache invalidation, so only the three non-executable base protections
+    /// accepted by `VirtualAlloc` are supported.
+    pub fn virtual_protect(
+        context: &mut ServiceContext<'_>,
+        address: u64,
+        size: u64,
+        protect: u32,
+        old: OutPtr<4>,
+    ) -> Outcome<bool> {
+        let state = context.state;
+        if size == 0 || old.0 == 0 {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        }
+        let permissions = match protect {
+            0x01 => MemoryPermissions::NO_ACCESS,
+            0x02 => MemoryPermissions::READ_ONLY,
+            0x04 => MemoryPermissions::READ_WRITE,
+            0x10 | 0x20 | 0x40 | 0x80 => {
+                return state.fail(context.teb, ERROR_NOT_SUPPORTED, false);
+            }
+            _ => return state.fail(context.teb, ERROR_INVALID_PARAMETER, false),
+        };
+        let Some(last) = address.checked_add(size - 1) else {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        };
+        let start = address & !(PAGE_SIZE - 1);
+        let Some(end) = last
+            .checked_add(1)
+            .and_then(|end| end.checked_next_multiple_of(PAGE_SIZE))
+        else {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, false);
+        };
+        let previous = match context
+            .memory
+            .validate_committed_protection_range(start, end)
+        {
+            Ok(previous) => previous,
+            Err(error) => return protection_failure(context, error, false),
+        };
+        if !context.memory.can_write(old.0, 4) {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, false);
+        }
+        // The old protection must be written before changing the pages: the
+        // output variable is allowed to lie inside the range being made
+        // inaccessible. Validation cannot become stale while this call owns
+        // the guest memory, so the protection change cannot fail afterwards.
+        if context
+            .memory
+            .write_bytes(old.0, &protect_value(previous).to_le_bytes())
+            .is_err()
+        {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, false);
+        }
+        match context
+            .memory
+            .protect_committed_range(start, end, permissions)
+        {
+            Ok(_) => {}
+            Err(error) => return protection_failure(context, error, false),
+        }
+        Ok(true)
+    }
+
+    /// Query the committed region containing an address. Xenora's committed
+    /// regions are already uniform, so the reported size is the representable
+    /// region rather than a claim about Windows reservation bookkeeping.
     pub fn virtual_query(
-        _: &mut ServiceContext<'_>,
-        _address: u64,
-        _information: OutPtr<48>,
-        _length: u64,
+        context: &mut ServiceContext<'_>,
+        address: u64,
+        information: OutPtr<48>,
+        length: u64,
     ) -> Outcome<u64> {
-        Err(RUNTIME_LIMIT)
+        let state = context.state;
+        if length == 0 {
+            return state.fail(context.teb, ERROR_INVALID_PARAMETER, 0);
+        }
+        let Some(region) = context.memory.committed_region_info(address) else {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
+        };
+        let take = usize::try_from(length.min(48)).unwrap_or(48);
+        if !context.memory.can_write(information.0, take) {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
+        }
+        let protect = protect_value(region.permissions);
+        let kind: u32 = if region.image {
+            0x0100_0000
+        } else {
+            0x0002_0000
+        };
+        let mut bytes = [0u8; 48];
+        bytes[0..8].copy_from_slice(&region.base.to_le_bytes());
+        bytes[8..16].copy_from_slice(&region.allocation_base.to_le_bytes());
+        bytes[16..20].copy_from_slice(&protect.to_le_bytes());
+        // bytes 20..24 are PartitionId and its alignment padding; zero here.
+        bytes[24..32].copy_from_slice(&(region.end - region.base).to_le_bytes());
+        bytes[32..36].copy_from_slice(&0x1000u32.to_le_bytes()); // MEM_COMMIT
+        bytes[36..40].copy_from_slice(&protect.to_le_bytes());
+        bytes[40..44].copy_from_slice(&kind.to_le_bytes());
+        if context
+            .memory
+            .write_bytes(information.0, &bytes[..take])
+            .is_err()
+        {
+            return state.fail(context.teb, ERROR_INVALID_ADDRESS, 0);
+        }
+        Ok(take as u64)
     }
 
     /// The guest MXCSR is not visible to a service, so results use the default
@@ -3779,6 +3917,86 @@ pub(crate) mod handlers {
         count: u64,
     ) -> Outcome<u64> {
         crt_wide::wcsncat(context.memory, context.teb, start, end, count)
+    }
+
+    // The narrow ctype.h of the C locale, `atoi` and `atof` (#459 measured
+    // gap): `crt_ctype.rs` documents the honest edges.
+    pub fn isalpha(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isalpha(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isdigit(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isdigit(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isalnum(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isalnum(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn islower(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::islower(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isupper(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isupper(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isspace(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isspace(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn ispunct(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::ispunct(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn iscntrl(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::iscntrl(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isprint(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isprint(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isgraph(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isgraph(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isblank(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isblank(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn isxdigit(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::isxdigit(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn tolower(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::tolower(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn toupper(context: &mut ServiceContext<'_>, character: i32) -> Outcome<i32> {
+        crt_ctype::toupper(context.memory, context.teb, character as u32 as u64)
+            .map(|value| value as i32)
+    }
+
+    pub fn atoi(context: &mut ServiceContext<'_>, text: u64) -> Outcome<i32> {
+        crt_ctype::atoi(context.memory, context.teb, text).map(|value| value as u32 as i32)
+    }
+
+    pub fn atof(context: &mut ServiceContext<'_>, text: u64) -> Outcome<Float64> {
+        crt_ctype::atof(context.memory, context.teb, text).map(Float64)
     }
 
     pub fn wcscpy(context: &mut ServiceContext<'_>, start: u64, end: u64) -> Outcome<u64> {

@@ -10220,6 +10220,17 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "api-ms-win-crt-process-l1-1-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_spawnve"
       "symbol": "BCryptGenRandom"
     },
     {
@@ -13933,6 +13944,16 @@
       "symbol": "_commode"
     },
     {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
       "data_import": true,
       "family": "c-runtime",
       "kind": "name",
@@ -14211,6 +14232,16 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "vfprintf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "waitpid"
     },
     {
       "data_import": false,
@@ -14511,6 +14542,16 @@
       "status": "implemented",
       "status_explicit": true,
       "symbol": "_ctime64_s"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
     },
     {
       "data_import": false,
@@ -18975,19 +19016,15 @@
     "implemented": 238,
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 877,
+    "canonical_services": 873,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 241,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 589,
-    "ordinal_aliases": 31,
-    "partial": 648,
-    "libraries": 22,
-    "manual_services": 581,
+    "manual_services": 577,
     "ordinal_aliases": 0,
-    "partial": 639,
+    "partial": 636,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 300,

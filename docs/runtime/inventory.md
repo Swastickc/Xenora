@@ -12,12 +12,12 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 885 |
+| Canonical services | 873 |
 | Typed registry services | 296 |
-| Manual code registrations | 589 |
+| Manual code registrations | 577 |
 | Canonical libraries | 21 |
 | Implemented | 237 |
-| Partial | 648 |
+| Partial | 636 |
 | Stub | 0 |
 | Data-import services | 7 |
 | Aliases of every kind | 937 |
@@ -48,16 +48,15 @@ independent acceptance or compatibility claims.
 | Library | Family | Total | Typed | Manual | Data | Implemented | Partial | Stub | Implicit status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
-| <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
-| <code>bcrypt.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
+| <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 318 | 59 | 259 | 0 | 42 | 276 | 0 | 28 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
 | <code>libstdc++-6.dll</code> | <code>c++-support</code> | 18 | 3 | 15 | 0 | 15 | 3 | 0 | 0 |
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
-| <code>msvcrt.dll</code> | <code>c-runtime</code> | 39 | 13 | 26 | 7 | 14 | 25 | 0 | 14 |
+| <code>msvcrt.dll</code> | <code>c-runtime</code> | 41 | 13 | 28 | 7 | 14 | 27 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 301 | 211 | 90 | 0 | 104 | 197 | 0 | 10 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 298 | 207 | 91 | 0 | 103 | 195 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 57 | 0 | 57 | 0 | 6 | 51 | 0 | 6 |

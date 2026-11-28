@@ -32,6 +32,7 @@ const ACCEPTED_FLAGS: u32 = ALLOCATE_BUFFER
     | MAX_WIDTH_MASK;
 
 const ERRHANDLING_API: &str = "api-ms-win-core-errorhandling-l1-1-0.dll";
+const DEBUG_API: &str = "api-ms-win-core-debug-l1-1-0.dll";
 
 /// The system message table, in en-US, from the public winerror.h
 /// documentation. Entries end with the trailing newline real system
@@ -376,15 +377,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     // goes nowhere. There is no debugger here, so the honest behavior is
     // that the string has no observable effect. The text is still read so a
     // bad pointer fails the way it would with a debugger attached.
-    for symbol in ["OutputDebugStringA", "OutputDebugStringW"] {
+    for (symbol, unit_size) in [("OutputDebugStringA", 1), ("OutputDebugStringW", 2)] {
         registry.register(KERNEL32, symbol, move |args, _, memory| {
             let text = args.rcx;
             if text != 0 {
-                // Touch the first unit so a faulting pointer raises the same
-                // memory fault a debugger-attached read would.
+                // Probe one code unit in the entry point's encoding.
                 let mut unit = [0u8; 2];
                 memory
-                    .read_bytes(text, &mut unit)
+                    .read_bytes(text, &mut unit[..unit_size])
                     .map_err(ExitReason::MemoryFault)?;
             }
             Ok(0)
@@ -397,6 +397,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         "OutputDebugStringW",
     ] {
         registry.alias(ERRHANDLING_API, KERNEL32, symbol);
+        registry.alias(DEBUG_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Implemented);
     }
 

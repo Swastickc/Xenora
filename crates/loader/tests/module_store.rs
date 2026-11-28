@@ -8,11 +8,14 @@
 
 use std::sync::Arc;
 
+use xenora_loader::export_table::ExportTableError;
+use xenora_loader::import_table::ImportTableError;
+use xenora_loader::module_graph::{ModuleGraph, PackageModule};
 use xenora_loader::module_layout::{AddressInterval, ModuleLayoutArena};
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 use xenora_loader::{
-    GuestMemory, ImportDisposition, ImportRegistry, MemoryPermissions, ModuleStoreError,
-    ProvisionedModuleStore, RuntimeLoadPreparationError, prepare_runtime_load,
+    GuestMemory, ImportDisposition, ImportFailure, ImportRegistry, MemoryPermissions,
+    ModuleStoreError, ProvisionedModuleStore, RuntimeLoadPreparationError, prepare_runtime_load,
 };
 
 const CONSUMER: &[u8] = include_bytes!("../../../fixtures/pe/multidll/multidll-consumer.exe");
@@ -304,4 +307,95 @@ fn malformed_duplicate_and_budget_inputs_are_refused() {
         ),
         "the store count is bounded"
     );
+}
+
+#[test]
+fn incomplete_directories_are_rejected_without_claiming_the_module_identity() {
+    const DEPENDENCY: &str = "xenora_chain.dll";
+    let mut services = registry();
+    let mut store = store_of(&[
+        ("multidll-consumer.exe", CONSUMER),
+        ("xenora_math.dll", MATH),
+    ]);
+    let before = (store.len(), store.total_bytes(), store.remaining_budget());
+
+    // The first two PE32+ data directories are exports and ordinary imports.
+    // Preserve the original provider and directory RVAs and shorten one
+    // declared directory at a time so even its first record is incomplete.
+    let pe_offset = u32::from_le_bytes(CHAIN[0x3c..0x40].try_into().unwrap()) as usize;
+    for (index, is_import) in [(0, false), (1, true)] {
+        let directory = pe_offset + 24 + 112 + 8 * index;
+        let rva = u32::from_le_bytes(CHAIN[directory..directory + 4].try_into().unwrap());
+        assert_ne!(rva, 0);
+        let mut bytes = CHAIN.to_vec();
+        bytes[directory + 4..directory + 8].copy_from_slice(&1u32.to_le_bytes());
+
+        let graph = ModuleGraph::build(&[PackageModule {
+            file_name: DEPENDENCY,
+            bytes: &bytes,
+        }])
+        .expect("static inspection still returns a partial graph");
+        assert!(!graph.inspection_is_complete());
+        let node = &graph.modules()[0];
+        let error = store
+            .insert(DEPENDENCY, bytes, &services)
+            .expect_err("the runtime store needs complete tables");
+        if is_import {
+            let expected = ImportTableError::ImportDirectoryEnd { rva: rva + 1 };
+            assert_eq!(node.import_error, Some(expected));
+            assert!(matches!(
+                error,
+                ModuleStoreError::InvalidImportTable { ref name, source }
+                    if name == DEPENDENCY && source == expected
+            ));
+        } else {
+            let expected = ExportTableError::ExportDirectoryEnd { rva: rva + 1 };
+            assert_eq!(node.export_error, Some(expected));
+            assert!(matches!(
+                error,
+                ModuleStoreError::InvalidExportTable { ref name, source }
+                    if name == DEPENDENCY && source == expected
+            ));
+        }
+        assert!(store.get(DEPENDENCY).is_none());
+        assert_eq!(
+            (store.len(), store.total_bytes(), store.remaining_budget()),
+            before
+        );
+    }
+
+    let mut memory = GuestMemory::new();
+    let error = prepare_runtime_load(
+        &store,
+        &["multidll-consumer.exe"],
+        arena(),
+        &occupied(),
+        &mut services,
+        TLS_BASE,
+        &mut memory,
+    )
+    .expect_err("a rejected dependency is still missing from the store");
+    assert!(matches!(
+        error,
+        RuntimeLoadPreparationError::UnresolvedImports(ref diagnostics)
+            if diagnostics.unresolved_imports().any(|entry| matches!(
+                &entry.disposition,
+                ImportDisposition::Unresolved(ImportFailure::MissingModule { module })
+                    if module == DEPENDENCY
+            ))
+    ));
+
+    store.insert(DEPENDENCY, CHAIN, &services).unwrap();
+    assert_eq!(store.get(DEPENDENCY).unwrap().bytes(), CHAIN);
+    let prepared = prepare_runtime_load(
+        &store,
+        &["multidll-consumer.exe"],
+        arena(),
+        &occupied(),
+        &mut services,
+        TLS_BASE,
+        &mut memory,
+    )
+    .expect("the valid dependency can claim the previously rejected name");
+    assert_eq!(prepared.reservations.len(), 3);
 }

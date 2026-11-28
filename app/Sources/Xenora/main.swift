@@ -742,6 +742,7 @@ struct ContentView: View {
                     Button("Stop") { loop.stop() }
                         .disabled(!loop.isRunning && !loop.isPaused)
                 }
+                FrameJournalExportView(model: loop)
                 if loop.isInteractive && (loop.isRunning || loop.isPaused) {
                     if let controller = loop.controller {
                         Text("Controller: \(controller.name)")

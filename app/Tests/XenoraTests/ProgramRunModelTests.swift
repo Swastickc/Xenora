@@ -10,6 +10,7 @@ struct ProgramRunModelTests {
         let trace: Bool
         let arguments: [String]
         let standardInput: URL?
+        let guestFileExport: ProgramGuestFileExport?
     }
 
     private actor InvocationLog {
@@ -26,6 +27,11 @@ struct ProgramRunModelTests {
         let nextURL = URL(fileURLWithPath: "/nonexistent/next.exe")
         let firstInput = URL(fileURLWithPath: "/nonexistent/first input.dat")
         let editedInput = URL(fileURLWithPath: "/nonexistent/edited input.dat")
+        let firstExport = ProgramGuestFileExport(
+            guestPath: #"C:\Output Files\first.bin"#,
+            destination: URL(fileURLWithPath: "/nonexistent/first output.dat")
+        )
+        let editedDestination = URL(fileURLWithPath: "/nonexistent/edited output.dat")
         let firstOutcome = outcome(output: "previous selection", status: 23)
         let nextOutcome = outcome(output: "current selection", status: 0)
         let firstStarted = AsyncStream<Void>.makeStream()
@@ -37,9 +43,10 @@ struct ProgramRunModelTests {
             nextGate.continuation.finish()
         }
         let invocations = InvocationLog()
-        let model = ProgramRunModel(worker: { url, trace, arguments, standardInput in
+        let model = ProgramRunModel(worker: { url, trace, arguments, standardInput, guestFileExport in
             await invocations.append(Invocation(
-                url: url, trace: trace, arguments: arguments, standardInput: standardInput
+                url: url, trace: trace, arguments: arguments, standardInput: standardInput,
+                guestFileExport: guestFileExport
             ))
             switch url {
             case firstURL:
@@ -61,9 +68,13 @@ struct ProgramRunModelTests {
         _ = model.addArgument()
         #expect(model.standardInput == nil)
         model.standardInput = firstInput
+        model.guestFilePath = firstExport.guestPath
+        model.guestFileDestination = firstExport.destination
         let first = try #require(model.run(firstURL, trace: true))
         model.arguments[0].value = "edited argument"
         model.standardInput = editedInput
+        model.guestFilePath = #"C:\edited.bin"#
+        model.guestFileDestination = editedDestination
         var started = firstStarted.stream.makeAsyncIterator()
         _ = await started.next()
         #expect(model.running)
@@ -77,6 +88,8 @@ struct ProgramRunModelTests {
         #expect(model.fileName == nil)
         #expect(model.result == nil)
         #expect(model.standardInput == nil)
+        #expect(model.guestFilePath.isEmpty)
+        #expect(model.guestFileDestination == nil)
         let blockedAfterClear = model.run(blockedURL, trace: false)
         #expect(blockedAfterClear == nil)
         #expect(model.fileName == nil)
@@ -89,7 +102,8 @@ struct ProgramRunModelTests {
         #expect(model.fileName == nil)
         #expect(model.result == nil)
         let firstInvocation = Invocation(
-            url: firstURL, trace: true, arguments: ["  first argument  ", ""], standardInput: firstInput
+            url: firstURL, trace: true, arguments: ["  first argument  ", ""], standardInput: firstInput,
+            guestFileExport: firstExport
         )
         #expect(await invocations.entries == [firstInvocation])
 
@@ -103,7 +117,8 @@ struct ProgramRunModelTests {
         #expect(model.fileName == "next.exe")
         #expect(model.result == nextOutcome)
         let nextInvocation = Invocation(
-            url: nextURL, trace: false, arguments: ["edited argument", ""], standardInput: nil
+            url: nextURL, trace: false, arguments: ["edited argument", ""], standardInput: nil,
+            guestFileExport: nil
         )
         #expect(await invocations.entries == [firstInvocation, nextInvocation])
     }
@@ -114,13 +129,46 @@ struct ProgramRunModelTests {
             exitStatus: nil, standardOutput: "", standardError: "", truncated: false,
             lastStage: nil, launchError: "runner not found", hostMilliseconds: 1
         )
-        let model = ProgramRunModel(worker: { _, _, _, _ in failure })
+        let model = ProgramRunModel(worker: { _, _, _, _, _ in failure })
         for _ in 0..<2 {
             let run = try #require(model.run(url, trace: false))
             await run.value
             #expect(model.result == failure)
             #expect(!model.running)
         }
+    }
+
+    @Test func incompleteOrInvalidExportSelectionCannotStartTheWorker() async throws {
+        let program = URL(fileURLWithPath: "/nonexistent/guest.exe")
+        let destination = URL(fileURLWithPath: "/nonexistent/host output.bin")
+        let invocations = InvocationLog()
+        let successfulRun = outcome(output: "ran", status: 0)
+        let model = ProgramRunModel(worker: { url, trace, arguments, standardInput, guestFileExport in
+            await invocations.append(Invocation(
+                url: url, trace: trace, arguments: arguments, standardInput: standardInput,
+                guestFileExport: guestFileExport
+            ))
+            return successfulRun
+        })
+
+        model.guestFilePath = #"C:\guest.bin"#
+        #expect(model.guestFileExportError != nil)
+        #expect(model.run(program, trace: false) == nil)
+        model.guestFileDestination = destination
+        model.guestFilePath = "relative.bin"
+        #expect(model.guestFileExportError != nil)
+        #expect(model.run(program, trace: false) == nil)
+
+        model.guestFilePath = #"c:/Guest Files/guest.bin"#
+        #expect(model.guestFileExportError == nil)
+        let run = try #require(model.run(program, trace: false))
+        await run.value
+        #expect(await invocations.entries == [Invocation(
+            url: program, trace: false, arguments: [], standardInput: nil,
+            guestFileExport: ProgramGuestFileExport(
+                guestPath: #"c:/Guest Files/guest.bin"#, destination: destination
+            )
+        )])
     }
 
     private func outcome(output: String, status: Int32) -> ProgramRunResult {

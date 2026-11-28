@@ -4,6 +4,8 @@
 //! Microsoft's public contracts:
 //! https://learn.microsoft.com/windows/console/createconsolescreenbuffer
 //! https://learn.microsoft.com/windows/console/getconsolescreenbufferinfo
+//! https://learn.microsoft.com/windows/console/readconsoleoutput
+//! https://learn.microsoft.com/windows/console/writeconsoleoutput
 //!
 //! The default 80x25 grid and the capture having no colors are Xenora facts,
 //! not claims about every Windows console host.
@@ -27,7 +29,9 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "FillConsoleOutputCharacterW"),
     (KERNEL32, "FillConsoleOutputCharacterA"),
     (KERNEL32, "FillConsoleOutputAttribute"),
+    (KERNEL32, "WriteConsoleOutputA"),
     (KERNEL32, "WriteConsoleOutputW"),
+    (KERNEL32, "ReadConsoleOutputA"),
     (KERNEL32, "ReadConsoleOutputW"),
 ];
 
@@ -206,4 +210,182 @@ fn console_output_round_trips_through_the_grid() {
         u64::from(b'D') as u16
     );
     assert_eq!(guest.memory.read_u16(CELLS + 0x10E).unwrap(), 4);
+}
+
+const CELLS: u64 = SCRATCH + 0x200;
+const TARGET: u64 = SCRATCH + 0x400;
+const REGION: u64 = SCRATCH + 0x600;
+const GRID: u64 = 4 | (4 << 16);
+const CALLER_SIZE: u64 = 5 | (4 << 16);
+const CALLER_ORIGIN: u64 = 1 | (2 << 16);
+const FULL_GRID: [i16; 4] = [0, 0, 3, 3];
+const REQUESTED: [i16; 4] = [-1, 1, 4, 5];
+const COPIED: [i16; 4] = [0, 1, 2, 2];
+const SENTINEL: u32 = 0x00F0_002E;
+const PAIRS: [(&str, &str); 2] = [
+    ("WriteConsoleOutputA", "ReadConsoleOutputA"),
+    ("WriteConsoleOutputW", "ReadConsoleOutputW"),
+];
+
+fn small_grid(guest: &mut Guest) -> u64 {
+    let handle = guest.call("CreateConsoleScreenBuffer", &[GENERIC_RW, 0, 0, 1, 0]);
+    assert_ne!(handle, u64::MAX);
+    assert_eq!(guest.call("SetConsoleScreenBufferSize", &[handle, GRID]), 1);
+    handle
+}
+
+fn set_region(guest: &mut Guest, coordinates: [i16; 4]) {
+    for (index, coordinate) in coordinates.into_iter().enumerate() {
+        guest
+            .memory
+            .write_u16(REGION + 2 * index as u64, coordinate as u16)
+            .unwrap();
+    }
+}
+
+fn region(guest: &Guest) -> [i16; 4] {
+    std::array::from_fn(|index| guest.u16_at(REGION + 2 * index as u64) as i16)
+}
+
+fn set_cells(guest: &mut Guest, address: u64, cells: &[u32]) {
+    for (index, &cell) in cells.iter().enumerate() {
+        guest
+            .memory
+            .write_u32(address + 4 * index as u64, cell)
+            .unwrap();
+    }
+}
+
+fn cells<const N: usize>(guest: &Guest, address: u64) -> [u32; N] {
+    std::array::from_fn(|index| guest.u32_at(address + 4 * index as u64))
+}
+
+#[test]
+fn write_output_reports_only_cells_inside_the_grid_and_the_caller_buffer() {
+    for (write, _) in PAIRS {
+        let mut guest = Guest::new(IMPORTS, &[]);
+        let handle = small_grid(&mut guest);
+        set_cells(&mut guest, CELLS, &[SENTINEL; 16]);
+        set_region(&mut guest, FULL_GRID);
+        assert_eq!(
+            guest.call("WriteConsoleOutputW", &[handle, CELLS, GRID, 0, REGION]),
+            1
+        );
+
+        // Grid clipping moves the first source cell from x=1 to x=2.
+        // Caller clipping limits the copy to the last three columns and two rows.
+        let mut source = [SENTINEL; 20];
+        source[12..15].copy_from_slice(&[0x0001_0041, 0x0002_0042, 0x0003_0043]);
+        source[17..20].copy_from_slice(&[0x0004_0044, 0x0005_0045, 0x0006_0046]);
+        set_cells(&mut guest, CELLS, &source);
+        set_region(&mut guest, REQUESTED);
+        assert_eq!(
+            guest.call(write, &[handle, CELLS, CALLER_SIZE, CALLER_ORIGIN, REGION]),
+            1
+        );
+        assert_eq!(region(&guest), COPIED, "{write}");
+
+        set_region(&mut guest, FULL_GRID);
+        assert_eq!(
+            guest.call("ReadConsoleOutputW", &[handle, TARGET, GRID, 0, REGION]),
+            1
+        );
+        let mut expected = [SENTINEL; 16];
+        expected[4..7].copy_from_slice(&[0x0001_0041, 0x0002_0042, 0x0003_0043]);
+        expected[8..11].copy_from_slice(&[0x0004_0044, 0x0005_0045, 0x0006_0046]);
+        assert_eq!(cells::<16>(&guest, TARGET), expected, "{write}");
+        assert_eq!(
+            cells::<20>(&guest, CELLS),
+            source,
+            "{write} overwrote its source"
+        );
+    }
+}
+
+#[test]
+fn read_output_reports_only_cells_inside_the_grid_and_the_caller_buffer() {
+    for (_, read) in PAIRS {
+        let mut guest = Guest::new(IMPORTS, &[]);
+        let handle = small_grid(&mut guest);
+        let grid = [
+            0x0001_0041,
+            0x0002_0042,
+            0x0003_0043,
+            0x0004_0044,
+            0x0005_0045,
+            0x0006_0046,
+            0x0007_0047,
+            0x0008_0048,
+            0x0009_0049,
+            0x000A_004A,
+            0x000B_004B,
+            0x000C_004C,
+            0x000D_004D,
+            0x000E_004E,
+            0x000F_004F,
+            0x0010_0050,
+        ];
+        set_cells(&mut guest, CELLS, &grid);
+        set_region(&mut guest, FULL_GRID);
+        assert_eq!(
+            guest.call("WriteConsoleOutputW", &[handle, CELLS, GRID, 0, REGION]),
+            1
+        );
+
+        set_cells(&mut guest, TARGET, &[SENTINEL; 20]);
+        set_region(&mut guest, REQUESTED);
+        assert_eq!(
+            guest.call(read, &[handle, TARGET, CALLER_SIZE, CALLER_ORIGIN, REGION]),
+            1
+        );
+        assert_eq!(region(&guest), COPIED, "{read}");
+        let mut expected = [SENTINEL; 20];
+        expected[12..15].copy_from_slice(&[0x0005_0045, 0x0006_0046, 0x0007_0047]);
+        expected[17..20].copy_from_slice(&[0x0009_0049, 0x000A_004A, 0x000B_004B]);
+        assert_eq!(cells::<20>(&guest, TARGET), expected, "{read}");
+    }
+}
+
+#[test]
+fn wholly_clipped_output_reports_an_empty_rectangle_and_leaves_cells_unchanged() {
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = small_grid(&mut guest);
+    set_cells(&mut guest, CELLS, &[SENTINEL; 16]);
+    set_region(&mut guest, FULL_GRID);
+    assert_eq!(
+        guest.call("WriteConsoleOutputW", &[handle, CELLS, GRID, 0, REGION]),
+        1
+    );
+
+    set_cells(&mut guest, CELLS, &[0x0001_0041; 20]);
+    set_cells(&mut guest, TARGET, &[SENTINEL; 20]);
+    // The first rectangle misses the grid. The second touches the grid but
+    // its first visible cell would map beyond the caller's right edge.
+    for requested in [[5, 1, 7, 2], [-4, 1, 1, 2]] {
+        for (write, read) in PAIRS {
+            for (symbol, address) in [(write, CELLS), (read, TARGET)] {
+                set_region(&mut guest, requested);
+                assert_eq!(
+                    guest.call(
+                        symbol,
+                        &[handle, address, CALLER_SIZE, CALLER_ORIGIN, REGION]
+                    ),
+                    1
+                );
+                let [left, top, right, bottom] = region(&guest);
+                assert!(
+                    right < left || bottom < top,
+                    "{symbol} reported {:?}",
+                    region(&guest)
+                );
+            }
+        }
+    }
+    assert_eq!(cells::<20>(&guest, TARGET), [SENTINEL; 20]);
+    set_region(&mut guest, FULL_GRID);
+    assert_eq!(
+        guest.call("ReadConsoleOutputW", &[handle, TARGET, GRID, 0, REGION]),
+        1
+    );
+    assert_eq!(cells::<16>(&guest, TARGET), [SENTINEL; 16]);
 }

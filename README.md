@@ -90,9 +90,23 @@ cargo run --locked -p xenora --bin xenora-session -- --backend reference --repla
 ```
 
 Use a regular file of at most 256 bytes, with LF or CRLF line endings and an
-optional final newline. Choose one source for directions per run, either
-`--replay` or positional arguments. The backend and instruction budget are
-selected on the command line.
+optional final newline. The backend and instruction budget are selected on
+the command line.
+
+To choose the next direction after seeing a frame, run an interactive session.
+
+```sh
+cargo run --locked -p xenora --bin xenora-session -- --interactive --workload threaded --frame-dir live-frames
+```
+
+Enter up to 32 `left` or `right` lines on standard input. The session prints
+each validated frame immediately. Close standard input to check the guest
+journal and resource cleanup, print the final status, and write the PPM files.
+Choose one input source per run.
+On a terminal, use Ctrl-D on an empty line to close input. An input error or
+worker failure ends the session without that final status or export.
+The 15-second wall deadline applies to each guest response and to shutdown.
+Time spent waiting for a direction is outside the deadline.
 
 The command supports the embedded synthetic application. External PE
 admission and a macOS interface for this session are future work.

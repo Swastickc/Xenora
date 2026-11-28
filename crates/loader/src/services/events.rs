@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 const SYNCH_API: &str = "api-ms-win-core-synch-l1-1-0.dll";
 const CREATE_EVENT_MANUAL_RESET: u32 = 0x0001;
 const CREATE_EVENT_INITIAL_SET: u32 = 0x0002;
-const EVENT_MODIFY_STATE: u32 = 0x0002;
+pub(super) const EVENT_MODIFY_STATE: u32 = 0x0002;
 pub(super) const SYNCHRONIZE: u32 = 0x0010_0000;
-const EVENT_ALL_ACCESS: u32 = 0x001f_0003;
+pub(super) const EVENT_ALL_ACCESS: u32 = 0x001f_0003;
 const WAIT_OBJECT_0: u64 = 0;
 pub(super) const INFINITE: u32 = u32::MAX;
 pub(super) const TICKS_PER_MILLI: u64 = 10_000;
@@ -459,6 +459,18 @@ pub(super) fn wait_for_objects(
                     return state.fail(teb, ERROR_INVALID_PARAMETER, WAIT_FAILED);
                 }
                 waitables.push(event);
+            }
+            // A spawned child is a process that already ended: its signal is
+            // set for good, so the wait treats it like any signaled object.
+            Some(GuestObject::ChildProcess { signal, .. }) => {
+                if all
+                    && waitables
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, signal))
+                {
+                    return state.fail(teb, ERROR_INVALID_PARAMETER, WAIT_FAILED);
+                }
+                waitables.push(signal);
             }
             Some(_) => return state.fail(teb, ERROR_NOT_SUPPORTED, WAIT_FAILED),
             None if matches!(*handle, super::CURRENT_THREAD | super::CURRENT_PROCESS) => {

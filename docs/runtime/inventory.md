@@ -12,12 +12,12 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 870 |
+| Canonical services | 873 |
 | Typed registry services | 296 |
-| Manual code registrations | 574 |
-| Canonical libraries | 21 |
+| Manual code registrations | 577 |
+| Canonical libraries | 22 |
 | Implemented | 237 |
-| Partial | 633 |
+| Partial | 636 |
 | Stub | 0 |
 | Data-import services | 7 |
 | Aliases of every kind | 906 |
@@ -33,6 +33,7 @@ independent acceptance or compatibility claims.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
+| <code>bcrypt.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 316 | 59 | 257 | 0 | 40 | 276 | 0 | 26 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |

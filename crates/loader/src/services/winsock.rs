@@ -45,6 +45,8 @@ const WSA_INVALID_HANDLE: u32 = 6;
 const WSA_NOT_ENOUGH_MEMORY: u32 = 8;
 const WSA_INVALID_EVENT: u64 = 0;
 
+const PROTOCOLS: [(&[u8], u16); 2] = [(b"tcp\0", 6), (b"udp\0", 17)];
+
 const SERVICES: [(&[u8], u16, &[u8]); 10] = [
     (b"ftp\0", 21, b"tcp\0"),
     (b"ssh\0", 22, b"tcp\0"),
@@ -484,6 +486,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         ("shutdown", 22),
         ("socket", 23),
         ("gethostbyname", 52),
+        ("getprotobyname", 53),
+        ("getprotobynumber", 54),
         ("getservbyname", 55),
         ("getservbyport", 56),
         ("gethostbyaddr", 51),
@@ -2787,6 +2791,67 @@ fn register_socket_names(registry: &mut ImportRegistry, state: &Arc<ServicesStat
             Ok(base)
         },
     );
+
+    for (symbol, by_name) in [("getprotobyname", true), ("getprotobynumber", false)] {
+        let lookup = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                use crate::memory::PROCESS_HEAP;
+                let fail = |error: u32| {
+                    let _ = lookup.fail(cpu.gs_base, error, 0);
+                    Ok(0)
+                };
+                if lookup.winsock.lock().expect("guest Winsock state").refs == 0 {
+                    return fail(WSANOTINITIALISED);
+                }
+                let found = if by_name {
+                    if args.rcx == 0 {
+                        return fail(WSAEFAULT);
+                    }
+                    let mut name = Vec::new();
+                    for offset in 0..16u64 {
+                        let byte = memory.read_u8(args.rcx + offset).map_err(|_| WSAEFAULT);
+                        let Ok(byte) = byte else {
+                            return fail(WSAEFAULT);
+                        };
+                        if byte == 0 {
+                            break;
+                        }
+                        name.push(byte.to_ascii_lowercase());
+                    }
+                    PROTOCOLS.iter().find(|(proto, _)| {
+                        proto
+                            .iter()
+                            .take_while(|byte| **byte != 0)
+                            .copied()
+                            .eq(name.iter().copied())
+                    })
+                } else {
+                    PROTOCOLS
+                        .iter()
+                        .find(|(_, number)| *number == args.rcx as u16)
+                };
+                let Some((proto, number)) = found else {
+                    return fail(11001);
+                };
+                let base = match memory.map_heap_allocation(PROCESS_HEAP, 48) {
+                    Ok(base) => base,
+                    Err(_) => return fail(WSAENOBUFS),
+                };
+                if memory.write_bytes(base + 24, proto).is_err()
+                    || memory.write_u64(base, base + 24).is_err()
+                    || memory.write_u64(base + 8, 0).is_err()
+                    || memory.write_u16(base + 16, *number).is_err()
+                {
+                    return fail(WSAEFAULT);
+                }
+                Ok(base)
+            },
+        );
+    }
 }
 
 fn register_socket_options(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -5268,4 +5333,18 @@ fn servbyname_resolves_the_standard_ports_and_misses_honestly() {
     );
     assert!(registry.resolve(MODULE, &ImportName::Ordinal(55)).is_some());
     assert!(registry.resolve(MODULE, &ImportName::Ordinal(56)).is_some());
+
+    memory.write_bytes(0x1100, b"tcp\0").unwrap();
+    let protoent = call(&mut memory, MODULE, "getprotobyname", &[0x1100]);
+    assert_ne!(protoent, 0);
+    assert_eq!(memory.read_u16(protoent + 16).unwrap(), 6);
+    let protoent = call(&mut memory, MODULE, "getprotobynumber", &[17]);
+    assert_ne!(protoent, 0);
+    let name_ptr = memory.read_u64(protoent).unwrap();
+    let mut name = [0u8; 4];
+    memory.read_bytes(name_ptr, &mut name).unwrap();
+    assert_eq!(&name[..], b"udp\0");
+    assert_eq!(call(&mut memory, MODULE, "getprotobynumber", &[1]), 0);
+    assert!(registry.resolve(MODULE, &ImportName::Ordinal(53)).is_some());
+    assert!(registry.resolve(MODULE, &ImportName::Ordinal(54)).is_some());
 }

@@ -35,6 +35,8 @@ pub enum TlsError {
         start: u64,
         end: u64,
     },
+    /// Reserved alignment encoding in the TLS directory's characteristics.
+    InvalidAlignmentEncoding(u8),
     /// `AddressOfCallbacks` is not zero and not inside a section of the image.
     CallbackArrayOutOfBounds {
         address: u64,
@@ -66,6 +68,9 @@ impl fmt::Display for TlsError {
                     f,
                     "invalid TLS template range: 0x{start:016x}..0x{end:016x}"
                 )
+            }
+            Self::InvalidAlignmentEncoding(encoding) => {
+                write!(f, "invalid PE TLS alignment encoding {encoding}")
             }
             Self::CallbackArrayOutOfBounds { address } => {
                 write!(
@@ -117,6 +122,16 @@ pub struct TlsDirectory {
 }
 
 const TLS_DIRECTORY_SIZE: usize = 40;
+
+fn tls_block_alignment(characteristics: u32) -> Result<u64, TlsError> {
+    // The PE TLS directory uses the IMAGE_SCN_ALIGN_* values in bits 23:20.
+    let encoding = ((characteristics >> 20) & 0xf) as u8;
+    match encoding {
+        0 => Ok(1),
+        15 => Err(TlsError::InvalidAlignmentEncoding(encoding)),
+        _ => Ok(1 << (encoding - 1)),
+    }
+}
 
 /// Parse the TLS directory from raw PE file bytes.
 pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDirectory>, TlsError> {
@@ -173,6 +188,7 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
     let callbacks_address = u64::from_le_bytes(directory[24..32].try_into().unwrap());
     let size_of_zero_fill = u32::from_le_bytes(directory[32..36].try_into().unwrap());
     let characteristics = u32::from_le_bytes(directory[36..40].try_into().unwrap());
+    tls_block_alignment(characteristics)?;
 
     let callbacks = read_callbacks(bytes, pe, callbacks_address)?;
 
@@ -310,9 +326,9 @@ const DIRECT_TEMPLATE_LIMIT: usize = 1024 * 1024;
 /// Set up TLS runtime state in guest memory:
 /// 1. Assign TLS index 0 at `index_address`.
 /// 2. Map the thread's TLS pointer array at `thread_tls_base`.
-/// 3. Map the thread's data block one page above it, initialized from the
-///    template and zero fill, and store its address in the array slot of the
-///    index.
+/// 3. Map the thread's data block at the required alignment after the array.
+///    Initialize it from the template and zero fill, and store its address in
+///    the array slot of the index.
 ///
 /// `thread_tls_base` is the value the thread environment block holds as its
 /// TLS pointer. Compiled code loads that pointer, indexes it by the module's
@@ -351,6 +367,7 @@ pub(crate) fn setup_tls_avoiding(
     thread_tls_base: u64,
     reserved: Option<Range<u64>>,
 ) -> Result<(), TlsError> {
+    let alignment = tls_block_alignment(tls.characteristics)?;
     let delta = (loaded_base as i128) - (preferred_base as i128);
     let rebase = |va: u64| -> u64 {
         if va == 0 {
@@ -395,8 +412,11 @@ pub(crate) fn setup_tls_avoiding(
         };
 
         // Allocate the pointer array and the per-thread TLS block.
-        let mut block_base = thread_tls_base
+        let array_end = thread_tls_base
             .checked_add(TLS_ARRAY_SIZE as u64)
+            .ok_or(MemoryError::Overflow)?;
+        let mut block_base = array_end
+            .checked_next_multiple_of(alignment)
             .ok_or(MemoryError::Overflow)?;
         let page_size = 4096;
         let map_size = total_size
@@ -407,14 +427,17 @@ pub(crate) fn setup_tls_avoiding(
                 .checked_add(map_size as u64)
                 .ok_or(MemoryError::Overflow)?;
             if block_base < reserved.end && reserved.start < block_end {
-                block_base = reserved.end;
+                block_base = reserved
+                    .end
+                    .checked_next_multiple_of(alignment)
+                    .ok_or(MemoryError::Overflow)?;
             }
         }
         // The startup claims the array before binding imports, so that a
         // heap allocation cannot land where it belongs. Standalone callers
         // map it here.
         if memory
-            .first_region_overlap(thread_tls_base, thread_tls_base + TLS_ARRAY_SIZE as u64)
+            .first_region_overlap(thread_tls_base, array_end)
             .is_none()
         {
             memory.map_region(

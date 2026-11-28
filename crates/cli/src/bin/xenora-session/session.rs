@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -124,6 +124,7 @@ impl Direction {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub(super) struct Frame {
     pub(super) sequence: u32,
     pub(super) rgba: Vec<u8>,
@@ -152,7 +153,7 @@ enum Report {
 
 /// One running PE and its native DBT stay on the worker until the host closes
 /// the command channel. Each host request can publish exactly one frame.
-struct RunningSession {
+pub(super) struct RunningSession {
     commands: Option<SyncSender<Direction>>,
     reports: Receiver<Report>,
     worker: Option<JoinHandle<()>>,
@@ -208,6 +209,20 @@ impl RunningSession {
             .recv()
             .map_err(|_| "guest worker disconnected without a terminal report".to_owned())
     }
+
+    pub(super) fn check_idle(&self) -> Result<(), String> {
+        match self.reports.try_recv() {
+            Err(TryRecvError::Empty) => Ok(()),
+            Ok(Report::Finished(Err(error))) => Err(error),
+            Ok(Report::Finished(Ok(_))) => {
+                Err("guest exited before its command stream closed".to_owned())
+            }
+            Ok(Report::Frame(_)) => Err("guest presented an unrequested frame".to_owned()),
+            Err(TryRecvError::Disconnected) => {
+                Err("guest worker disconnected without a terminal report".to_owned())
+            }
+        }
+    }
 }
 
 impl Drop for RunningSession {
@@ -227,20 +242,47 @@ pub(super) fn run(
     steps: usize,
     directions: &[Direction],
 ) -> Result<CompletedSession, String> {
-    if !(1..=MAX_STEPS).contains(&steps) || directions.len() > MAX_EVENTS {
+    if directions.len() > MAX_EVENTS {
+        return Err("session exceeds its instruction or input limits".to_owned());
+    }
+    let mut directions = directions.iter().copied();
+    run_with_input(
+        workload,
+        backend,
+        steps,
+        |_| Ok(directions.next()),
+        |_| Ok(()),
+    )
+}
+
+pub(super) fn run_with_input(
+    workload: Workload,
+    backend: Backend,
+    steps: usize,
+    mut next: impl FnMut(&RunningSession) -> Result<Option<Direction>, String>,
+    mut present: impl FnMut(&Frame) -> Result<(), String>,
+) -> Result<CompletedSession, String> {
+    if !(1..=MAX_STEPS).contains(&steps) {
         return Err("session exceeds its instruction or input limits".to_owned());
     }
     let mut session = RunningSession::start(workload, backend, steps)?;
-    let frames = directions
-        .iter()
-        .map(|&direction| session.advance(direction))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut directions = Vec::new();
+    let mut frames = Vec::new();
+    while let Some(direction) = next(&session)? {
+        if directions.len() == MAX_EVENTS {
+            return Err("session exceeds its input limit".to_owned());
+        }
+        let frame = session.advance(direction)?;
+        present(&frame)?;
+        directions.push(direction);
+        frames.push(frame);
+    }
     let finished = session.finish()?;
     if !finished
         .journal
         .iter()
         .copied()
-        .eq(workload.expected_journal(directions))
+        .eq(workload.expected_journal(&directions))
     {
         return Err("guest journal does not match the delivered events".to_owned());
     }

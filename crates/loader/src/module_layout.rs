@@ -292,8 +292,10 @@ pub struct ModuleLayoutPlan {
 }
 
 impl ModuleLayoutPlan {
-    /// Plan every image in input order. A failed image reserves no addresses;
-    /// later images are still planned and their successful placements retained.
+    /// Try input-order placement first. If a relocatable placement blocks a
+    /// fixed image, retry with fixed images first, preserving the input order
+    /// within each group. Use the retry only if every image fits. Otherwise
+    /// retain the original placements and failures. Results are in input order.
     ///
     /// The caller's occupied intervals do not need to be sorted. Nonempty
     /// intervals must not overlap one another. After validation they and the
@@ -314,25 +316,32 @@ impl ModuleLayoutPlan {
                     size: arena.size,
                 })?;
         let arena_interval = AddressInterval::new(arena.base, end);
-        let mut blockers = validate_occupied(occupied)?;
-        let mut layouts = Vec::with_capacity(images.len());
-
-        for (index, &descriptor) in images.iter().enumerate() {
-            let outcome = plan_image(descriptor, arena_interval, &blockers);
-            if let ImageLayoutOutcome::Placed(placement) = outcome {
-                insert_blocker(
-                    &mut blockers,
-                    Blocker::Placed {
-                        image_index: index,
-                        interval: AddressInterval::new(placement.base, placement.end),
-                    },
-                );
+        let blockers = validate_occupied(occupied)?;
+        let mut layouts = plan_images(arena_interval, &blockers, images, 0..images.len());
+        if layouts.iter().any(|layout| {
+            matches!(
+                layout.outcome,
+                ImageLayoutOutcome::Failed(ImageLayoutFailure::FixedBaseUnavailable {
+                    reason: PreferredBaseRejection::OverlapsPlacedImage { placed_image_index, .. },
+                }) if !images[placed_image_index].relocations_stripped
+            )
+        }) {
+            let by_fixed = |fixed| {
+                (0..images.len()).filter(move |&index| images[index].relocations_stripped == fixed)
+            };
+            let mut retry = plan_images(
+                arena_interval,
+                &blockers,
+                images,
+                by_fixed(true).chain(by_fixed(false)),
+            );
+            if retry
+                .iter()
+                .all(|layout| matches!(layout.outcome, ImageLayoutOutcome::Placed(_)))
+            {
+                retry.sort_unstable_by_key(|layout| layout.index);
+                layouts = retry;
             }
-            layouts.push(ModuleImageLayout {
-                index,
-                descriptor,
-                outcome,
-            });
         }
 
         Ok(Self {
@@ -472,6 +481,35 @@ fn insert_blocker(blockers: &mut Vec<Blocker>, blocker: Blocker) {
     let key = blocker_key(blocker);
     let position = blockers.partition_point(|&existing| blocker_key(existing) < key);
     blockers.insert(position, blocker);
+}
+
+fn plan_images(
+    arena: AddressInterval,
+    occupied: &[Blocker],
+    images: &[ModuleImageDescriptor],
+    indexes: impl Iterator<Item = usize>,
+) -> Vec<ModuleImageLayout> {
+    let mut blockers = occupied.to_vec();
+    let mut layouts = Vec::with_capacity(images.len());
+    for index in indexes {
+        let descriptor = images[index];
+        let outcome = plan_image(descriptor, arena, &blockers);
+        if let ImageLayoutOutcome::Placed(placement) = outcome {
+            insert_blocker(
+                &mut blockers,
+                Blocker::Placed {
+                    image_index: index,
+                    interval: AddressInterval::new(placement.base, placement.end),
+                },
+            );
+        }
+        layouts.push(ModuleImageLayout {
+            index,
+            descriptor,
+            outcome,
+        });
+    }
+    layouts
 }
 
 fn plan_image(

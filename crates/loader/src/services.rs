@@ -234,6 +234,11 @@ struct ObjectState {
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
+    /// Per-file times as Windows FILETIMEs: creation, access, write. An
+    /// entry appears when the file does and moves with it; a file without
+    /// one reports the fixed Unix epoch, the answer of a drive that does
+    /// not know.
+    file_times: BTreeMap<String, [u64; 3]>,
     directories: BTreeSet<String>,
     /// Locked byte ranges per file path, as (owning handle, offset, length, exclusive).
     locks: BTreeMap<String, Vec<(u64, u64, u64, bool)>>,
@@ -245,9 +250,34 @@ struct ObjectState {
     /// so the running process owns every live view.
     mapping_views: MappingViews,
     next_temp: u32,
+    /// Machine-wide pipe end references by handle value, standing in for
+    /// the per-process handle tables the machine-wide object table is not.
+    pipe_refs: BTreeMap<u64, u32>,
 }
 
 impl ObjectState {
+    /// Machine-wide pipe end references, by handle value. The handle tables
+    /// of Windows are per-process, which the machine-wide object table is
+    /// not: the count stands in for them, so the object lives exactly as
+    /// long as some process's descriptor or handle names it.
+    pub(crate) fn pipe_ref_add(&mut self, handle: u64) {
+        *self.pipe_refs.entry(handle).or_insert(0) += 1;
+    }
+
+    /// One reference less: true when the last one went, as the object dies
+    /// when nothing anywhere names it.
+    pub(crate) fn pipe_ref_release(&mut self, handle: u64) -> bool {
+        let Some(count) = self.pipe_refs.get_mut(&handle) else {
+            return true;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.pipe_refs.remove(&handle);
+            return true;
+        }
+        false
+    }
+
     fn next_handle(&self) -> Option<u64> {
         self.last_handle
             .checked_add(4)
@@ -332,6 +362,10 @@ pub struct ServicesState {
     pub(crate) cxx_guards: Mutex<cxx_abi::GuardTable>,
     /// The status the guest process exited with. Set once.
     exit_status: Mutex<Option<u32>>,
+    // A spawned child shares the machine-wide object table: its exit must
+    // not wipe objects the parent and siblings still reference. The root
+    // process owns the table and closes everything when it ends.
+    shares_object_table: bool,
     crt_startup: Mutex<crt_startup::CrtStartup>,
     winhttp: Mutex<winhttp::WinHttpHandles>,
     xinput: Mutex<xinput::Slots>,
@@ -418,6 +452,7 @@ impl ServicesState {
             emutls: Mutex::default(),
             cxx_guards: Mutex::default(),
             exit_status: Mutex::default(),
+            shares_object_table: false,
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
             xinput: Mutex::default(),
@@ -545,6 +580,16 @@ impl ServicesState {
                     .expect("process environment")
                     .clone(),
             ),
+            // The CRT descriptor wiring inherits, as a `_spawnve` child's
+            // does on Windows: the pipes the parent created are the child's
+            // own descriptors, which the shell redirection needs.
+            crt_streams: Mutex::new(self.crt_streams().inherit_for_spawn()),
+            // The image travels too: a spawn child is itself able to spawn,
+            // as any Windows process is. Without it a shell re-executed as a
+            // child could not run another command of its own multi-call
+            // binary, which is exactly the nested `sh` case.
+            spawn_image: Mutex::new(self.spawn_image.lock().expect("spawn image").clone()),
+            shares_object_table: true,
             ..ServicesState::new(Arc::clone(&self.clock))
         })
     }
@@ -645,8 +690,12 @@ impl ServicesState {
             return first;
         }
         *exited = Some(status);
-        // The three table locks are taken one at a time, never nested.
-        {
+        // The three table locks are taken one at a time, never nested. A
+        // spawned child shares the machine-wide table: its objects close
+        // with the machine, not with the child - the pipe a sibling reads
+        // survives this exit, as it does on Windows where handle tables are
+        // per-process and the pipe object outlives one process's copies.
+        if !self.shares_object_table {
             let mut objects = self.objects.lock().expect("guest object state");
             objects.handles.clear();
             objects.locks.clear();
@@ -1464,6 +1513,8 @@ pub(crate) mod handlers {
                 write: true,
             },
         );
+        objects.pipe_ref_add(read_value);
+        objects.pipe_ref_add(write_value);
         drop(objects);
         context
             .memory
@@ -1481,14 +1532,21 @@ pub(crate) mod handlers {
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
             return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
         }
-        if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
-            && *write
-        {
-            // The end-of-stream marker of an anonymous pipe is its write end
-            // closing: reads then drain what remains and answer empty.
-            state.lock().expect("pipe state").write_open = false;
-        }
-        let removed = objects.handles.remove(&handle);
+        // A pipe end dies when its last reference anywhere closes: the
+        // machine-wide count stands in for the per-process handle tables.
+        // The end-of-stream marker of an anonymous pipe is its write end
+        // closing for good: reads then drain what remains and answer empty.
+        let is_pipe = matches!(objects.handles.get(&handle), Some(GuestObject::Pipe { .. }));
+        let removed = if is_pipe && !objects.pipe_ref_release(handle) {
+            None
+        } else {
+            if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
+                && *write
+            {
+                state.lock().expect("pipe state").write_open = false;
+            }
+            objects.handles.remove(&handle)
+        };
         if let Some(GuestObject::File(file)) = &removed
             && let Some(ranges) = objects.locks.get_mut(&file.path)
         {
@@ -2233,7 +2291,8 @@ pub(crate) mod handlers {
         let _ = (size, mode);
         let outcome = {
             let mut streams = context.state.crt_streams();
-            streams.pipe_create(context.memory, fds)
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.pipe_create(context.memory, &mut drive, fds)
         };
         or_errno(context, outcome)
     }
@@ -4197,7 +4256,8 @@ pub(crate) mod handlers {
     pub use super::crt_math::{
         acos, asin, atan, atan2, atan2f, cbrt, ceil, ceilf, copysign, cos, cosf, cosh, erf, exp,
         exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, ldexp,
-        llround, log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder,
-        rint, round, roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
+        llround, log, log1p, log2, log10, logf, lround, lroundf, modf, modff, nearbyint,
+        nextafterf, pow, powf, remainder, remainderf, rint, round, roundf, sin, sinf, sinh, tan,
+        tanf, tanh, tgamma, trunc,
     };
 }

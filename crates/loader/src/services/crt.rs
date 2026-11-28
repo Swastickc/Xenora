@@ -515,16 +515,19 @@ fn spawnve(
 
     let child = state.child_for_spawn();
     {
+        // The descriptors the child inherited are references of its own,
+        // as Windows handle inheritance adds to the kernel object's count.
+        let child_streams = child.crt_streams();
+        let mut drive = child.objects.lock().expect("guest object state");
+        child_streams.count_inherited_pipe_references(&mut drive);
+    }
+    {
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         if child.set_program_arguments(&refs).is_err() {
             set_errno(memory, cpu.gs_base, EINVAL)?;
             return Ok(u64::MAX);
         }
     }
-    // The child inherits no input bytes in this slice - redirection into a
-    // spawn is step 3 of the issue - but its stdin exists, as a console
-    // child's does.
-    child.set_standard_input(&[]);
     let mut imports = ImportRegistry::new();
     crate::services::register_standard_services(&mut imports, Arc::clone(&child));
     // Shared-memory hand-off: the suspended parent's writes live in its own
@@ -547,6 +550,13 @@ fn spawnve(
         |_| {},
     );
     super::file_mapping::drop_views_except(state, &parent_views);
+    // Process exit closes the child's descriptors: its pipe ends stop
+    // counting for the readers, as they would once the writer died.
+    {
+        let mut child_streams = child.crt_streams();
+        let mut drive = child.objects.lock().expect("guest object state");
+        child_streams.close_pipe_ends_for_exit(&mut drive);
+    }
     let startup = match run {
         Ok(startup) => startup,
         Err(_) => {

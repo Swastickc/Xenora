@@ -264,14 +264,21 @@ impl GuestMemory {
         let copy_len = size.min(initial_data.len());
         data[..copy_len].copy_from_slice(&initial_data[..copy_len]);
 
-        self.regions.push(MappedRegion {
-            base,
-            data,
-            permissions,
-            allocation,
-            allocation_base: base,
-        });
-        self.regions.sort_by_key(|r| r.base);
+        // The table is already sorted. Insert at the sorted position instead
+        // of pushing and sorting the whole table again; use the end of any
+        // equal-base empty markers to preserve the stable ordering the sort
+        // provided.
+        let position = self.regions.partition_point(|region| region.base <= base);
+        self.regions.insert(
+            position,
+            MappedRegion {
+                base,
+                data,
+                permissions,
+                allocation,
+                allocation_base: base,
+            },
+        );
         Ok(())
     }
 
@@ -393,14 +400,24 @@ impl GuestMemory {
         heap: u64,
         size: usize,
     ) -> Result<u64, MemoryError> {
-        if !self.has_heap(heap) {
+        self.map_heap_allocation_aligned(heap, size, ALLOCATION_GRANULARITY)
+    }
+
+    pub(crate) fn map_heap_allocation_aligned(
+        &mut self,
+        heap: u64,
+        size: usize,
+        alignment: u64,
+    ) -> Result<u64, MemoryError> {
+        if !self.has_heap(heap) || alignment == 0 || !alignment.is_power_of_two() {
             return Err(MemoryError::AllocationFailed);
         }
-        self.map_dynamic_allocation(
+        self.map_dynamic_allocation_aligned(
             0,
             size,
             MemoryPermissions::READ_WRITE,
             AllocationKind::Heap(heap),
+            alignment,
         )
     }
 
@@ -410,6 +427,23 @@ impl GuestMemory {
         size: usize,
         permissions: MemoryPermissions,
         allocation: AllocationKind,
+    ) -> Result<u64, MemoryError> {
+        self.map_dynamic_allocation_aligned(
+            requested_base,
+            size,
+            permissions,
+            allocation,
+            ALLOCATION_GRANULARITY,
+        )
+    }
+
+    fn map_dynamic_allocation_aligned(
+        &mut self,
+        requested_base: u64,
+        size: usize,
+        permissions: MemoryPermissions,
+        allocation: AllocationKind,
+        alignment: u64,
     ) -> Result<u64, MemoryError> {
         // Bound retained host storage independently for each allocation kind.
         let allocated = self.dynamic_bytes(allocation);
@@ -426,7 +460,7 @@ impl GuestMemory {
         }
 
         let base = if requested_base == 0 {
-            self.find_dynamic_base(size)?
+            self.find_dynamic_base_aligned(size, alignment)?
         } else {
             requested_base
         };
@@ -450,7 +484,14 @@ impl GuestMemory {
     }
 
     fn find_dynamic_base(&self, size: usize) -> Result<u64, MemoryError> {
-        let mut base = 0x0000_0003_0000_0000u64;
+        self.find_dynamic_base_aligned(size, ALLOCATION_GRANULARITY)
+    }
+
+    fn find_dynamic_base_aligned(&self, size: usize, alignment: u64) -> Result<u64, MemoryError> {
+        let granularity = ALLOCATION_GRANULARITY.max(alignment);
+        let mut base = 0x0000_0003_0000_0000u64
+            .checked_next_multiple_of(granularity)
+            .ok_or(MemoryError::Overflow)?;
         let mut region_index = 0;
         let mut reservation_index = 0;
         loop {
@@ -477,7 +518,7 @@ impl GuestMemory {
             }
             if base < interval_end {
                 base = interval_end
-                    .checked_next_multiple_of(ALLOCATION_GRANULARITY)
+                    .checked_next_multiple_of(granularity)
                     .ok_or(MemoryError::Overflow)?;
             }
             if region.is_some_and(|region| region == (interval_base, interval_end)) {
@@ -740,10 +781,14 @@ impl GuestMemory {
             });
             return self.regions.len() != before;
         }
-        let Some(index) = self
-            .regions
+        // Equal-base empty heap markers can form a small cluster, but the
+        // sorted table lets the search skip every unrelated region.
+        let first = self.regions.partition_point(|region| region.base < base);
+        let end = self.regions.partition_point(|region| region.base <= base);
+        let Some(index) = self.regions[first..end]
             .iter()
-            .position(|region| region.base == base && region.allocation == allocation)
+            .position(|region| region.allocation == allocation)
+            .map(|index| first + index)
         else {
             return false;
         };
@@ -1988,6 +2033,50 @@ mod mapping_search_contract_tests {
                 );
                 assert_eq!(failed, [0xee; 2]);
             }
+        }
+    }
+}
+
+/// An opt-in timing run for region insertion and removal (#106). Run in a
+/// release build on an otherwise idle host:
+///
+/// ```text
+/// cargo test --release -p xenora-loader --lib region_maintenance_timing -- --ignored --nocapture
+/// ```
+///
+/// The run uses the public heap mapping surface and the internal exact-base
+/// release path. Every returned allocation is removed once and the empty final
+/// table is checked.
+#[cfg(test)]
+mod region_maintenance_timing {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    #[ignore = "manual region maintenance timing run; release build on an otherwise idle host"]
+    fn region_maintenance_timing() {
+        for blocks in [1usize, 16, 256, 4096] {
+            let started = Instant::now();
+            let mut memory = GuestMemory::new();
+            let mut bases = Vec::with_capacity(blocks);
+            for _ in 0..blocks {
+                bases.push(memory.map_heap_allocation(PROCESS_HEAP, 64).unwrap());
+            }
+            let inserted = started.elapsed();
+
+            let started = Instant::now();
+            for &base in bases.iter().rev() {
+                assert!(
+                    memory.release_dynamic_allocation(base, AllocationKind::Heap(PROCESS_HEAP))
+                );
+            }
+            let removed = started.elapsed();
+            assert!(memory.regions.is_empty());
+            println!(
+                "blocks={blocks} insert={inserted:?} remove={removed:?} insert_per_op={:.1?} remove_per_op={:.1?}",
+                inserted / blocks as u32,
+                removed / blocks as u32,
+            );
         }
     }
 }

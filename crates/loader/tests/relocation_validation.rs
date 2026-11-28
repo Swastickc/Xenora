@@ -20,6 +20,18 @@ const RELOC_SECTION: usize = OPTIONAL_HEADER + 240 + 40;
 /// .text at RVA 0x1000 (file 0x200) holding two pointers, .reloc at RVA 0x2000 (file 0x400).
 /// `NumberOfRvaAndSizes` and the relocation table bytes are parameters.
 fn build(rva_and_sizes: u32, table: &[u8], dir_size: u32) -> Vec<u8> {
+    build_with_optional_header(240, rva_and_sizes, table, dir_size)
+}
+
+/// As `build`, with `SizeOfOptionalHeader` as a parameter. The section table
+/// follows the declared optional header, so the Base Relocation Table entry is
+/// written only when the declared header contains all eight of its bytes.
+fn build_with_optional_header(
+    optional_size: u16,
+    rva_and_sizes: u32,
+    table: &[u8],
+    dir_size: u32,
+) -> Vec<u8> {
     let mut pe = vec![0u8; 0x600];
     pe[0..2].copy_from_slice(b"MZ");
     pe[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
@@ -27,7 +39,7 @@ fn build(rva_and_sizes: u32, table: &[u8], dir_size: u32) -> Vec<u8> {
     let coff = 0x44;
     pe[coff..coff + 2].copy_from_slice(&0x8664u16.to_le_bytes());
     pe[coff + 2..coff + 4].copy_from_slice(&2u16.to_le_bytes());
-    pe[coff + 16..coff + 18].copy_from_slice(&240u16.to_le_bytes());
+    pe[coff + 16..coff + 18].copy_from_slice(&optional_size.to_le_bytes());
     let opt = coff + 20;
     pe[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes());
     pe[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
@@ -37,8 +49,10 @@ fn build(rva_and_sizes: u32, table: &[u8], dir_size: u32) -> Vec<u8> {
     pe[opt + 56..opt + 60].copy_from_slice(&0x3000u32.to_le_bytes());
     pe[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes());
     pe[opt + 108..opt + 112].copy_from_slice(&rva_and_sizes.to_le_bytes());
-    pe[opt + 152..opt + 156].copy_from_slice(&0x2000u32.to_le_bytes());
-    pe[opt + 156..opt + 160].copy_from_slice(&dir_size.to_le_bytes());
+    if optional_size >= 160 {
+        pe[opt + 152..opt + 156].copy_from_slice(&0x2000u32.to_le_bytes());
+        pe[opt + 156..opt + 160].copy_from_slice(&dir_size.to_le_bytes());
+    }
 
     let sections: [(&[u8], u32, u32, u32, u32); 2] = [
         (b".text", 0x1000, 0x200, 0x200, 0x6000_0020),
@@ -46,7 +60,7 @@ fn build(rva_and_sizes: u32, table: &[u8], dir_size: u32) -> Vec<u8> {
         (b".reloc", 0x2000, 0x1000, RELOC_FILE as u32, 0x4200_0040),
     ];
     for (i, (name, va, vsize, raw, flags)) in sections.into_iter().enumerate() {
-        let h = opt + 240 + i * 40;
+        let h = opt + usize::from(optional_size) + i * 40;
         pe[h..h + name.len()].copy_from_slice(name);
         pe[h + 8..h + 12].copy_from_slice(&vsize.to_le_bytes());
         pe[h + 12..h + 16].copy_from_slice(&va.to_le_bytes());
@@ -235,6 +249,115 @@ fn directory_beyond_declared_count_is_ignored() {
         memory.read_u64_bypass(base + 0x1010).unwrap(),
         PREFERRED + 0x1100
     );
+}
+
+#[test]
+fn count_below_the_relocation_entry_is_absent_with_a_short_optional_header() {
+    // The fixed PE32+ fields end at NumberOfRvaAndSizes (112 bytes). With a
+    // count of 0 or 5 the image declares no Base Relocation Table, so a header
+    // that ends before entry 5 is complete and the load succeeds unrelocated.
+    let table = standard_table();
+    for (optional_size, count) in [(112, 0), (112, 5), (152, 5)] {
+        let bytes = build_with_optional_header(optional_size, count, &table, table.len() as u32);
+        let base = PREFERRED + 0x1_0000_0000;
+        let (result, memory) = relocate(&bytes, base);
+        let report = result.expect("absent directory");
+        assert_eq!(report.total_entries, 0, "{optional_size} {count}");
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1010).unwrap(),
+            PREFERRED + 0x1100
+        );
+    }
+}
+
+#[test]
+fn declared_entry_ending_the_optional_header_is_read() {
+    // A 160-byte optional header holds exactly entries 0 through 5.
+    let table = standard_table();
+    let bytes = build_with_optional_header(160, 6, &table, table.len() as u32);
+    let base = PREFERRED + 0x1_0000_0000;
+    let (result, memory) = relocate(&bytes, base);
+    assert_eq!(result.expect("relocate").applied_dir64, 2);
+    assert_eq!(
+        memory.read_u64_bypass(base + 0x1010).unwrap(),
+        base + 0x1100
+    );
+    assert_eq!(
+        memory.read_u64_bypass(base + 0x1018).unwrap(),
+        base + 0x2000
+    );
+}
+
+#[test]
+fn declared_entry_beyond_the_optional_header_is_rejected_before_fixups() {
+    // NumberOfRvaAndSizes covers entry 5 (bytes 152..160), but the declared
+    // optional header ends at or inside it. The section table starts where
+    // the header ends, so those bytes belong to a section header and are not
+    // a relocation directory. A moved load must fail with no target written.
+    let table = standard_table();
+    for (optional_size, count) in [(112, 16), (152, 6), (156, 16), (158, 6)] {
+        let bytes = build_with_optional_header(optional_size, count, &table, table.len() as u32);
+        let base = PREFERRED + 0x1_0000_0000;
+        let (pe, mut memory) = load(&bytes, base);
+        let before = memory.clone();
+        assert_eq!(
+            apply_relocations(&pe, &bytes, base, &mut memory),
+            Err(RelocationError::TruncatedDirectoryEntry {
+                number_of_rva_and_sizes: count,
+                size_of_optional_header: optional_size,
+            })
+        );
+        for rva in [0x1010, 0x1018] {
+            assert_eq!(
+                memory.read_u64_bypass(base + rva).unwrap(),
+                before.read_u64_bypass(base + rva).unwrap()
+            );
+        }
+        assert_eq!(
+            memory.read_u64_bypass(base + 0x1010).unwrap(),
+            PREFERRED + 0x1100
+        );
+    }
+}
+
+#[test]
+fn truncated_declared_entry_needs_no_relocation_at_the_preferred_base() {
+    let table = standard_table();
+    let bytes = build_with_optional_header(152, 16, &table, table.len() as u32);
+    let (result, memory) = relocate(&bytes, PREFERRED);
+    assert_eq!(result.expect("preferred base"), Default::default());
+    assert_eq!(
+        memory.read_u64_bypass(PREFERRED + 0x1010).unwrap(),
+        PREFERRED + 0x1100
+    );
+}
+
+#[test]
+fn optional_header_shorter_than_its_fixed_fields_is_rejected() {
+    // ParsedPe refuses such an image, so the relocation engine is given the
+    // parse of an intact image and the mutated header bytes separately.
+    let table = standard_table();
+    let intact = build(16, &table, table.len() as u32);
+    let base = PREFERRED + 0x1_0000_0000;
+    let (pe, mut memory) = load(&intact, base);
+    let mut bytes = intact.clone();
+    bytes[0x44 + 16..0x44 + 18].copy_from_slice(&108u16.to_le_bytes());
+    assert_eq!(
+        apply_relocations(&pe, &bytes, base, &mut memory),
+        Err(RelocationError::OptionalHeaderTooSmall {
+            size_of_optional_header: 108
+        })
+    );
+    assert_eq!(
+        memory.read_u64_bypass(base + 0x1010).unwrap(),
+        PREFERRED + 0x1100
+    );
+    for short in [&intact[..0x3c], &intact[..0x50], &intact[..0x58 + 100]] {
+        assert_eq!(
+            apply_relocations(&pe, short, base, &mut memory),
+            Err(RelocationError::HeadersOutOfBounds)
+        );
+    }
 }
 
 #[test]

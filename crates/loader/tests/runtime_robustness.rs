@@ -47,6 +47,30 @@ fn random_service_sequences_keep_memory_and_register_invariants() {
 }
 
 #[test]
+fn context_services_are_excluded_structurally() {
+    let driver = Driver::new();
+    for (module, symbol) in [
+        ("kernel32.dll", "DebugBreak"),
+        ("kernel32.dll", "RaiseException"),
+        ("kernel32.dll", "RtlUnwindEx"),
+        ("ucrtbase.dll", "__C_specific_handler"),
+        ("ucrtbase.dll", "longjmp"),
+    ] {
+        assert_eq!(
+            driver.service_index(module, symbol),
+            None,
+            "{module}!{symbol} is a context service"
+        );
+    }
+    assert!(
+        driver
+            .service_index("kernel32.dll", "CloseHandle")
+            .is_some(),
+        "ordinary services keep the nonvolatile invariant"
+    );
+}
+
+#[test]
 fn encoded_sequences_invoke_handlers_and_reuse_handles() {
     let driver = Driver::new();
     let create = driver

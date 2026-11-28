@@ -24,6 +24,20 @@ pub enum RelocationError {
         preferred_base: u64,
         loaded_base: u64,
     },
+    /// The DOS, COFF or declared optional header needed to locate the
+    /// relocation directory lies outside the file bytes.
+    HeadersOutOfBounds,
+    /// `SizeOfOptionalHeader` ends before `NumberOfRvaAndSizes`, so whether
+    /// the image declares a relocation directory cannot be read.
+    OptionalHeaderTooSmall {
+        size_of_optional_header: u16,
+    },
+    /// `NumberOfRvaAndSizes` declares the Base Relocation Table entry, but the
+    /// declared optional header ends before that entry.
+    TruncatedDirectoryEntry {
+        number_of_rva_and_sizes: u32,
+        size_of_optional_header: u16,
+    },
     DirectoryOutOfBounds {
         rva: u32,
         size: u32,
@@ -56,6 +70,23 @@ impl fmt::Display for RelocationError {
             } => write!(
                 f,
                 "PE relocations are stripped: image requires base {preferred_base:#x}, requested {loaded_base:#x}"
+            ),
+            Self::HeadersOutOfBounds => write!(
+                f,
+                "PE headers needed to locate the relocation directory are outside the file"
+            ),
+            Self::OptionalHeaderTooSmall {
+                size_of_optional_header,
+            } => write!(
+                f,
+                "optional header of {size_of_optional_header} bytes ends before NumberOfRvaAndSizes"
+            ),
+            Self::TruncatedDirectoryEntry {
+                number_of_rva_and_sizes,
+                size_of_optional_header,
+            } => write!(
+                f,
+                "NumberOfRvaAndSizes {number_of_rva_and_sizes} declares the relocation directory, but the {size_of_optional_header}-byte optional header ends before its entry"
             ),
             Self::DirectoryOutOfBounds { rva, size } => {
                 write!(
@@ -427,54 +458,82 @@ fn apply_entries(
     Ok(())
 }
 
+// Optional-header layout of PE32+: the fixed fields end with
+// NumberOfRvaAndSizes at offset 108, and the eight-byte data-directory entries
+// follow. The Base Relocation Table is entry 5.
+const OPTIONAL_FIXED_LEN: usize = 112;
+const OPTIONAL_NUMBER_OF_RVA_AND_SIZES: usize = 108;
+const DIRECTORY_ENTRY_LEN: usize = 8;
+const BASE_RELOCATION_DIRECTORY: u32 = 5;
+
 // Called only for loads at a nonpreferred base.
+//
+// The directory exists only when `NumberOfRvaAndSizes` covers index 5. A count
+// that covers it is a declaration: when the entry does not fit inside the
+// declared optional header, the table cannot be read, which is an error rather
+// than an absent table.
 fn find_reloc_directory(
     bytes: &[u8],
     preferred_base: u64,
     loaded_base: u64,
 ) -> Result<Option<(u32, u32)>, RelocationError> {
-    if bytes.len() < 0x40 {
-        return Ok(None);
-    }
-    let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
-    let coff_offset = e_lfanew + 4;
-    let opt_offset = coff_offset + 20;
-    let Some(coff) = bytes.get(coff_offset..opt_offset) else {
-        return Ok(None);
+    let read_u16 = |at: usize| {
+        bytes
+            .get(at..at.checked_add(2)?)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
     };
-    let characteristics = u16::from_le_bytes([coff[18], coff[19]]);
+    let read_u32 = |at: usize| {
+        bytes
+            .get(at..at.checked_add(4)?)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+
+    let e_lfanew = read_u32(0x3C).ok_or(RelocationError::HeadersOutOfBounds)? as usize;
+    let coff_offset = e_lfanew
+        .checked_add(4)
+        .ok_or(RelocationError::HeadersOutOfBounds)?;
+    let characteristics = coff_offset
+        .checked_add(18)
+        .and_then(read_u16)
+        .ok_or(RelocationError::HeadersOutOfBounds)?;
     if characteristics & IMAGE_FILE_RELOCS_STRIPPED != 0 {
         return Err(RelocationError::FixedImageBase {
             preferred_base,
             loaded_base,
         });
     }
-    let size_of_opt = usize::from(u16::from_le_bytes([coff[16], coff[17]]));
+    let size_of_optional_header = coff_offset
+        .checked_add(16)
+        .and_then(read_u16)
+        .ok_or(RelocationError::HeadersOutOfBounds)?;
+    let opt_offset = coff_offset + 20;
+    let declared_len = usize::from(size_of_optional_header);
+    if opt_offset
+        .checked_add(declared_len)
+        .is_none_or(|end| end > bytes.len())
+    {
+        return Err(RelocationError::HeadersOutOfBounds);
+    }
+    if declared_len < OPTIONAL_FIXED_LEN {
+        return Err(RelocationError::OptionalHeaderTooSmall {
+            size_of_optional_header,
+        });
+    }
 
-    // Relocation directory is directory index 5 (offset 112 + 5 * 8 = 152 in Optional Header).
-    // It exists only when NumberOfRvaAndSizes (offset 108) covers index 5.
-    if size_of_opt < 160 || bytes.len() < opt_offset + 160 {
+    let number_of_rva_and_sizes = read_u32(opt_offset + OPTIONAL_NUMBER_OF_RVA_AND_SIZES)
+        .ok_or(RelocationError::HeadersOutOfBounds)?;
+    if number_of_rva_and_sizes <= BASE_RELOCATION_DIRECTORY {
         return Ok(None);
     }
-    let number_of_rva_and_sizes = u32::from_le_bytes(
-        bytes[opt_offset + 108..opt_offset + 112]
-            .try_into()
-            .unwrap(),
-    );
-    if number_of_rva_and_sizes < 6 {
-        return Ok(None);
+    let entry = OPTIONAL_FIXED_LEN + BASE_RELOCATION_DIRECTORY as usize * DIRECTORY_ENTRY_LEN;
+    if entry + DIRECTORY_ENTRY_LEN > declared_len {
+        return Err(RelocationError::TruncatedDirectoryEntry {
+            number_of_rva_and_sizes,
+            size_of_optional_header,
+        });
     }
-
-    let reloc_rva = u32::from_le_bytes(
-        bytes[opt_offset + 152..opt_offset + 156]
-            .try_into()
-            .unwrap(),
-    );
-    let reloc_size = u32::from_le_bytes(
-        bytes[opt_offset + 156..opt_offset + 160]
-            .try_into()
-            .unwrap(),
-    );
+    let reloc_rva = read_u32(opt_offset + entry).ok_or(RelocationError::HeadersOutOfBounds)?;
+    let reloc_size = read_u32(opt_offset + entry + 4).ok_or(RelocationError::HeadersOutOfBounds)?;
 
     if reloc_rva == 0 || reloc_size == 0 {
         Ok(None)

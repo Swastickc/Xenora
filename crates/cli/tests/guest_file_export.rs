@@ -115,7 +115,14 @@ fn report(output: &Output) -> &str {
 
 #[test]
 fn exports_exact_binary_and_empty_files() {
-    for (source, bytes) in [("c:/GUEST-EXPORT.BIN", PAYLOAD), (EMPTY, &[][..])] {
+    for (source, bytes) in [
+        (BINARY, PAYLOAD),
+        ("c:/GUEST-EXPORT.BIN", PAYLOAD),
+        ("GUEST-EXPORT.BIN", PAYLOAD),
+        (r"\GUEST-EXPORT.BIN", PAYLOAD),
+        ("/GUEST-EXPORT.BIN", PAYLOAD),
+        (EMPTY, &[][..]),
+    ] {
         let scratch = Scratch::new();
         let destination = Path::new("export result.bin");
         let output = command(
@@ -137,7 +144,7 @@ fn exports_exact_binary_and_empty_files() {
         );
         let destination = scratch.0.join(destination);
         assert!(fs::metadata(&destination).unwrap().is_file());
-        assert_eq!(fs::read(destination).unwrap(), bytes);
+        assert_eq!(fs::read(destination).unwrap(), bytes, "{source}");
         scratch.assert_clean();
     }
 }
@@ -153,31 +160,40 @@ fn no_option_leaves_guest_files_on_the_synthetic_drive() {
 
 #[test]
 fn missing_guest_file_reports_a_verification_failure_without_an_export() {
-    let scratch = Scratch::new();
-    let destination = scratch.0.join("missing.bin");
-    let output = command(
-        &scratch,
-        Some((MISSING, &destination)),
-        &["--startup-report"],
-        &[],
-    )
-    .output()
-    .unwrap();
-    assert_status(&output, 125);
-    assert_eq!(output.stdout, READY);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("guest file") && stderr.contains("does not exist"),
-        "{stderr}"
-    );
-    let json = report(&output);
-    assert!(json.contains(r#""protocol":"complete""#), "{json}");
-    assert!(
-        json.contains(r#""kind":"known_failure","phase":"verification""#),
-        "{json}"
-    );
-    assert!(!destination.exists());
-    scratch.assert_clean();
+    for source in [
+        MISSING,
+        r"\\guest-export.bin",
+        "//guest-export.bin",
+        r"\/guest-export.bin",
+        r"/\guest-export.bin",
+        r"\C:\guest-export.bin",
+    ] {
+        let scratch = Scratch::new();
+        let destination = scratch.0.join("missing.bin");
+        let output = command(
+            &scratch,
+            Some((source, &destination)),
+            &["--startup-report"],
+            &[],
+        )
+        .output()
+        .unwrap();
+        assert_status(&output, 125);
+        assert_eq!(output.stdout, READY);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("guest file {source:?} does not exist")),
+            "{stderr}"
+        );
+        let json = report(&output);
+        assert!(json.contains(r#""protocol":"complete""#), "{json}");
+        assert!(
+            json.contains(r#""kind":"known_failure","phase":"verification""#),
+            "{json}"
+        );
+        assert!(!destination.exists());
+        scratch.assert_clean();
+    }
 }
 
 #[test]

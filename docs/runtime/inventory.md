@@ -12,6 +12,17 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
+| Canonical services | 885 |
+| Typed registry services | 296 |
+| Manual code registrations | 589 |
+| Canonical libraries | 21 |
+| Implemented | 237 |
+| Partial | 648 |
+| Stub | 0 |
+| Data-import services | 7 |
+| Aliases of every kind | 937 |
+| API-set aliases | 740 |
+| Ordinal aliases | 31 |
 | Canonical services | 877 |
 | Typed registry services | 300 |
 | Manual code registrations | 577 |
@@ -48,6 +59,8 @@ independent acceptance or compatibility claims.
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
 | <code>ucrtbase.dll</code> | <code>c-runtime</code> | 301 | 211 | 90 | 0 | 104 | 197 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
+| <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
+| <code>ws2_32.dll</code> | <code>windows-networking</code> | 57 | 0 | 57 | 0 | 6 | 51 | 0 | 6 |
 | <code>winhttp.dll</code> | <code>other</code> | 14 | 0 | 14 | 0 | 0 | 14 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
@@ -66,6 +79,8 @@ metadata, are in `inventory.json`.
 
 | Alias kind | Count |
 | --- | --- |
+| API-set | 740 |
+| Ordinal | 31 |
 | API-set | 744 |
 | Ordinal | 0 |
 | Other module | 166 |

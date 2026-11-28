@@ -9324,6 +9324,26 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getservbyname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#55"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getservbyport",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#56"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
       "canonical_symbol": "gethostname",
       "kind": "ordinal",
       "library": "ws2_32.dll",
@@ -17676,6 +17696,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "getservbyport"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "getsockname"
     },
     {
@@ -18820,17 +18850,17 @@
     }
   ],
   "summary": {
-    "aliases": 937,
+    "aliases": 939,
     "api_set_aliases": 740,
-    "canonical_services": 890,
+    "canonical_services": 891,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 594,
-    "ordinal_aliases": 31,
-    "partial": 653,
+    "manual_services": 595,
+    "ordinal_aliases": 33,
+    "partial": 654,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

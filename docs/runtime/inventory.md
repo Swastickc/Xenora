@@ -12,17 +12,17 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 890 |
+| Canonical services | 891 |
 | Typed registry services | 296 |
-| Manual code registrations | 594 |
+| Manual code registrations | 595 |
 | Canonical libraries | 21 |
 | Implemented | 237 |
-| Partial | 653 |
+| Partial | 654 |
 | Stub | 0 |
 | Data-import services | 7 |
-| Aliases of every kind | 937 |
+| Aliases of every kind | 939 |
 | API-set aliases | 740 |
-| Ordinal aliases | 31 |
+| Ordinal aliases | 33 |
 | Statuses never explicitly set | 76 |
 | Duplicate canonical registrations | 0 |
 | Structural consistency findings | 0 |
@@ -43,7 +43,7 @@ independent acceptance or compatibility claims.
 | <code>ucrtbase.dll</code> | <code>c-runtime</code> | 297 | 207 | 90 | 0 | 103 | 194 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
-| <code>ws2_32.dll</code> | <code>windows-networking</code> | 62 | 0 | 62 | 0 | 6 | 56 | 0 | 6 |
+| <code>ws2_32.dll</code> | <code>windows-networking</code> | 63 | 0 | 63 | 0 | 6 | 57 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
 | <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 10 | 0 | 10 | 0 | 1 | 9 | 0 | 0 |
@@ -61,7 +61,7 @@ metadata, are in `inventory.json`.
 | Alias kind | Count |
 | --- | --- |
 | API-set | 740 |
-| Ordinal | 31 |
+| Ordinal | 33 |
 | Other module | 166 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.

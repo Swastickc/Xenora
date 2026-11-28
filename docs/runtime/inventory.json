@@ -16876,6 +16876,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpCrackUrl"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpOpen"
     },
     {
@@ -18332,15 +18342,15 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 872,
+    "canonical_services": 873,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 22,
-    "manual_services": 576,
+    "manual_services": 577,
     "ordinal_aliases": 0,
-    "partial": 635,
+    "partial": 636,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

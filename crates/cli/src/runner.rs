@@ -748,6 +748,9 @@ fn run_program(
     let mut arguments = vec![name];
     arguments.extend(options.arguments.iter().map(String::as_str));
     state.set_program_arguments(&arguments)?;
+    // The image stays available to the guest itself: a `_spawnve` of the
+    // program's own path loads the child from these bytes, not the host disk.
+    state.set_spawn_image(name, &bytes);
     // The guest's standard input is the worker's own, read in full before
     // the program starts so that a run stays deterministic. A terminal means
     // no input. Oversized input is rejected before guest execution.

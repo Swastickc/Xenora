@@ -9364,6 +9364,26 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getprotobyname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#53"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getprotobynumber",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#54"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
       "canonical_symbol": "getservbyname",
       "kind": "ordinal",
       "library": "ws2_32.dll",
@@ -17921,6 +17941,26 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "getprotobyname"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "getprotobynumber"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "getservbyname"
     },
     {
@@ -19105,7 +19145,7 @@
     }
   ],
   "summary": {
-    "aliases": 939,
+    "aliases": 941,
     "api_set_aliases": 740,
     "canonical_services": 885,
     "aliases": 910,

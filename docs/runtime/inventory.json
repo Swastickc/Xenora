@@ -17296,7 +17296,27 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSACloseEvent"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAConnect"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSACreateEvent"
     },
     {
       "data_import": false,
@@ -17416,6 +17436,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAResetEvent"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSASend"
     },
     {
@@ -17427,6 +17457,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WSASendTo"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSASetEvent"
     },
     {
       "data_import": false,
@@ -17487,6 +17527,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WSAStringToAddressW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAWaitForMultipleEvents"
     },
     {
       "data_import": false,
@@ -18772,15 +18822,15 @@
   "summary": {
     "aliases": 937,
     "api_set_aliases": 740,
-    "canonical_services": 885,
+    "canonical_services": 890,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 589,
+    "manual_services": 594,
     "ordinal_aliases": 31,
-    "partial": 648,
+    "partial": 653,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

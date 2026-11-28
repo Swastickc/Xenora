@@ -41,6 +41,9 @@ const WSAEAFNOSUPPORT: u32 = 10047;
 const WSASYSNOTREADY: u32 = 10091;
 const WSAVERNOTSUPPORTED: u32 = 10092;
 const WSANOTINITIALISED: u32 = 10093;
+const WSA_INVALID_HANDLE: u32 = 6;
+const WSA_NOT_ENOUGH_MEMORY: u32 = 8;
+const WSA_INVALID_EVENT: u64 = 0;
 
 #[derive(Default)]
 pub(super) struct Winsock {
@@ -297,6 +300,17 @@ fn socket_result(
     }
 }
 
+fn bool_socket_result(
+    state: &ServicesState,
+    teb: u64,
+    result: Result<u64, u32>,
+) -> Result<u64, ExitReason> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => state.fail(teb, error, 0),
+    }
+}
+
 fn create_loopback_socket(
     net: &mut Winsock,
     af: u64,
@@ -408,6 +422,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     register_socket_names(registry, state);
     register_service_lookup(registry, state);
     register_socket_options(registry, state);
+    register_wsa_events(registry, state);
     register_event_select(registry, state);
     register_ioctl_and_reverse(registry, state);
     register_streams(registry, state);
@@ -1174,6 +1189,178 @@ fn register_wsa_io(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
                 Ok(0)
             })();
             socket_result(&recv_from, cpu.gs_base, result)
+        },
+    );
+}
+
+fn register_wsa_events(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    use super::GuestObject;
+    use super::events::{EVENT_ALL_ACCESS, EVENT_MODIFY_STATE, SYNCHRONIZE, Waitable};
+
+    let create = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSACreateEvent",
+        ServiceStatus::Partial,
+        move |_, cpu, _| {
+            let result = (|| {
+                if create.winsock.lock().expect("guest Winsock state").refs == 0 {
+                    return Err(WSANOTINITIALISED);
+                }
+                let mut objects = create.objects.lock().expect("guest object state");
+                let Some(handle) = objects.next_handle() else {
+                    return Err(WSA_NOT_ENOUGH_MEMORY);
+                };
+                objects.insert_handle(
+                    handle,
+                    GuestObject::Waitable {
+                        state: Arc::new(std::sync::Mutex::new(Waitable::Event {
+                            manual_reset: true,
+                            signaled: false,
+                        })),
+                        access: EVENT_ALL_ACCESS,
+                    },
+                );
+                Ok(handle)
+            })();
+            match result {
+                Ok(handle) => Ok(handle),
+                Err(error) => create.fail(cpu.gs_base, error, WSA_INVALID_EVENT),
+            }
+        },
+    );
+
+    for (symbol, signaled) in [("WSASetEvent", true), ("WSAResetEvent", false)] {
+        let set = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, _| {
+                let result = (|| {
+                    if set.winsock.lock().expect("guest Winsock state").refs == 0 {
+                        return Err(WSANOTINITIALISED);
+                    }
+                    let objects = set.objects.lock().expect("guest object state");
+                    let Some(GuestObject::Waitable {
+                        state: waitable,
+                        access,
+                    }) = objects.handles.get(&args.rcx)
+                    else {
+                        return Err(WSA_INVALID_HANDLE);
+                    };
+                    let mut inner = waitable.lock().expect("guest waitable state");
+                    let Waitable::Event {
+                        signaled: current, ..
+                    } = &mut *inner
+                    else {
+                        return Err(WSA_INVALID_HANDLE);
+                    };
+                    if access & EVENT_MODIFY_STATE == 0 {
+                        return Err(WSA_INVALID_HANDLE);
+                    }
+                    *current = signaled;
+                    drop(inner);
+                    drop(objects);
+                    if signaled {
+                        set.hooks.signal();
+                    }
+                    Ok(1)
+                })();
+                bool_socket_result(&set, cpu.gs_base, result)
+            },
+        );
+    }
+
+    let close = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSACloseEvent",
+        ServiceStatus::Partial,
+        move |args, cpu, _| {
+            let result = (|| {
+                if close.winsock.lock().expect("guest Winsock state").refs == 0 {
+                    return Err(WSANOTINITIALISED);
+                }
+                let mut objects = close.objects.lock().expect("guest object state");
+                let valid = matches!(
+                    objects.handles.get(&args.rcx),
+                    Some(GuestObject::Waitable { state: waitable, .. })
+                        if matches!(*waitable.lock().expect("guest waitable state"), Waitable::Event { .. })
+                );
+                if !valid {
+                    return Err(WSA_INVALID_HANDLE);
+                }
+                objects.handles.remove(&args.rcx);
+                Ok(1)
+            })();
+            bool_socket_result(&close, cpu.gs_base, result)
+        },
+    );
+
+    let wait = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSAWaitForMultipleEvents",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            if let Some(result) = super::events::resume_wait(&wait, cpu.gs_base) {
+                return result;
+            }
+            let result = (|| {
+                if wait.winsock.lock().expect("guest Winsock state").refs == 0 {
+                    return Err(WSANOTINITIALISED);
+                }
+                let count = args.rcx as u32;
+                let all = args.r8 as u32 != 0;
+                let timeout = args.r9 as u32;
+                let alertable = args.get(4, memory).map_err(|_| WSAEFAULT)? as u32 != 0;
+                if alertable || !(1..=64).contains(&count) || args.rdx == 0 {
+                    return Err(WSAEINVAL);
+                }
+                let mut handles = [0; 64];
+                let handles = &mut handles[..count as usize];
+                for (index, handle) in handles.iter_mut().enumerate() {
+                    *handle = memory
+                        .read_u64(args.rdx + index as u64 * 8)
+                        .map_err(|_| WSAEFAULT)?;
+                }
+                {
+                    let objects = wait.objects.lock().expect("guest object state");
+                    for (index, handle) in handles.iter().enumerate() {
+                        if all && handles[..index].contains(handle) {
+                            return Err(WSAEINVAL);
+                        }
+                        let valid = matches!(
+                            objects.handles.get(handle),
+                            Some(GuestObject::Waitable { state: waitable, access })
+                                if *access & SYNCHRONIZE != 0
+                                    && matches!(
+                                        *waitable.lock().expect("guest waitable state"),
+                                        Waitable::Event { .. }
+                                    )
+                        );
+                        if !valid {
+                            return Err(WSA_INVALID_HANDLE);
+                        }
+                    }
+                }
+                if timeout != 0 && !wait.hooks.is_attached() {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                Ok(handles.to_vec())
+            })();
+            let handles = match result {
+                Ok(handles) => handles,
+                Err(error) => return socket_result(&wait, cpu.gs_base, Err(error)),
+            };
+            super::events::wait_for_objects(
+                &wait,
+                cpu.gs_base,
+                &handles,
+                args.r8 as u32 != 0,
+                args.r9 as u32,
+            )
         },
     );
 }
@@ -4725,13 +4912,69 @@ fn event_select_posts_and_enumeration_drains() {
             .unwrap();
         (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
     };
+    assert_eq!(call(&mut memory, MODULE, "WSACreateEvent", &[]), 0);
+    assert_eq!(
+        call(&mut memory, MODULE, "WSAGetLastError", &[]),
+        u64::from(WSANOTINITIALISED)
+    );
     assert_eq!(
         call(&mut memory, MODULE, "WSAStartup", &[0x0202, 0x1000]),
         0
     );
-    // Manual-reset event for the client socket.
-    let event = call(&mut memory, "kernel32.dll", "CreateEventA", &[0, 1, 0, 0]);
+    // WSA events are manual-reset and initially nonsignaled. Zero-timeout
+    // waits poll them without needing a scheduler.
+    let event = call(&mut memory, MODULE, "WSACreateEvent", &[]);
     assert_ne!(event, 0);
+    memory.write_u64(0x1600, event).unwrap();
+    for args in [[0, 0x1600, 0, 0, 0], [1, 0x1600, 0, 0, 1], [1, 0, 0, 0, 0]] {
+        assert_eq!(
+            call(&mut memory, MODULE, "WSAWaitForMultipleEvents", &args),
+            SOCKET_ERROR
+        );
+        assert_eq!(
+            call(&mut memory, MODULE, "WSAGetLastError", &[]),
+            u64::from(WSAEINVAL)
+        );
+    }
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSAWaitForMultipleEvents",
+            &[1, 0x1600, 0, 0, 0]
+        ),
+        258
+    );
+    assert_eq!(call(&mut memory, MODULE, "WSASetEvent", &[event]), 1);
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSAWaitForMultipleEvents",
+            &[1, 0x1600, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSAWaitForMultipleEvents",
+            &[1, 0x1600, 0, 0, 0]
+        ),
+        0,
+        "manual-reset events stay signaled until reset"
+    );
+    assert_eq!(call(&mut memory, MODULE, "WSAResetEvent", &[event]), 1);
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSAWaitForMultipleEvents",
+            &[1, 0x1600, 0, 0, 0]
+        ),
+        258
+    );
     // A listener, a client with event selection covering connect.
     let listener = call(&mut memory, MODULE, "socket", &[2, 1, 6]);
     let client = call(&mut memory, MODULE, "socket", &[2, 1, 6]);
@@ -4872,6 +5115,12 @@ fn event_select_posts_and_enumeration_drains() {
     );
     let final_bits = memory.read_u32(0x1300).unwrap();
     assert_ne!(final_bits & FD_CLOSE, 0, "close posted");
+    assert_eq!(call(&mut memory, MODULE, "WSACloseEvent", &[event]), 1);
+    assert_eq!(call(&mut memory, MODULE, "WSACloseEvent", &[event]), 0);
+    assert_eq!(
+        call(&mut memory, MODULE, "WSAGetLastError", &[]),
+        u64::from(WSA_INVALID_HANDLE)
+    );
 }
 
 #[cfg(test)]

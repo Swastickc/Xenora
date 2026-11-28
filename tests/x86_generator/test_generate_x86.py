@@ -207,9 +207,13 @@ class GenerateX86(unittest.TestCase):
         lockable = [form for form in forms if form.get("lock")]
         operations = {form["op"] for form in lockable}
         self.assertLessEqual(operations, sdm)
-        # The ones the registry marks today (#198, #447, #451): all but
-        # CMPXCHG8B and CMPXCHG16B.
-        self.assertEqual(operations, sdm - {"cmpxchg8b", "cmpxchg16b"})
+        # The registry marks all of them (#198, #447, #451, #971). CMPXCHG16B
+        # is the REX.W form of the cmpxchg8b operation, whose size is 32 or
+        # 64 bits by REX.W, so it has no name of its own.
+        self.assertEqual(operations, sdm - {"cmpxchg16b"})
+        pair = [form for form in forms if form["op"] == "cmpxchg8b"]
+        self.assertEqual([(f["map"], f["opcode"], f["digit"], f["size"], f.get("memory_only")) for f in pair],
+                         [("0f", 0xC7, 1, "y", True)])
         # A form whose destination is a register, or the accumulator, cannot
         # lock, and neither can a form that only takes a register.
         self.assertEqual({form["enc"] for form in lockable}, {"rm_reg", "rm_imm", "rm"})
@@ -224,9 +228,10 @@ class GenerateX86(unittest.TestCase):
         self.rejects(REGISTRY.replace('lock = ["inc", "dec"]', 'lock = ["inc", "mul"]'), "not in the group")
         self.rejects(REGISTRY.replace('lock = ["bts", "btr", "btc"]', 'lock = ["bts", "shl"]'), "not in the group")
 
-    def test_string_forms_are_movs_and_stos_without_operands(self):
+    def test_string_forms_are_the_five_string_operations_without_operands(self):
         _, forms = generate_x86.load(REGISTRY)
-        self.assertEqual({form["op"] for form in forms if form["enc"] == "string"}, {"movs", "stos"})
+        self.assertEqual({form["op"] for form in forms if form["enc"] == "string"},
+                         {"movs", "stos", "lods", "scas", "cmps"})
         self.rejects(self.form('op = "movs"\nopcode = 0xD7\nenc = "string"\nsize = "b"\nimm = "ib"'), "not valid for string")
         self.rejects(self.form('op = "movs"\nopcode = 0xD7\nenc = "string"\nsize = "b"\nlock = true'), "LOCK needs a memory destination")
 

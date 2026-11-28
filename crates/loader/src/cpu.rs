@@ -134,6 +134,12 @@ pub struct CpuState {
     pub x87: X87State,
     /// Bits 255:128 of YMM0-YMM15. Legacy SSE instructions never change them.
     pub ymm_high: [u128; 16],
+    /// While a repeated CMPS or SCAS is part-way through, its address and the
+    /// status flags it began with. A fault on a later element restores those
+    /// flags (Intel SDM Vol. 2B, REP/REPE/REPZ/REPNE/REPNZ). Each element is a
+    /// step of its own, so this is not architectural state. It is kept here so
+    /// that where a step budget splits a repeat cannot change its result.
+    pub repeat_flags: Option<(u64, RFlags)>,
 }
 
 impl CpuState {
@@ -151,6 +157,7 @@ impl CpuState {
             df: false,
             x87: X87State::INIT,
             ymm_high: [0; 16],
+            repeat_flags: None,
         }
     }
 
@@ -163,8 +170,12 @@ impl CpuState {
     }
 }
 
+/// CPUID leaf 1, EDX: CMPXCHG8B.
+pub const CPUID_CX8: u32 = 1 << 8;
 /// CPUID leaf 1, EDX: CMOVcc.
 pub const CPUID_CMOV: u32 = 1 << 15;
+/// CPUID leaf 1, ECX: CMPXCHG16B.
+pub const CPUID_CMPXCHG16B: u32 = 1 << 13;
 /// CPUID leaf 1, ECX: POPCNT.
 pub const CPUID_POPCNT: u32 = 1 << 23;
 /// CPUID leaf 0x8000_0001, ECX: LAHF and SAHF in 64-bit mode.
@@ -186,7 +197,12 @@ pub fn cpuid(leaf: u32, _subleaf: u32) -> [u32; 4] {
         // Highest basic leaf, then "Xenora guest" in EBX, EDX, ECX.
         0 => [1, word(b"Xeno"), word(b"uest"), word(b"ra g")],
         // No family, model or stepping: this is no shipped processor.
-        1 => [0, 0, CPUID_POPCNT, CPUID_CMOV],
+        1 => [
+            0,
+            0,
+            CPUID_CMPXCHG16B | CPUID_POPCNT,
+            CPUID_CX8 | CPUID_CMOV,
+        ],
         // Highest extended leaf.
         0x8000_0000 => [0x8000_0001, 0, 0, 0],
         0x8000_0001 => [0, 0, CPUID_LAHF_SAHF | CPUID_LZCNT, CPUID_LONG_MODE],

@@ -511,6 +511,7 @@ pub fn execute(
             }
             cpu.flags = flags;
         }
+        Op::Cmpxchg8b => compare_exchange_pair(cpu, memory, insn)?,
         Op::Bswap => {
             let value = read_reg(cpu, insn.reg, size).swap_bytes() >> (64 - 8 * u32::from(size));
             write_reg(cpu, insn.reg, size, value);
@@ -751,31 +752,75 @@ pub fn execute(
                 cpu.gpr[register] = u64::from(value);
             }
         }
-        Op::Movs | Op::Stos => {
-            // One element per execution. A REP form with elements left keeps
-            // RIP on itself, so every element is a step of its own: it counts
-            // against the step budget, and a fault keeps the elements already
-            // done, with RSI, RDI and RCX at the element that faulted.
+        Op::Movs | Op::Stos | Op::Lods | Op::Scas | Op::Cmps => {
+            // One element per execution. A repeated form with elements left
+            // keeps RIP on itself, so every element is a step of its own: it
+            // counts against the step budget, and a fault keeps the elements
+            // already done, with RSI, RDI and RCX at the element that faulted.
+            // A repeated CMPS or SCAS that faults gets back the flags it began
+            // with. A zero count touches nothing.
             if !(insn.rep && cpu.gpr[RCX] == 0) {
-                let value = if insn.op == Op::Movs {
-                    read_rm(cpu, memory, insn)?
-                } else {
-                    cpu.gpr[RAX] & mask(size)
+                // The source [RSI] may carry FS or GS; [RDI] takes no
+                // override. Every access precedes every register write.
+                let destination = cpu.gpr[RDI];
+                let began = match cpu.repeat_flags {
+                    Some((rip, flags)) if rip == insn.rip => flags,
+                    _ => cpu.flags,
                 };
-                write_mem(memory, cpu.gpr[RDI], size, value)?;
+                match insn.op {
+                    Op::Movs => {
+                        let value = read_rm(cpu, memory, insn)?;
+                        write_mem(memory, destination, size, value)?;
+                    }
+                    Op::Stos => write_mem(memory, destination, size, cpu.gpr[RAX] & mask(size))?,
+                    Op::Lods => {
+                        let value = read_rm(cpu, memory, insn)?;
+                        write_reg(cpu, accumulator(RAX), size, value);
+                    }
+                    // SCAS compares the accumulator with [RDI] and CMPS
+                    // compares [RSI] with [RDI], each as CMP would.
+                    _ => {
+                        let source = if insn.op == Op::Scas {
+                            Ok(cpu.gpr[RAX] & mask(size))
+                        } else {
+                            read_rm(cpu, memory, insn)
+                        };
+                        match source.and_then(|a| Ok((a, read_mem(memory, destination, size)?))) {
+                            Ok((a, b)) => cpu.flags = sub(a, b, false, size).1,
+                            // A fault restores the flags the repeat began with;
+                            // the elements already done stay done.
+                            Err(fault) => {
+                                if insn.rep {
+                                    cpu.flags = began;
+                                    cpu.repeat_flags = None;
+                                }
+                                return Err(fault);
+                            }
+                        }
+                    }
+                }
                 let step = if cpu.df {
                     u64::from(size).wrapping_neg()
                 } else {
                     u64::from(size)
                 };
-                if insn.op == Op::Movs {
+                if matches!(insn.op, Op::Movs | Op::Lods | Op::Cmps) {
                     cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
                 }
-                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                if insn.op != Op::Lods {
+                    cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                }
                 if insn.rep {
                     cpu.gpr[RCX] -= 1;
-                    if cpu.gpr[RCX] != 0 {
+                    // REPE stops once an element clears ZF and REPNE once one
+                    // sets it (Intel SDM Vol. 2B, "REP/REPE/REPZ/REPNE/REPNZ").
+                    let stopped =
+                        matches!(insn.op, Op::Scas | Op::Cmps) && cpu.flags.zf == insn.repne;
+                    if cpu.gpr[RCX] != 0 && !stopped {
                         next = insn.rip;
+                    }
+                    if matches!(insn.op, Op::Scas | Op::Cmps) {
+                        cpu.repeat_flags = (next == insn.rip).then_some((insn.rip, began));
                     }
                 }
             }
@@ -819,6 +864,57 @@ pub fn execute(
     }
     cpu.rip = next;
     Ok(None)
+}
+
+/// CMPXCHG8B, and CMPXCHG16B under REX.W (Intel SDM Vol. 2A,
+/// CMPXCHG8B/CMPXCHG16B). The memory operand holds two halves of the operand
+/// size. It is compared with rDX:rAX and replaced by rCX:rBX when they match;
+/// otherwise its halves are loaded into rDX:rAX, which a 32-bit write
+/// zero-extends. ZF says whether they matched and no other flag changes.
+fn compare_exchange_pair(
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+    insn: &Insn,
+) -> Result<(), ExitReason> {
+    // The form is memory-only, so the decoder never supplies a register.
+    let operand = insn.memory().ok_or(ExitReason::IllegalInstruction(0))?;
+    let at = address(cpu, &operand);
+    let half = usize::from(insn.size);
+    let width = 2 * half;
+    if width == 16 && !at.is_multiple_of(16) {
+        return Err(ExitReason::GeneralProtection);
+    }
+    if !canonical_access(at, 2 * insn.size) {
+        return Err(ExitReason::GeneralProtection);
+    }
+    let mut old = [0; 16];
+    memory
+        .read_bytes(at, &mut old[..width])
+        .map_err(ExitReason::MemoryFault)?;
+    let part = |bytes: &[u8]| {
+        let mut value = [0; 8];
+        value[..half].copy_from_slice(bytes);
+        u64::from_le_bytes(value)
+    };
+    let (low, high) = (part(&old[..half]), part(&old[half..width]));
+    let reg = |index: usize| cpu.gpr[index] & mask(insn.size);
+    let matched = (low, high) == (reg(RAX), reg(RDX));
+    // As for CMPXCHG, the destination is written whether or not the values
+    // match, so a mismatch on memory that cannot be written still faults.
+    let mut new = old;
+    if matched {
+        new[..half].copy_from_slice(&reg(RBX).to_le_bytes()[..half]);
+        new[half..width].copy_from_slice(&reg(RCX).to_le_bytes()[..half]);
+    }
+    memory
+        .write_bytes(at, &new[..width])
+        .map_err(ExitReason::MemoryFault)?;
+    if !matched {
+        write_reg(cpu, accumulator(RAX), insn.size, low);
+        write_reg(cpu, accumulator(RDX), insn.size, high);
+    }
+    cpu.flags.zf = matched;
+    Ok(())
 }
 
 fn accumulator(index: usize) -> RegOperand {

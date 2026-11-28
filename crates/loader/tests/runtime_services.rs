@@ -962,6 +962,54 @@ fn hexadecimal_float_rounding_follows_the_rounding_mode() {
 }
 
 #[test]
+fn closing_a_standard_descriptor_succeeds_and_fails_everything_after() {
+    let (mut guest, [input, out, err]) = stdio_guest();
+    guest.state.set_standard_input(b"abc");
+    let fd = guest.call("_fileno", &[input]) & 0xFFFF_FFFF;
+    assert_eq!(fd, 0);
+    // Closing descriptor 0 succeeds, as the CRT allows it.
+    assert_eq!(guest.call("_close", &[0]) & 0xFFFF_FFFF, 0);
+    // Every later operation on it fails with EBADF: the descriptor read,
+    // the stream reads and the terminal query. A second close has nothing.
+    guest.set_errno(0);
+    let buf = TEXT + 0x4000;
+    assert_eq!(guest.call("_read", &[0, buf, 4]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    assert_eq!(guest.call("_filbuf", &[input]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    assert_eq!(guest.call("fgetc", &[input]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    assert_eq!(guest.call("_isatty", &[0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.errno(), EBADF);
+    assert_eq!(guest.call("_close", &[0]) & 0xFFFF_FFFF, 0xFFFF_FFFF);
+
+    // The same for the output side: closing descriptor 1 succeeds, writes
+    // through the descriptor and the stream fail, and nothing is captured.
+    assert_eq!(guest.call("_close", &[1]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"xy").unwrap();
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_write", &[1, buf, 2]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    guest.set_errno(0);
+    assert_eq!(
+        guest.call("_flsbuf", &[b'x' as u64, out]) & 0xFFFF_FFFF,
+        0xFFFF_FFFF
+    );
+    assert_eq!(guest.errno(), EBADF);
+    assert!(guest.state.standard_output().is_empty());
+    // stderr is untouched: its descriptor still writes and captures.
+    assert_eq!(guest.call("_write", &[2, buf, 2]) & 0xFFFF_FFFF, 2);
+    assert_eq!(guest.state.standard_error(), b"xy");
+    let _ = err;
+}
+
+#[test]
 fn snprintf_writes_inside_the_buffer_and_returns_the_would_be_length() {
     let one_slot = &[42];
     // A fit: the text, its terminator, and the result is the length. The
@@ -2200,7 +2248,9 @@ fn descriptors_share_files_with_streams() {
         guest.call("_close", &[77]) & 0xFFFF_FFFF,
         (-1i32) as u32 as u64
     );
-    assert_eq!(guest.run("_close", &[0]).1, LIMIT);
+    // Closing standard input succeeds, as the CRT allows it: the slot is
+    // dead from then on, which the dedicated close test covers exhaustively.
+    assert_eq!(guest.call("_close", &[0]) & 0xFFFF_FFFF, 0);
     assert_eq!(
         guest.run("_open", &[NAME, 0x1_0000, 0]).1,
         LIMIT,
@@ -7599,6 +7649,70 @@ fn legacy_descriptor_duplication_shares_the_position() {
     assert_eq!(guest.call("_dup", &[77]) & 0xFFFF_FFFF, MINUS_ONE);
     assert_eq!(guest.errno(), EBADF);
     assert_eq!(guest.call("_dup2", &[77, 10]) & 0xFFFF_FFFF, MINUS_ONE);
+}
+
+/// `_dup2` over a standard descriptor rewires it for real: the CRT table is
+/// authoritative, the console fast path only answers while the table does
+/// not carry the descriptor. Writes through a rewired stdout land in the
+/// file, seeks work as the file's do, and closing the duplication leaves
+/// the slot dead - the console does not come back, exactly as the CRT's
+/// closed table entry does not resurrect the standard handle.
+#[test]
+fn dup2_over_a_standard_descriptor_rewires_the_table() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    guest.memory.write_bytes(NAME, b"redir.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    // stdout becomes the file: a write through descriptor 1 lands in it.
+    assert_eq!(guest.call("_dup2", &[fd, 1]) & 0xFFFF_FFFF, 1);
+    guest.memory.write_bytes(buf, b"redirected").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 10]) & 0xFFFF_FFFF, 10);
+    // The position is the file's: a seek back and a read through the
+    // original descriptor prove the bytes took the file path.
+    assert_eq!(guest.call("_lseeki64", &[1, 0, 0]), 0);
+    let mut bytes = [0u8; 10];
+    assert_eq!(guest.call("_read", &[fd, buf, 10]) & 0xFFFF_FFFF, 10);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"redirected");
+    // stdin rewires the same way: the file feeds descriptor 0.
+    assert_eq!(guest.call("_dup2", &[fd, 0]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_lseeki64", &[fd, 0, 0]), 0);
+    let mut bytes = [0u8; 4];
+    assert_eq!(guest.call("_read", &[0, buf, 4]) & 0xFFFF_FFFF, 4);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"redi");
+    // Closing the rewired stdout succeeds and the slot stays dead: no write
+    // reaches the console through it again.
+    assert_eq!(guest.call("_close", &[1]) & 0xFFFF_FFFF, 0);
+    assert_eq!(guest.call("_write", &[1, buf, 1]) & 0xFFFF_FFFF, MINUS_ONE);
+    assert_eq!(guest.errno(), EBADF);
+    // stderr was never rewired and still writes to its stream.
+    guest.memory.write_bytes(buf, b"e").unwrap();
+    assert_eq!(guest.call("_write", &[2, buf, 1]) & 0xFFFF_FFFF, 1);
+}
+
+/// The exact sequence a shell runs for output redirection: save stdout,
+/// rewire it onto the file, close the file's own descriptor, then write
+/// through stdout. The close of the original hands the stream to the
+/// duplication - the write still reaches the file.
+#[test]
+fn closing_the_original_descriptor_keeps_the_rewired_stdout() {
+    let (mut guest, [_stdin, _out, _err]) = stdio_guest();
+    let buf = TEXT + 0x4000;
+    guest.memory.write_bytes(NAME, b"redir2.bin\0").unwrap();
+    let fd = guest.call("_open", &[NAME, 2 | 0x100 | 0x200 | 0x8000, 0]) & 0xFFFF_FFFF;
+    assert!((3..0x8000).contains(&fd), "{fd:x}");
+    assert_eq!(guest.call("_dup2", &[fd, 1]) & 0xFFFF_FFFF, 1);
+    assert_eq!(guest.call("_close", &[fd]) & 0xFFFF_FFFF, 0);
+    guest.memory.write_bytes(buf, b"redirected").unwrap();
+    assert_eq!(guest.call("_write", &[1, buf, 10]) & 0xFFFF_FFFF, 10);
+    // and the bytes prove they took the file path, position shared.
+    assert_eq!(guest.call("_lseeki64", &[1, 0, 0]), 0);
+    let mut bytes = [0u8; 10];
+    assert_eq!(guest.call("_read", &[1, buf, 10]) & 0xFFFF_FFFF, 10);
+    guest.memory.read_bytes(buf, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"redirected");
 }
 
 #[test]

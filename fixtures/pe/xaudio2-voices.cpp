@@ -29,13 +29,16 @@ struct WAVEFORMATEX { u16 tag, channels; u32 rate, avg; u16 align, bits, cb; };
 #pragma pack(pop)
 static_assert(sizeof(WAVEFORMATEX) == 18, "WAVEFORMATEX is 18 packed bytes");
 
+// xaudio2.h: "All structures defined in this file use tight field packing".
+#pragma pack(push, 1)
 struct XAUDIO2_BUFFER {
     u32 Flags, AudioBytes; const u8 *pAudioData;
     u32 PlayBegin, PlayLength, LoopBegin, LoopLength, LoopCount; void *pContext;
 };
-static_assert(sizeof(XAUDIO2_BUFFER) == 48, "XAUDIO2_BUFFER is 48 bytes on x64");
 struct XAUDIO2_VOICE_STATE { void *pCurrentBufferContext; u32 BuffersQueued; u64 SamplesPlayed; };
-static_assert(sizeof(XAUDIO2_VOICE_STATE) == 24, "XAUDIO2_VOICE_STATE is 24 bytes on x64");
+#pragma pack(pop)
+static_assert(sizeof(XAUDIO2_BUFFER) == 44, "packed XAUDIO2_BUFFER is 44 bytes on x64");
+static_assert(sizeof(XAUDIO2_VOICE_STATE) == 20, "packed XAUDIO2_VOICE_STATE is 20 bytes on x64");
 
 struct IXAudio2; struct IXAudio2Voice; struct IXAudio2SourceVoice; struct IXAudio2MasteringVoice;
 typedef void *Any;

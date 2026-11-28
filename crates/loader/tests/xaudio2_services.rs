@@ -139,7 +139,7 @@ impl Guest {
 
     /// Writes an XAUDIO2_BUFFER that names the given audio range.
     fn buffer(&mut self, audio: u64, bytes: u32) {
-        let mut buffer = [0u8; 48];
+        let mut buffer = [0u8; 44]; // packed XAUDIO2_BUFFER
         buffer[4..8].copy_from_slice(&bytes.to_le_bytes());
         buffer[8..16].copy_from_slice(&audio.to_le_bytes());
         self.memory.write_bytes(SCRATCH + 64, &buffer).unwrap();
@@ -253,8 +253,8 @@ fn a_stopped_engine_clock_does_not_move_the_voice() {
         Guest::args(voice, SCRATCH + 192, 0, 0),
     );
     assert_eq!(result, 0);
-    let state = guest.read(SCRATCH + 192, 24);
-    assert_eq!(u64::from_le_bytes(state[16..24].try_into().unwrap()), 0);
+    let state = guest.read(SCRATCH + 192, 20);
+    assert_eq!(u64::from_le_bytes(state[12..20].try_into().unwrap()), 0);
     // The clock runs again once the guest starts the engine.
     let result = guest.call(MODULE, "IXAudio2.StartEngine", Guest::args(engine, 0, 0, 0));
     assert_eq!(result, S_OK);
@@ -264,8 +264,8 @@ fn a_stopped_engine_clock_does_not_move_the_voice() {
         Guest::args(voice, SCRATCH + 192, 0, 0),
     );
     assert_eq!(result, 0);
-    let state = guest.read(SCRATCH + 192, 24);
-    assert_eq!(u64::from_le_bytes(state[16..24].try_into().unwrap()), 480);
+    let state = guest.read(SCRATCH + 192, 20);
+    assert_eq!(u64::from_le_bytes(state[12..20].try_into().unwrap()), 480);
 }
 
 /// An interface identifier the guest cannot read is a pointer error.

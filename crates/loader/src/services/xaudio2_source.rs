@@ -104,7 +104,7 @@ fn submit_source_buffer(
         xaudio2.diagnostics.not_implemented += 1;
         return Ok(E_NOTIMPL as u64);
     }
-    let Some(bytes) = read_struct::<48>(memory, buffer) else {
+    let Some(bytes) = read_struct::<{ BufferDesc::SIZE }>(memory, buffer) else {
         xaudio2.diagnostics.pointer += 1;
         return Ok(E_POINTER as u64);
     };

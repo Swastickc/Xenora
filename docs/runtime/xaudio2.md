@@ -50,7 +50,11 @@ layout: natural alignment, 8-byte pointers and explicit padding.
 | 14 | 2 | Bits per sample |
 | 16 | 2 | Callback size, ignored for both supported tags |
 
-### XAUDIO2_BUFFER, 48 bytes
+**Public.** `xaudio2.h` packs every structure it defines to one byte
+("All structures defined in this file use tight field packing"), so neither
+structure below has padding.
+
+### XAUDIO2_BUFFER, 44 bytes
 
 | Offset | Size | Field |
 | --- | --- | --- |
@@ -62,17 +66,15 @@ layout: natural alignment, 8-byte pointers and explicit padding.
 | 24 | 4 | Loop begin, in frames |
 | 28 | 4 | Loop length, in frames |
 | 32 | 4 | Loop count |
-| 36 | 4 | Padding, not part of any field |
-| 40 | 8 | Client context |
+| 36 | 8 | Client context |
 
-### XAUDIO2_VOICE_STATE, 24 bytes
+### XAUDIO2_VOICE_STATE, 20 bytes
 
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 8 | Client context of the current buffer |
 | 8 | 4 | Number of queued buffers |
-| 12 | 4 | Padding, written as zero |
-| 16 | 8 | Samples played |
+| 12 | 8 | Samples played |
 
 ## Handles
 
@@ -341,13 +343,6 @@ voices through vtables the loader writes into guest memory.
   `E_POINTER`, and the host never faults on a guest pointer. The audio
   range of a submitted buffer must be mapped and readable when the buffer
   is submitted. The bytes are named, never copied.
-- **Public.** The public header packs every structure of the file to one
-  byte, so `XAUDIO2_BUFFER` is 44 bytes there and `XAUDIO2_VOICE_STATE` is
-  20. **Xenora** uses the natural alignment of 48 and 24 bytes that the
-  bounded model and the acceptance program of issue #888 fix. A guest
-  built against the packed layout of the public header places the client
-  context at offset 36 and the sample count at offset 12, and is not
-  supported yet.
 
 ### The clock until the mixer arrives
 
@@ -375,8 +370,6 @@ voices through vtables the loader writes into guest memory.
   volume are recorded and bounded, and nothing else uses them yet.
 - The audio processor and the stream category are recorded but are not
   observable through the bounded API.
-- The packed layout of the public header is not supported: the loader reads
-  and writes the natural alignment of 48 and 24 bytes.
 
 ## Evidence
 
@@ -390,6 +383,6 @@ voices through vtables the loader writes into guest memory.
   tests in `crates/loader/tests/xaudio2_services.rs` cover the calls the
   program cannot reach.
 - No audio is produced, no behaviour was compared with Windows or with
-  console hardware, and no guest program built against the packed layout of
-  the public header was run.
+  console hardware. The acceptance program declares the structures
+  with the header's one-byte packing.
 - Independent review is pending.

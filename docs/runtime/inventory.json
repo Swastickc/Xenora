@@ -17256,7 +17256,27 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSARecvFrom"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSASend"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSASendTo"
     },
     {
       "data_import": false,
@@ -18572,15 +18592,15 @@
   "summary": {
     "aliases": 929,
     "api_set_aliases": 740,
-    "canonical_services": 873,
+    "canonical_services": 875,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 577,
+    "manual_services": 579,
     "ordinal_aliases": 23,
-    "partial": 636,
+    "partial": 638,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

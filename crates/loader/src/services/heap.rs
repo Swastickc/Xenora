@@ -11,6 +11,7 @@ use crate::imports::{ImportRegistry, ServiceStatus};
 use std::sync::Arc;
 
 use crate::memory::PROCESS_HEAP;
+const HEAP_NO_SERIALIZE: u32 = 1;
 const HEAP_ZERO_MEMORY: u32 = 8;
 const HEAP_REALLOC_IN_PLACE_ONLY: u32 = 16;
 const HEAP_API: &str = "api-ms-win-core-heap-l1-1-0.dll";
@@ -24,6 +25,17 @@ const GMEM_ZEROINIT: u32 = 0x40;
 const LEGACY_INERT_HINTS: u32 = 0x0f00 | 0x10 | 0x20;
 const LEGACY_ACCEPTED: u32 = GMEM_MOVEABLE | GMEM_ZEROINIT | LEGACY_INERT_HINTS;
 
+fn heap_flags_supported(handle: u64, flags: u32, allowed: u32) -> bool {
+    // Guest heap operations already run with exclusive access to GuestMemory.
+    // Private heaps can accept the caller's request to omit native heap locking.
+    let private_flags = if handle == PROCESS_HEAP {
+        0
+    } else {
+        HEAP_NO_SERIALIZE
+    };
+    flags & !(allowed | private_flags) == 0
+}
+
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     registry.register(KERNEL32, "GetProcessHeap", |_, _, _| Ok(PROCESS_HEAP));
 
@@ -31,7 +43,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
         let flags = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
         let size = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
-        if !memory.has_heap(handle) || flags & !HEAP_ZERO_MEMORY != 0 {
+        if !memory.has_heap(handle) || !heap_flags_supported(handle, flags, HEAP_ZERO_MEMORY) {
             return Ok(0);
         }
         Ok(memory
@@ -44,7 +56,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let flags = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
         let address = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
         let size = args.get(3, memory).map_err(ExitReason::MemoryFault)?;
-        if !memory.has_heap(handle) || flags & !(HEAP_ZERO_MEMORY | HEAP_REALLOC_IN_PLACE_ONLY) != 0
+        if !memory.has_heap(handle)
+            || !heap_flags_supported(handle, flags, HEAP_ZERO_MEMORY | HEAP_REALLOC_IN_PLACE_ONLY)
         {
             return Ok(0);
         }
@@ -73,7 +86,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let handle = args.get(0, memory).map_err(ExitReason::MemoryFault)?;
         let flags = args.get(1, memory).map_err(ExitReason::MemoryFault)? as u32;
         let address = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
-        if !memory.has_heap(handle) || flags != 0 {
+        if !memory.has_heap(handle) || !heap_flags_supported(handle, flags, 0) {
             return Ok(u64::MAX);
         }
         Ok(memory
@@ -86,7 +99,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let flags = args.get(0, memory).map_err(ExitReason::MemoryFault)? as u32;
         let initial = args.get(1, memory).map_err(ExitReason::MemoryFault)?;
         let maximum = args.get(2, memory).map_err(ExitReason::MemoryFault)?;
-        if flags != 0 || maximum != 0 {
+        if flags & !HEAP_NO_SERIALIZE != 0 || maximum != 0 {
             return service_state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         match memory.create_private_heap(initial) {
@@ -112,7 +125,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         if !memory.has_heap(handle) {
             return service_state.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
         }
-        if flags != 0 {
+        if !heap_flags_supported(handle, flags, 0) {
             return service_state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
         }
         if address != 0 && !memory.release_heap_allocation(handle, address) {

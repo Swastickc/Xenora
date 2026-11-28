@@ -5,6 +5,69 @@ import Testing
 @testable import Xenora
 
 struct ProgramRunnerTests {
+    @Test func exportOptionsPrecedeOpaqueGuestArguments() {
+        let program = URL(fileURLWithPath: "/temporary files/original guest.exe")
+        let destination = URL(fileURLWithPath: "/temporary files/host output.bin")
+        let guestPath = #"C:\Guest Files\report.bin"#
+        let export = ProgramGuestFileExport(guestPath: guestPath, destination: destination)
+        let programArguments = ["--export-guest-file", "two words", ""]
+
+        #expect(ProgramRunner.arguments(
+            for: program, trace: true, programArguments: programArguments, guestFileExport: export
+        ) == [
+            "run", "--experimental", "--trace", "--pe", program.path,
+            "--export-guest-file", guestPath, destination.path, "--",
+        ] + programArguments)
+        #expect(ProgramRunner.arguments(for: program, trace: false, programArguments: []) == [
+            "run", "--experimental", "--pe", program.path,
+        ])
+    }
+
+    @Test @MainActor
+    func savePanelRequiresAnUnusedDestination() throws {
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Xenora export \(UUID().uuidString).bin")
+        let policy = GuestFileExportSaveDelegate.shared
+        try policy.panel(self, validate: destination)
+        try Data([1]).write(to: destination, options: .withoutOverwriting)
+        defer { try? FileManager.default.removeItem(at: destination) }
+        #expect(throws: CocoaError.self) {
+            try policy.panel(self, validate: destination)
+        }
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["XENORA_GUEST_FILE_EXPORT_FIXTURE"] != nil))
+    func theNativeRunnerExportsTheOriginalGuestBytes() throws {
+        let fixturePath = try #require(ProcessInfo.processInfo.environment["XENORA_GUEST_FILE_EXPORT_FIXTURE"])
+        let fixture = URL(fileURLWithPath: fixturePath)
+        let worker = try #require(ProgramRunner.workerURL())
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Xenora guest export \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let destination = directory.appendingPathComponent("host output.bin")
+        let export = ProgramGuestFileExport(guestPath: #"C:\guest-export.bin"#, destination: destination)
+        let result = ProgramRunner.run(fixture, trace: true, guestFileExport: export, worker: worker)
+        #expect(result.launchError == nil)
+        #expect(result.exitStatus == 0, "\(result.standardError)")
+        #expect(!result.truncated)
+        #expect(try Data(contentsOf: destination) == Data([0, 0x41, 0x0a, 0x0d, 0, 0xff, 0x80]))
+
+        let original = Data([0x31, 0x62, 0x93])
+        try original.write(to: destination)
+        let collision = ProgramRunner.run(fixture, trace: false, guestFileExport: export, worker: worker)
+        #expect(collision.exitStatus == 125, "\(collision.standardError)")
+        #expect(try Data(contentsOf: destination) == original)
+
+        let unpublished = directory.appendingPathComponent("failed guest.bin")
+        let failureExport = ProgramGuestFileExport(guestPath: export.guestPath, destination: unpublished)
+        let failure = ProgramRunner.run(fixture, trace: false, programArguments: ["fail"],
+                                        guestFileExport: failureExport, worker: worker)
+        #expect(failure.exitStatus == 1, "\(failure.standardError)")
+        #expect(!FileManager.default.fileExists(atPath: unpublished.path))
+    }
+
     private static func withWorker(
         _ body: (_ directory: URL, _ worker: URL, _ program: URL, _ marker: URL) throws -> Void
     ) throws {

@@ -36,6 +36,8 @@ const IMPORTS: &[(&str, &str)] = &[
     (RUNTIME, "_cexit"),
     (KERNEL32, "CreateEventW"),
     (KERNEL32, "SetLastError"),
+    (UCRT, "_onexit"),
+    ("msvcrt.dll", "_onexit"),
 ];
 /// The same imports as a program built with mingw-w64 names the three: by the
 /// runtime API set.
@@ -173,6 +175,29 @@ fn exit_runs_registered_functions_most_recent_first_then_ends_the_process() {
         assert_eq!(guest.u64_at(LOG), 321, "last registered runs first");
         assert_eq!(guest.state.exit_status(), Some(0x1234_5678));
     }
+}
+
+#[test]
+fn onexit_registers_in_the_same_list_and_answers_the_function() {
+    let mut guest = guest();
+    // `_onexit` answers the function pointer itself where `atexit` answers a
+    // status (Microsoft Learn, "_onexit, _onexit_m"), under both the modern
+    // and the legacy spelling.
+    assert_eq!(
+        guest.call("_onexit", &[routine(APPEND_1)]),
+        routine(APPEND_1)
+    );
+    // A zero function fails with a zero answer.
+    assert_eq!(guest.call("_onexit", &[0]), 0);
+    register(&mut guest, "atexit", APPEND_2);
+    assert_eq!(
+        guest.call("_onexit", &[routine(APPEND_3)]),
+        routine(APPEND_3)
+    );
+    let (_, exit) = guest.run("exit", &[9]);
+    assert_eq!(exit, ExitReason::ProcessExit(9));
+    // One list in reverse order, whichever spelling registered the function.
+    assert_eq!(guest.u64_at(LOG), 321);
 }
 
 #[test]
@@ -329,4 +354,25 @@ fn the_three_resolve_under_the_library_and_the_runtime_api_set() {
     }
     // The spelling is exact: _Exit is another function and is not provided.
     assert!(registry.resolve(UCRT, &named("_Exit")).is_none());
+}
+
+/// The mingw runtime registers `WSACleanup` through `_onexit` after
+/// `WSAStartup`, passing the resolved import address - the pointer the import
+/// address table holds, which is how compiled code takes the address of an
+/// imported function. On Windows that pointer is the callable function; here
+/// it is the service trampoline, and the callback machinery must enter it
+/// like any other service call rather than pre-flighting it as guest bytes
+/// (issue #929, measured on a real mingw64 busybox binary).
+#[test]
+fn exit_enters_a_registered_function_that_is_an_import_address() {
+    let mut guest = guest();
+    // Read what the binder wrote into the slot, as compiled code reading the
+    // import pointer would.
+    let trampoline = guest.u64_at(slot(&guest, ATEXIT));
+    assert_eq!(guest.call("_onexit", &[trampoline]), trampoline);
+    // Entering the registration dispatches the service: with a zeroed
+    // argument `atexit` simply fails to register, and the process then ends
+    // with its status instead of faulting on the trampoline entry.
+    let (_, exit) = guest.run("exit", &[5]);
+    assert_eq!(exit, ExitReason::ProcessExit(5));
 }

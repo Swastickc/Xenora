@@ -5,14 +5,18 @@
  * exceptions. tests/compat_fixtures/build-guest-c-seh.sh builds one
  * executable per case with clang -fasync-exceptions, choosing the case with
  * -DCASE=<name>. The program is freestanding: it has no C runtime, so its only
- * imports are the four services named below.
+ * imports are the services named below. #476 added the cases that use
+ * the unhandled-exception filter and change the exception context.
  *
  * Every case reports what ran by calling xenora_note, a service the test
  * registers, and exits with its own status. The expected notes and status of
  * each case are stated next to it and follow from the language rules of
  * `try-except` and `try-finally` and the documented exception codes:
  * STATUS_ACCESS_VIOLATION 0xC0000005, STATUS_ILLEGAL_INSTRUCTION 0xC000001D,
- * STATUS_INTEGER_DIVIDE_BY_ZERO 0xC0000094.
+ * STATUS_INTEGER_DIVIDE_BY_ZERO 0xC0000094, the documented
+ * SetUnhandledExceptionFilter results and Xenora's documented default action
+ * for an exception nothing handles: the process ends with the exception code
+ * as its exit status.
  */
 
 typedef unsigned long u32; /* 32 bits under the Windows x64 data model */
@@ -20,7 +24,12 @@ typedef unsigned long long u64;
 
 __declspec(dllimport) void ExitProcess(unsigned int status);
 __declspec(dllimport) void RaiseException(u32 code, u32 flags, u32 count, const u64 *arguments);
+__declspec(dllimport) void DebugBreak(void);
 __declspec(dllimport) void xenora_note(u64 value);
+
+struct pointers;
+typedef long (*top_filter)(struct pointers *exception);
+__declspec(dllimport) top_filter SetUnhandledExceptionFilter(top_filter filter);
 
 /* The documented EXCEPTION_RECORD and EXCEPTION_POINTERS fields. */
 struct record {
@@ -33,8 +42,12 @@ struct record {
 };
 struct pointers {
     struct record *record;
-    void *context;
+    u64 *context;
 };
+
+/* Fields of the x64 CONTEXT record, as indexes of 8-byte words: Rcx at byte
+ * offset 0x80, Rsp at 0x98 and Rip at 0xF8. */
+enum { CONTEXT_RCX = 0x80 / 8, CONTEXT_RSP = 0x98 / 8, CONTEXT_RIP = 0xF8 / 8 };
 
 static volatile int zero;
 static volatile int sink;
@@ -85,7 +98,8 @@ static int search(void) {
     return 0;
 }
 
-/* No filter accepts the fault. Notes 5 and never exits by itself. */
+/* No filter accepts the fault and no unhandled-exception filter is set, so
+ * the default action ends the process with 0xC0000094. Notes 5. */
 static int unhandled(void) {
     __try {
         sink = 100 / zero;
@@ -201,6 +215,120 @@ static int continue_execution(void) {
         xenora_note(99);
     }
     return 50;
+}
+
+/* The unhandled-exception filter continues execution after a continuable
+ * raise, so the raise returns. Notes 0xE0005EA3, 61; exits 51. */
+static long note_and_continue(struct pointers *exception) {
+    xenora_note(exception->record->code);
+    return -1;
+}
+static int filter_continue(void) {
+    SetUnhandledExceptionFilter(note_and_continue);
+    RaiseException(0xE0005EA3, 0, 0, 0);
+    xenora_note(61);
+    return 51;
+}
+
+/* A filter can continue past DebugBreak. With the filter removed, the
+ * second breakpoint ends the process with STATUS_BREAKPOINT. */
+static int debug_break(void) {
+    SetUnhandledExceptionFilter(note_and_continue);
+    DebugBreak();
+    xenora_note(67);
+    SetUnhandledExceptionFilter(0);
+    DebugBreak();
+    xenora_note(99);
+    return 1;
+}
+
+/* The unhandled-exception filter returns EXCEPTION_EXECUTE_HANDLER for a
+ * fault, so the default action ends the process with 0xC0000094.
+ * Notes 62, 0xC0000094. */
+static long note_and_execute(struct pointers *exception) {
+    xenora_note(62);
+    xenora_note(exception->record->code);
+    return 1;
+}
+static int filter_execute(void) {
+    SetUnhandledExceptionFilter(note_and_execute);
+    sink = 100 / zero;
+    xenora_note(99);
+    return 1;
+}
+
+/* The unhandled-exception filter returns EXCEPTION_CONTINUE_SEARCH, so the
+ * default action ends the process with 0xE0005EA4. Notes 63. */
+static long note_and_search(struct pointers *exception) {
+    (void)exception;
+    xenora_note(63);
+    return 0;
+}
+static int filter_search(void) {
+    SetUnhandledExceptionFilter(note_and_search);
+    RaiseException(0xE0005EA4, 0, 0, 0);
+    xenora_note(99);
+    return 1;
+}
+
+/* Where a changed context continues: as if `landing(status)` had been
+ * called. Notes 64 and exits with `status`. */
+static __declspec(noinline) void landing(u64 status) {
+    xenora_note(64);
+    ExitProcess((unsigned int)status);
+}
+/* Continue at `landing(status)` instead of after the raise: RIP, the first
+ * argument, and RSP lowered by the return address a call would push. */
+static void redirect(u64 *context, u64 status) {
+    context[CONTEXT_RIP] = (u64)landing;
+    context[CONTEXT_RCX] = status;
+    context[CONTEXT_RSP] -= 8;
+}
+
+/* The unhandled-exception filter changes the context and continues
+ * execution. Notes 64; exits 52. */
+static long redirect_52(struct pointers *exception) {
+    redirect(exception->context, 52);
+    return -1;
+}
+static int filter_context(void) {
+    SetUnhandledExceptionFilter(redirect_52);
+    RaiseException(0xE0005EA5, 0, 0, 0);
+    xenora_note(99);
+    return 1;
+}
+
+/* An `__except` filter changes the context and continues execution.
+ * Notes 64; exits 53. */
+static int redirect_53(struct pointers *exception) {
+    redirect(exception->context, 53);
+    return -1;
+}
+static int except_context(void) {
+    __try {
+        RaiseException(0xE0005EA6, 0, 0, 0);
+        xenora_note(99);
+    } __except (redirect_53(_exception_info())) {
+        xenora_note(98);
+    }
+    return 1;
+}
+
+/* The unhandled-exception filter raises an exception of its own. Xenora does
+ * not call the filter again while it runs, so the default action ends the
+ * process with the new code, 0xE0005EA7. Notes 66. */
+static long raise_again(struct pointers *exception) {
+    (void)exception;
+    xenora_note(66);
+    RaiseException(0xE0005EA7, 0, 0, 0);
+    xenora_note(99);
+    return -1;
+}
+static int filter_nested(void) {
+    SetUnhandledExceptionFilter(raise_again);
+    RaiseException(0xE0005EA8, 0, 0, 0);
+    xenora_note(98);
+    return 1;
 }
 
 void entry(void) {

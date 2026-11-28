@@ -762,6 +762,11 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         u16::from_le_bytes(bytes[coff_offset + 2..coff_offset + 4].try_into().unwrap());
     let time_date_stamp =
         u32::from_le_bytes(bytes[coff_offset + 4..coff_offset + 8].try_into().unwrap());
+    let characteristics = u16::from_le_bytes(
+        bytes[coff_offset + 18..coff_offset + 20]
+            .try_into()
+            .unwrap(),
+    );
     let size_of_optional_header = u16::from_le_bytes(
         bytes[coff_offset + 16..coff_offset + 18]
             .try_into()
@@ -792,15 +797,6 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         u32::from_le_bytes(bytes[opt_offset + 60..opt_offset + 64].try_into().unwrap());
 
     // Data directories
-    let import_dir_rva = if size_of_optional_header >= 128 {
-        u32::from_le_bytes(
-            bytes[opt_offset + 120..opt_offset + 124]
-                .try_into()
-                .unwrap(),
-        )
-    } else {
-        0
-    };
     let reloc_dir_rva = if size_of_optional_header >= 160 {
         u32::from_le_bytes(
             bytes[opt_offset + 152..opt_offset + 156]
@@ -998,11 +994,12 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
                 .then(|| (section.raw_data_ptr as usize).checked_add(offset as usize))?
         })
     };
-    let (entries, import_error) = if import_dir_rva == 0 {
-        (Vec::new(), None)
-    } else {
-        parse_imports(bytes, import_dir_rva, backed_offset)
-    };
+    let (entries, import_error) =
+        if let Some((rva, size)) = crate::imports::find_import_directory(bytes) {
+            parse_imports(bytes, rva, size, backed_offset)
+        } else {
+            (Vec::new(), None)
+        };
     let (delayed_entries, delay_import_error) = if delay_dir_rva == 0 {
         (Vec::new(), None)
     } else {
@@ -1142,6 +1139,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         machine,
         number_of_sections,
         time_date_stamp,
+        characteristics,
         image_base,
         section_alignment,
         file_alignment,

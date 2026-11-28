@@ -7,11 +7,15 @@ use crate::imports::{ImportRegistry, ServiceStatus, Win64Args};
 use crate::memory::{GuestMemory, MemoryError, PROCESS_HEAP};
 use crate::runtime::ServiceContext;
 
+use std::sync::Arc;
+
+use super::ServicesState;
+
 use super::crt_files;
 use super::crt_streams::{Failed, Outcome};
 
 const SCAN_BUDGET: u64 = 1_048_576;
-const UCRT: &str = "ucrtbase.dll";
+pub(super) const UCRT: &str = "ucrtbase.dll";
 const CRT_STRING_API: &str = "api-ms-win-crt-string-l1-1-0.dll";
 /// The legacy CRT module that pre-UCRT mingw binaries import directly.
 const MSVCRT: &str = "msvcrt.dll";
@@ -347,7 +351,50 @@ pub(super) fn register_conversions(registry: &mut ImportRegistry) {
             parse_integer(memory, args, cpu.gs_base, signed, wide_result, unit)
         });
         registry.alias("api-ms-win-crt-convert-l1-1-0.dll", UCRT, symbol);
+        // The legacy CRT exports the narrow integer parses under the same
+        // names; the wide forms are the legacy CRT's own spellings too.
+        registry.alias(MSVCRT, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
+    }
+}
+
+/// The console key input of the legacy CRT. `_getch` reads one key
+/// without echo and `_getche` with it, directly from the console rather
+/// than stdin. The machine's console input buffer is empty - no keyboard
+/// exists - so a read would block the one executor forever. Blocking is
+/// not modelled: the honest answer for a program that actually asks for a
+/// key is to stop, while a program that merely imports the forms - the
+/// common case, since the legacy CRT binds them transitively - runs
+/// undisturbed.
+/// The spawn family. A spawn creates another process, and the machine is
+/// one process: there is no loader for a child and no kernel to schedule it.
+/// The honest answer is the error the CRT documents for a failure, ENOSYS,
+/// not a pretend success nothing ever runs behind. busybox imports
+/// `_spawnve` for its applet spawning; programs that never spawn bind the
+/// import undisturbed.
+pub(super) fn register_spawn_refusal(registry: &mut ImportRegistry) {
+    const ENOSYS: u32 = 40;
+    for (module, symbol) in [
+        (UCRT, "_spawnve"),
+        (UCRT, "_wspawnve"),
+        (MSVCRT, "_spawnve"),
+        ("api-ms-win-crt-process-l1-1-0.dll", "_spawnve"),
+        ("api-ms-win-crt-process-l1-1-0.dll", "_wspawnve"),
+    ] {
+        registry.register(module, symbol, move |_, cpu, memory| {
+            set_errno(memory, cpu.gs_base, ENOSYS)?;
+            Ok(u64::MAX)
+        });
+        registry.set_status(module, symbol, ServiceStatus::Partial);
+    }
+}
+
+pub(super) fn register_conio(registry: &mut ImportRegistry) {
+    for symbol in ["_getch", "_getche"] {
+        registry.register(MSVCRT, symbol, |_, _, _| {
+            Err(ExitReason::IllegalInstruction(0xFE))
+        });
+        registry.set_status(MSVCRT, symbol, ServiceStatus::Partial);
     }
 }
 
@@ -860,16 +907,6 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         });
     }
 
-    // The missing character classes, ASCII like the rest of the C locale.
-    registry.register(UCRT, "isblank", |args, _, _| {
-        Ok(u64::from(
-            matches!(args.rcx as u8, b' ' | b'\t') && args.rcx < 0x80,
-        ))
-    });
-    registry.register(UCRT, "isgraph", |args, _, _| {
-        Ok(u64::from((0x21..=0x7e).contains(&(args.rcx as u32))))
-    });
-
     // The integer formatting family: radix 2 through 36, lowercase digits,
     // a minus sign for signed negative input in radix ten only, as
     // documented. The _s forms check the buffer size.
@@ -904,27 +941,6 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
             32,
             true,
         )
-    });
-
-    // getenv_s over the empty environment: every variable is undefined,
-    // which is the documented empty answer, not an error.
-    registry.register(UCRT, "getenv_s", |args, cpu, memory| {
-        let (size_at, buffer, buffer_size, name) = (args.rcx, args.rdx, args.r8, args.r9);
-        if size_at == 0 || name == 0 {
-            set_errno(memory, cpu.gs_base, EINVAL)?;
-            return Ok(u64::from(EINVAL));
-        }
-        memory
-            .write_u64(size_at, 0)
-            .map_err(ExitReason::MemoryFault)?;
-        // Undefined variable: length zero, the buffer untouched when it
-        // cannot hold even the terminator - documented as no error.
-        if buffer != 0 && buffer_size != 0 {
-            memory
-                .write_u8(buffer, 0)
-                .map_err(ExitReason::MemoryFault)?;
-        }
-        Ok(0)
     });
 
     // The copying and concatenation forms mingw inlines least often.
@@ -962,11 +978,234 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         Ok(args.rcx)
     });
 
+    // The string search family. All of it scans byte strings within the
+    // scan budget, one unit at a time across block boundaries.
+    registry.register(UCRT, "strstr", |args, _, memory| {
+        let needle = string_length(memory, args.rdx, u64::MAX, StringUnit::Byte)?;
+        if needle == 0 {
+            return Ok(args.rcx);
+        }
+        let haystack = string_length(memory, args.rcx, u64::MAX, StringUnit::Byte)?;
+        let first = memory.read_u8(args.rdx).map_err(ExitReason::MemoryFault)?;
+        let mut offset = 0u64;
+        while offset + needle <= haystack {
+            let candidate = memory
+                .read_u8(args.rcx + offset)
+                .map_err(ExitReason::MemoryFault)?;
+            if candidate == first {
+                let mut matched = true;
+                for index in 1..needle {
+                    let a = memory
+                        .read_u8(args.rcx + offset + index)
+                        .map_err(ExitReason::MemoryFault)?;
+                    let b = memory
+                        .read_u8(args.rdx + index)
+                        .map_err(ExitReason::MemoryFault)?;
+                    if a != b {
+                        matched = false;
+                        break;
+                    }
+                }
+                if matched {
+                    return Ok(args.rcx + offset);
+                }
+            }
+            offset += 1;
+        }
+        Ok(0)
+    });
+
+    registry.register(UCRT, "strcspn", |args, _, memory| {
+        let length = string_length(memory, args.rcx, u64::MAX, StringUnit::Byte)?;
+        let reject = string_length(memory, args.rdx, u64::MAX, StringUnit::Byte)?;
+        let mut rejects = [false; 256];
+        for index in 0..reject {
+            let byte = memory
+                .read_u8(args.rdx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            rejects[usize::from(byte)] = true;
+        }
+        for index in 0..length {
+            let byte = memory
+                .read_u8(args.rcx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            if rejects[usize::from(byte)] {
+                return Ok(index);
+            }
+        }
+        Ok(length)
+    });
+
+    registry.register(UCRT, "strspn", |args, _, memory| {
+        let length = string_length(memory, args.rcx, u64::MAX, StringUnit::Byte)?;
+        let accept = string_length(memory, args.rdx, u64::MAX, StringUnit::Byte)?;
+        let mut accepts = [false; 256];
+        for index in 0..accept {
+            let byte = memory
+                .read_u8(args.rdx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            accepts[usize::from(byte)] = true;
+        }
+        for index in 0..length {
+            let byte = memory
+                .read_u8(args.rcx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            if !accepts[usize::from(byte)] {
+                return Ok(index);
+            }
+        }
+        Ok(length)
+    });
+
+    registry.register(UCRT, "strpbrk", |args, _, memory| {
+        let length = string_length(memory, args.rcx, u64::MAX, StringUnit::Byte)?;
+        let accept = string_length(memory, args.rdx, u64::MAX, StringUnit::Byte)?;
+        let mut accepts = [false; 256];
+        for index in 0..accept {
+            let byte = memory
+                .read_u8(args.rdx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            accepts[usize::from(byte)] = true;
+        }
+        for index in 0..length {
+            let byte = memory
+                .read_u8(args.rcx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            if accepts[usize::from(byte)] {
+                return Ok(args.rcx + index);
+            }
+        }
+        Ok(0)
+    });
+
+    // strtok keeps its scan position in CRT state shared by every thread of
+    // the CRT instance - which is exactly why the CRT later grew strtok_s.
+    let position = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+    registry.register(UCRT, "strtok", move |args, _, memory| {
+        let start = if args.rcx != 0 {
+            args.rcx
+        } else {
+            *position.lock().expect("strtok scan position")
+        };
+        if start == 0 {
+            return Ok(0);
+        }
+        let length = string_length(memory, start, u64::MAX, StringUnit::Byte)?;
+        let delimiters = string_length(memory, args.rdx, u64::MAX, StringUnit::Byte)?;
+        let mut delims = [false; 256];
+        for index in 0..delimiters {
+            let byte = memory
+                .read_u8(args.rdx + index)
+                .map_err(ExitReason::MemoryFault)?;
+            delims[usize::from(byte)] = true;
+        }
+        let mut index = 0u64;
+        while index < length {
+            let byte = memory
+                .read_u8(start + index)
+                .map_err(ExitReason::MemoryFault)?;
+            if !delims[usize::from(byte)] {
+                break;
+            }
+            index += 1;
+        }
+        if index >= length {
+            *position.lock().expect("strtok scan position") = 0;
+            return Ok(0);
+        }
+        let token = start + index;
+        while index < length {
+            let byte = memory
+                .read_u8(start + index)
+                .map_err(ExitReason::MemoryFault)?;
+            if delims[usize::from(byte)] {
+                memory
+                    .write_u8(start + index, 0)
+                    .map_err(ExitReason::MemoryFault)?;
+                *position.lock().expect("strtok scan position") = start + index + 1;
+                return Ok(token);
+            }
+            index += 1;
+        }
+        *position.lock().expect("strtok scan position") = 0;
+        Ok(token)
+    });
+
+    // The case-insensitive comparisons fold the ASCII letters; bytes outside
+    // ASCII compare as themselves, which is the invariant the CRT documents
+    // for the POSIX-compatible behavior of these forms.
+    for (symbol, limit) in [("_stricmp", u64::MAX), ("_strnicmp", u64::MAX)] {
+        registry.register(UCRT, symbol, move |args, _, memory| {
+            let bounded = if symbol == "_strnicmp" {
+                args.r8
+            } else {
+                limit
+            };
+            let fold = |byte: u8| -> u8 {
+                if byte.is_ascii_uppercase() {
+                    byte + 32
+                } else {
+                    byte
+                }
+            };
+            let budget = SCAN_BUDGET.min(bounded);
+            for offset in 0..budget {
+                let a = fold(
+                    memory
+                        .read_u8(args.rcx + offset)
+                        .map_err(ExitReason::MemoryFault)?,
+                );
+                let b = fold(
+                    memory
+                        .read_u8(args.rdx + offset)
+                        .map_err(ExitReason::MemoryFault)?,
+                );
+                if a != b || a == 0 {
+                    return Ok(u64::from((i32::from(a) - i32::from(b)) as u32));
+                }
+            }
+            Ok(0)
+        });
+    }
+
     registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "strrchr");
     registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "strcpy");
     registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "strncpy");
     registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "strcat");
     registry.alias("api-ms-win-crt-private-l1-1-0.dll", UCRT, "strncat");
+
+    // Legacy binaries link the string surface straight out of msvcrt.dll
+    // rather than the api-ms-win-crt forwarding surface.
+    for symbol in [
+        "strcpy",
+        "strncpy",
+        "strcat",
+        "strncat",
+        "strrchr",
+        "strlen",
+        "strcmp",
+        "strncmp",
+        "strnlen",
+        "strstr",
+        "strtok",
+        "strcspn",
+        "strspn",
+        "strpbrk",
+        "_stricmp",
+        "_strnicmp",
+        "_strdup",
+        "_strlwr",
+        "_strupr",
+        "_strrev",
+        "memcpy",
+        "memmove",
+        "memset",
+        "memcmp",
+        "memchr",
+        "strchr",
+    ] {
+        registry.alias(MSVCRT, UCRT, symbol);
+    }
 
     for (symbol, api) in [
         ("strcpy", CRT_STRING_API),
@@ -982,15 +1221,12 @@ pub(super) fn register_utilities(registry: &mut ImportRegistry) {
         ("strxfrm", CRT_STRING_API),
         ("memcpy_s", CRT_STRING_API),
         ("memmove_s", CRT_STRING_API),
-        ("isblank", "api-ms-win-crt-string-l1-1-0.dll"),
-        ("isgraph", "api-ms-win-crt-string-l1-1-0.dll"),
         ("_itoa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_ltoa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_i64toa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_ultoa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_ui64toa", "api-ms-win-crt-convert-l1-1-0.dll"),
         ("_itoa_s", "api-ms-win-crt-convert-l1-1-0.dll"),
-        ("getenv_s", "api-ms-win-crt-environment-l1-1-0.dll"),
     ] {
         registry.alias(api, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
@@ -1074,4 +1310,196 @@ fn format_integer(
         .write_bytes(buffer, &digits)
         .map_err(ExitReason::MemoryFault)?;
     Ok(buffer)
+}
+
+#[cfg(test)]
+#[test]
+fn the_legacy_crt_aliases_the_integer_parses_and_the_console_keys_stop() {
+    use crate::cpu::CpuState;
+    use crate::import_table::ImportName;
+
+    let mut registry = ImportRegistry::new();
+    register_conversions(&mut registry);
+    register_conio(&mut registry);
+    // The legacy CRT resolves the integer parses through the alias: the
+    // strtol family busybox imports from msvcrt.dll is the ucrtbase engine.
+    for symbol in [
+        "strtol",
+        "strtoul",
+        "strtoll",
+        "strtoull",
+        "_strtoi64",
+        "_strtoui64",
+    ] {
+        assert!(
+            registry
+                .resolve(MSVCRT, &ImportName::Name(symbol.to_owned()))
+                .is_some(),
+            "{symbol} resolves through the legacy CRT"
+        );
+    }
+    // The console keys are registered - a program importing them binds -
+    // and calling one stops the guest because the empty console input
+    // would block the one executor forever.
+    let mut memory = GuestMemory::new();
+    let cpu = CpuState::default();
+    let service = registry
+        .resolve(MSVCRT, &ImportName::Name("_getch".to_owned()))
+        .expect("_getch resolves");
+    let result = (service.handler)(&Win64Args::new(&cpu), &mut CpuState::default(), &mut memory);
+    assert!(matches!(result, Err(ExitReason::IllegalInstruction(0xFE))));
+}
+
+#[cfg(test)]
+#[test]
+fn spawnve_refuses_honestly_with_enosys() {
+    use super::ServicesState;
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::{GuestMemory, MemoryPermissions};
+    use crate::services::MockClock;
+    use std::sync::Arc;
+
+    let mut registry = ImportRegistry::new();
+    let _state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register_spawn_refusal(&mut registry);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, module: &str, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(module, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+
+    // The refusal is the documented failure shape: minus one, ENOSYS in
+    // errno. No pretend success ever stands in for a child process.
+    for (module, symbol) in [
+        (UCRT, "_spawnve"),
+        (UCRT, "_wspawnve"),
+        (MSVCRT, "_spawnve"),
+    ] {
+        assert_eq!(
+            call(&mut memory, module, symbol, &[1, 0x1100, 0x1200, 0]),
+            u64::MAX
+        );
+    }
+}
+// The CRT directory surface. The process working directory is a path in
+// the virtual filesystem: it starts at the volume root, `_chdir` validates
+// against the directory set, `_fullpath` resolves lexically without an
+// existence check - exactly the split the CRT documents. All paths resolve
+// case-insensitively on the single machine drive, matching how the file
+// surface stores them.
+pub(crate) fn resolve_directory(cwd: &str, input: &str) -> String {
+    let mut path = input.trim().to_lowercase().replace('/', "\\");
+    if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        path = path.split_off(2);
+    }
+    let absolute = path.starts_with('\\');
+    let mut segments: Vec<String> = if absolute {
+        Vec::new()
+    } else {
+        cwd.split('\\')
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    for part in path.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other.to_owned()),
+        }
+    }
+    segments.join("\\")
+}
+
+fn windows_form(vfs_path: &str) -> String {
+    // The drive is case-folded and the merged `_fullpath` evidence answers
+    // the lowercase form, so the working directory displays the same way.
+    if vfs_path.is_empty() {
+        "c:\\".to_owned()
+    } else {
+        format!("c:\\{vfs_path}")
+    }
+}
+
+const ENOENT: u32 = 2;
+
+fn read_crt_string(memory: &GuestMemory, address: u64, limit: u64) -> Result<String, MemoryError> {
+    let mut bytes = Vec::new();
+    for index in 0..limit {
+        let slot = address.checked_add(index).ok_or(MemoryError::Overflow)?;
+        let byte = memory.read_u8(slot)?;
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+pub(super) fn register_directories(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let getcwd = Arc::clone(state);
+    registry.register(UCRT, "_getcwd", move |args, cpu, memory| {
+        if args.rcx == 0 {
+            set_errno(memory, cpu.gs_base, EINVAL)?;
+            return Ok(0);
+        }
+        let cwd = getcwd.crt_directory.lock().expect("CRT working directory");
+        let form = windows_form(&cwd);
+        drop(cwd);
+        if args.rdx < form.len() as u64 + 1 {
+            set_errno(memory, cpu.gs_base, ERANGE)?;
+            return Ok(0);
+        }
+        memory
+            .write_bytes(args.rcx, form.as_bytes())
+            .map_err(ExitReason::MemoryFault)?;
+        memory
+            .write_u8(args.rcx + form.len() as u64, 0)
+            .map_err(ExitReason::MemoryFault)?;
+        Ok(args.rcx)
+    });
+
+    let chdir = Arc::clone(state);
+    registry.register(UCRT, "_chdir", move |args, cpu, memory| {
+        let input = read_crt_string(memory, args.rcx, 260).map_err(ExitReason::MemoryFault)?;
+        let mut cwd = chdir.crt_directory.lock().expect("CRT working directory");
+        let resolved = resolve_directory(&cwd, &input);
+        let exists = resolved.is_empty() || {
+            let objects = chdir.objects.lock().expect("guest object state");
+            objects.directories.contains(&resolved)
+        };
+        if !exists {
+            set_errno(memory, cpu.gs_base, ENOENT)?;
+            return Ok(u64::from(u32::MAX));
+        }
+        *cwd = resolved;
+        Ok(0)
+    });
+
+    // msvcrt.dll aliases for the legacy binaries that link them there.
+    for symbol in ["_getcwd", "_chdir", "_fullpath"] {
+        registry.alias(MSVCRT, UCRT, symbol);
+    }
 }

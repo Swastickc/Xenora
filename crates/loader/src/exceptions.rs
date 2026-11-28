@@ -20,6 +20,7 @@
 use crate::cpu::{CpuState, ExitReason, Register};
 use crate::imports::{CALLBACK_RETURN, ENTRY_RETURN, ImportRegistry, ServiceStatus, Win64Args};
 use crate::memory::{GuestMemory, MemoryError};
+use crate::pe::{MappedImageBacking, ParsedPe};
 
 mod faults;
 mod scope;
@@ -33,6 +34,17 @@ const KERNEL32: &str = "kernel32.dll";
 /// hands the handler's disposition back to [`resume`].
 pub(crate) const EXCEPTION_RETURN: u64 = ENTRY_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
 const _: () = assert!(EXCEPTION_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
+
+/// Return address under the unhandled-exception filter the dispatcher calls
+/// at the end of a search. Reaching it hands the filter's result to
+/// [`filter_resume`].
+pub(crate) const FILTER_RETURN: u64 = SCOPE_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(FILTER_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
+
+/// `UnhandledExceptionFilter` results (`SetUnhandledExceptionFilter`).
+const FILTER_CONTINUE_EXECUTION: i32 = -1;
+const FILTER_CONTINUE_SEARCH: i32 = 0;
+const FILTER_EXECUTE_HANDLER: i32 = 1;
 
 const UNW_FLAG_EHANDLER: u8 = 0x1;
 const UNW_FLAG_UHANDLER: u8 = 0x2;
@@ -96,6 +108,24 @@ fn span(address: u64, size: u64) -> Result<(), ExitReason> {
 /// trailing handler RVA or chained 12-byte entry.
 const UNWIND_INFO_SPAN: u64 = 4 + 2 * 256 + 12;
 
+/// Fixed bytes of one unwind-info chain link: header, whole aligned unwind
+/// codes, and the trailing handler RVA or chained RUNTIME_FUNCTION entry.
+/// Language-specific handler data is variable-sized and intentionally excluded.
+fn fixed_unwind_span(header: u32) -> u64 {
+    let bytes = header.to_le_bytes();
+    let count = u64::from(bytes[2]);
+    let codes = (count + 1) & !1;
+    let flags = bytes[0] >> 3;
+    let trailing = if flags & UNW_FLAG_CHAININFO != 0 {
+        12
+    } else if flags & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER) != 0 {
+        4
+    } else {
+        0
+    };
+    4 + 2 * codes + trailing
+}
+
 fn at(base: u64, offset: u64) -> Result<u64, ExitReason> {
     base.checked_add(offset).ok_or(fault(MemoryError::Overflow))
 }
@@ -107,14 +137,36 @@ pub(crate) fn register_exception_directory(
     base: u64,
     size_of_image: u32,
     memory: &mut GuestMemory,
-) -> Result<(), String> {
+) -> Result<u64, String> {
+    register_exception_directory_impl(bytes, base, size_of_image, memory, None)
+}
+
+/// Read and check data directory 3 using the parsed image's committed header
+/// and section backing, then record its function table.
+pub(crate) fn register_exception_directory_for_image(
+    pe: &ParsedPe,
+    bytes: &[u8],
+    base: u64,
+    memory: &mut GuestMemory,
+) -> Result<u64, String> {
+    let backing = MappedImageBacking::new(pe);
+    register_exception_directory_impl(bytes, base, pe.size_of_image, memory, Some(&backing))
+}
+
+fn register_exception_directory_impl(
+    bytes: &[u8],
+    base: u64,
+    size_of_image: u32,
+    memory: &mut GuestMemory,
+    backing: Option<&MappedImageBacking>,
+) -> Result<u64, String> {
     let u32_at = |offset: usize| -> Option<u32> {
         Some(u32::from_le_bytes(
             bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
         ))
     };
     let Some(lfanew) = u32_at(0x3C) else {
-        return Ok(());
+        return Ok(0);
     };
     let coff = lfanew as usize + 4;
     let optional = coff + 20;
@@ -123,13 +175,13 @@ pub(crate) fn register_exception_directory(
         .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
     // PE32+: NumberOfRvaAndSizes at 108, the exception directory at 136.
     if optional_len < 144 || u32_at(optional + 108).unwrap_or(0) < 4 {
-        return Ok(());
+        return Ok(0);
     }
     let (Some(rva), Some(size)) = (u32_at(optional + 136), u32_at(optional + 140)) else {
-        return Ok(());
+        return Ok(0);
     };
     if rva == 0 && size == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let bad = |why: &str| Err(format!("malformed exception directory: {why}"));
     if size == 0 || !size.is_multiple_of(12) || !rva.is_multiple_of(4) {
@@ -137,6 +189,9 @@ pub(crate) fn register_exception_directory(
     }
     if u64::from(rva) + u64::from(size) > u64::from(size_of_image) {
         return bad("it runs past the end of the image");
+    }
+    if backing.is_some_and(|backing| !backing.covers(rva, u64::from(size))) {
+        return bad("its entries are not continuously backed by image memory");
     }
     let table = base + u64::from(rva);
     let count = u64::from(size / 12);
@@ -158,8 +213,25 @@ pub(crate) fn register_exception_directory(
                 "entry {index} is not sorted after the one before it"
             ));
         }
-        if !unwind.is_multiple_of(4) || u64::from(unwind) + 4 > u64::from(size_of_image) {
+        if backing.is_some_and(|backing| !backing.covers(begin, u64::from(end - begin))) {
+            return bad(&format!(
+                "entry {index} has a function range outside committed image memory"
+            ));
+        }
+        let unwind_address = base.checked_add(u64::from(unwind)).ok_or_else(|| {
+            format!("malformed exception directory: entry {index}: unwind address overflows")
+        })?;
+        let unwind_header = memory.read_u32(unwind_address).map_err(|e| {
+            format!("malformed exception directory: entry {index}: unwind header: {e}")
+        })?;
+        let fixed_span = fixed_unwind_span(unwind_header);
+        if !unwind.is_multiple_of(4) || u64::from(unwind) + fixed_span > u64::from(size_of_image) {
             return bad(&format!("entry {index} has unwind data outside the image"));
+        }
+        if backing.is_some_and(|backing| !backing.covers(unwind, fixed_span)) {
+            return bad(&format!(
+                "entry {index} has unwind data outside committed image memory"
+            ));
         }
         previous_end = end;
     }
@@ -169,7 +241,7 @@ pub(crate) fn register_exception_directory(
         table,
         count,
     });
-    Ok(())
+    Ok(count)
 }
 
 /// `RtlLookupFunctionEntry`: the image base and the guest address of the
@@ -452,16 +524,28 @@ fn unwind_epilog(
         trial.set(Register::Rsp, rsp.wrapping_add(size));
         pc += len;
     } else if matches!(byte(pc)?, 0x48 | 0x49) && byte(pc + 1)? == 0x8D {
-        // lea rsp, [frame register + disp8/disp32]
+        // lea rsp, [frame register + disp8/disp32]. An r/m field of 100 is
+        // followed by a SIB byte. Under REX.B, SIB 0x24 (no index, base 100)
+        // is R12, which can be a frame register. Any other SIB byte adds an
+        // index or names another base. Without REX.B the base is RSP, and
+        // Microsoft's "x64 prolog and epilog" page rules out `lea rsp,
+        // constant[rsp]` in an epilog.
         let modrm = byte(pc + 2)?;
-        let rm = (modrm & 7) | if byte(pc)? == 0x49 { 8 } else { 0 };
+        let rex_b = byte(pc)? == 0x49;
+        let rm = (modrm & 7) | if rex_b { 8 } else { 0 };
+        let sib = u64::from(modrm & 7 == 4);
+        if sib == 1 && !(rex_b && byte(pc + 3)? == 0x24) {
+            return Ok(false);
+        }
         let disp = match modrm >> 6 {
-            1 => Some((byte(pc + 3)? as i8 as i64 as u64, 4)),
-            2 => Some((memory_u32(memory, pc + 3)? as i32 as i64 as u64, 7)),
+            1 => Some((byte(pc + 3 + sib)? as i8 as i64 as u64, 4 + sib)),
+            2 => Some((
+                memory_u32(memory, pc + 3 + sib)? as i32 as i64 as u64,
+                7 + sib,
+            )),
             _ => None,
         };
-        let Some((disp, len)) =
-            disp.filter(|_| (modrm >> 3) & 7 == 4 && rm & 7 != 4 && rm == frame_register)
+        let Some((disp, len)) = disp.filter(|_| (modrm >> 3) & 7 == 4 && rm == frame_register)
         else {
             return Ok(false);
         };
@@ -638,23 +722,19 @@ pub(crate) struct Dispatch {
     /// Guest address of the CONTEXT, DISPATCHER_CONTEXT and EXCEPTION_RECORD.
     scratch: u64,
     frames: u32,
-    /// The CPU fault this search started from. A search that no frame
-    /// accepts ends the guest with it, at the faulting instruction.
-    fault: Option<ExitReason>,
     /// The search started from an instruction-fetch fault, whose address can
     /// be outside every image: that first frame is unwound as a leaf.
     fetch_fault: bool,
     /// The next frame may be outside every image (see `fetch_fault`).
     leaf: bool,
+    /// The search is waiting for the unhandled-exception filter.
+    filter: bool,
+    /// The search started from `RaiseException`, not from a CPU fault.
+    raised: bool,
 }
 
 impl Dispatch {
-    fn search(
-        origin: CpuState,
-        scratch: u64,
-        fault: Option<ExitReason>,
-        fetch_fault: bool,
-    ) -> Self {
+    fn search(origin: CpuState, scratch: u64, fetch_fault: bool) -> Self {
         Self {
             unwind: None,
             next: origin.clone(),
@@ -662,9 +742,10 @@ impl Dispatch {
             establisher: 0,
             scratch,
             frames: 0,
-            fault,
             fetch_fault,
             leaf: fetch_fault,
+            filter: false,
+            raised: false,
         }
     }
 }
@@ -694,12 +775,15 @@ fn scratch_below(rsp: u64, memory: &GuestMemory) -> Result<u64, ExitReason> {
 }
 
 /// Whether `rip` is where a guest stack ends: the return address of the
-/// entry point, of a thread's start routine, or of a guest callback a host
-/// service made. No guest frame lies beyond it to search.
+/// entry point, of a thread's start routine, of a TLS callback, or of a
+/// guest callback a host service made. No guest frame lies beyond it.
 fn end_of_stack(rip: u64) -> bool {
     matches!(
         rip,
-        0 | ENTRY_RETURN | CALLBACK_RETURN | crate::services::threads::THREAD_RETURN
+        0 | ENTRY_RETURN
+            | CALLBACK_RETURN
+            | crate::services::threads::THREAD_RETURN
+            | crate::tls::TLS_CALLBACK_RETURN
     )
 }
 
@@ -712,8 +796,8 @@ fn walk(
     let teb = cpu.gs_base;
     loop {
         let frame = dispatch.next.clone();
-        if frame.rip == EXCEPTION_RETURN {
-            // An outer dispatch's handler frame: the stack continues at the
+        if frame.rip == EXCEPTION_RETURN || frame.rip == FILTER_RETURN {
+            // An outer dispatch's handler or unhandled-exception filter frame: the stack continues at the
             // code that called that dispatch.
             let outer = memory
                 .exception_frames
@@ -737,16 +821,7 @@ fn walk(
             if dispatch.unwind.is_some() {
                 return Err(ExitReason::InvalidUnwind);
             }
-            let code = memory
-                .read_u32(dispatch.scratch + RECORD_AT)
-                .map_err(fault)?;
-            if let Some(reason) = dispatch.fault {
-                // The guest stops at the faulting instruction, not inside
-                // the dispatcher or a handler.
-                *cpu = dispatch.origin;
-                return Err(reason);
-            }
-            return Err(ExitReason::UnhandledException(code));
+            return unhandled(dispatch, cpu, memory);
         }
         dispatch.frames += 1;
         if dispatch.frames > MAX_FRAMES {
@@ -894,13 +969,138 @@ fn install(
     Ok(())
 }
 
+/// A search reached the end of the stack with no frame accepting the
+/// exception. Call the unhandled-exception filter, once per exception, or
+/// take the default action.
+///
+/// `SetUnhandledExceptionFilter` documents that the filter takes an
+/// `EXCEPTION_POINTERS` and runs on the thread that raised the exception, and
+/// what each of its three results means. The filter is not called again for
+/// an exception raised while a filter of the same thread runs: that one gets
+/// the default action at once (a Xenora policy; the pages read are silent).
+fn unhandled(
+    mut dispatch: Dispatch,
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+) -> Result<(), ExitReason> {
+    let filter = memory.unhandled_filter;
+    let teb = cpu.gs_base;
+    let filtering = memory
+        .exception_frames
+        .iter()
+        .any(|(&(t, _), pending)| t == teb && pending.filter);
+    if filter == 0 || dispatch.filter || filtering {
+        return default_action(&dispatch, cpu, memory);
+    }
+    // EXCEPTION_POINTERS { ExceptionRecord, ContextRecord }, in the
+    // DISPATCHER_CONTEXT slot, which no handler is using now.
+    let s = dispatch.scratch;
+    let pointers = s + DISPATCHER_AT;
+    memory.write_u64(pointers, s + RECORD_AT).map_err(fault)?;
+    memory
+        .write_u64(pointers + 8, s + EXCEPTION_CONTEXT_AT)
+        .map_err(fault)?;
+    let call = s - 40;
+    memory.write_u64(call, FILTER_RETURN).map_err(fault)?;
+    memory.fetch_instruction_byte(filter).map_err(fault)?;
+    let key = (teb, call + 8);
+    if memory.exception_frames.contains_key(&key) {
+        return Err(ExitReason::InvalidUnwind);
+    }
+    dispatch.filter = true;
+    memory.exception_frames.insert(key, dispatch);
+    cpu.set(Register::Rcx, pointers);
+    cpu.set(Register::Rsp, call);
+    cpu.rip = filter;
+    Ok(())
+}
+
+/// Xenora's default action for an exception that nothing handled, a policy:
+/// the guest process ends with the exception code as its exit status.
+/// `RaiseException` names `ExitProcess` as the default action for most
+/// exceptions but the pages read give no exit status. The guest's registers
+/// are those of the raise or fault, so a fault's RIP is the faulting
+/// instruction. The services' recorded exit status is not set: the
+/// dispatcher has no access to them, only the guest's exit reason carries it.
+fn default_action(
+    dispatch: &Dispatch,
+    cpu: &mut CpuState,
+    memory: &GuestMemory,
+) -> Result<(), ExitReason> {
+    let code = memory
+        .read_u32(dispatch.scratch + RECORD_AT)
+        .map_err(fault)?;
+    let mut stop = dispatch.origin.clone();
+    if dispatch.raised {
+        // As at the call into RaiseException: RSP on its return address, so
+        // the nonvolatile registers are those the caller had.
+        stop.set(Register::Rsp, stop.get(Register::Rsp) - 8);
+    }
+    *cpu = stop;
+    Err(ExitReason::ProcessExit(code))
+}
+
+/// The unhandled-exception filter returned to [`FILTER_RETURN`] with its
+/// result in EAX.
+pub(crate) fn filter_resume(
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+) -> Result<(), ExitReason> {
+    let key = (cpu.gs_base, cpu.get(Register::Rsp));
+    let dispatch = match memory.exception_frames.get(&key) {
+        Some(pending) if pending.filter => memory
+            .exception_frames
+            .remove(&key)
+            .expect("the pending filter"),
+        _ => return Err(ExitReason::InvalidUnwind),
+    };
+    match cpu.get(Register::Rax) as u32 as i32 {
+        // "Continue execution from the point of the exception", with the
+        // filter's changes to the exception information.
+        FILTER_CONTINUE_EXECUTION => continue_execution(dispatch, cpu, memory),
+        // Continue-search goes on to the default handling, and execute-handler
+        // "usually results in process termination": both end here in the
+        // default action.
+        FILTER_CONTINUE_SEARCH | FILTER_EXECUTE_HANDLER => default_action(&dispatch, cpu, memory),
+        _ => Err(ExitReason::InvalidUnwind),
+    }
+}
+
+/// Continue with the exception context the handler or filter was given,
+/// including any change it made: after a raise this returns from the raise,
+/// and after a fault it runs the faulting instruction again unless the
+/// handler moved RIP. A noncontinuable exception is refused.
+fn continue_execution(
+    dispatch: Dispatch,
+    cpu: &mut CpuState,
+    memory: &GuestMemory,
+) -> Result<(), ExitReason> {
+    let flags = memory
+        .read_u32(dispatch.scratch + RECORD_AT + 4)
+        .map_err(fault)?;
+    if flags & EXCEPTION_NONCONTINUABLE != 0 {
+        return Err(ExitReason::InvalidUnwind);
+    }
+    let mut resumed = dispatch.origin;
+    load_registers(
+        memory,
+        dispatch.scratch + EXCEPTION_CONTEXT_AT,
+        &mut resumed,
+    )?;
+    *cpu = resumed;
+    Ok(())
+}
+
 /// A language handler returned to [`EXCEPTION_RETURN`] with its disposition in EAX.
 pub(crate) fn resume(cpu: &mut CpuState, memory: &mut GuestMemory) -> Result<(), ExitReason> {
     let key = (cpu.gs_base, cpu.get(Register::Rsp));
-    let dispatch = memory
-        .exception_frames
-        .remove(&key)
-        .ok_or(ExitReason::InvalidUnwind)?;
+    let dispatch = match memory.exception_frames.get(&key) {
+        Some(pending) if !pending.filter => memory
+            .exception_frames
+            .remove(&key)
+            .expect("the pending dispatch"),
+        _ => return Err(ExitReason::InvalidUnwind),
+    };
     let disposition = cpu.get(Register::Rax) as u32;
     match (dispatch.unwind, disposition) {
         (Some(target), DISPOSITION_CONTINUE_SEARCH) => {
@@ -913,28 +1113,29 @@ pub(crate) fn resume(cpu: &mut CpuState, memory: &mut GuestMemory) -> Result<(),
             walk(dispatch, cpu, memory)
         }
         (None, DISPOSITION_CONTINUE_SEARCH) => walk(dispatch, cpu, memory),
-        (None, DISPOSITION_CONTINUE_EXECUTION) => {
-            let flags = memory
-                .read_u32(dispatch.scratch + RECORD_AT + 4)
-                .map_err(fault)?;
-            if flags & EXCEPTION_NONCONTINUABLE != 0 {
-                return Err(ExitReason::InvalidUnwind);
-            }
-            // Continue with the context the handler was given, including any
-            // change it made: after a raise this returns from the raise, and
-            // after a fault it runs the faulting instruction again unless the
-            // handler moved RIP.
-            let mut resumed = dispatch.origin;
-            load_registers(
-                memory,
-                dispatch.scratch + EXCEPTION_CONTEXT_AT,
-                &mut resumed,
-            )?;
-            *cpu = resumed;
-            Ok(())
-        }
+        (None, DISPOSITION_CONTINUE_EXECUTION) => continue_execution(dispatch, cpu, memory),
+        // ExceptionNestedException, ExceptionCollidedUnwind and any other
+        // value: the public pages read do not describe how a dispatcher
+        // handles the first two, so they are refused rather than guessed.
         _ => Err(ExitReason::InvalidUnwind),
     }
+}
+
+/// Raise a breakpoint from a DebugBreak service call.
+pub(crate) fn debug_break(
+    args: &Win64Args,
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+) -> Result<(), ExitReason> {
+    const STATUS_BREAKPOINT: u64 = 0x8000_0003;
+    let breakpoint = Win64Args {
+        rcx: STATUS_BREAKPOINT,
+        rdx: 0,
+        r8: 0,
+        r9: 0,
+        rsp: args.rsp,
+    };
+    raise_exception(&breakpoint, cpu, memory)
 }
 
 /// `RaiseException(code, flags, count, arguments)`.
@@ -970,7 +1171,9 @@ fn raise_exception(
             .map_err(fault)?;
     }
     write_context(memory, scratch + EXCEPTION_CONTEXT_AT, &origin)?;
-    walk(Dispatch::search(origin, scratch, None, false), cpu, memory)
+    let mut dispatch = Dispatch::search(origin, scratch, false);
+    dispatch.raised = true;
+    walk(dispatch, cpu, memory)
 }
 
 /// `RtlUnwindEx(target_frame, target_ip, record, return_value, context, history)`.
@@ -980,7 +1183,10 @@ fn unwind_ex(
     memory: &mut GuestMemory,
 ) -> Result<(), ExitReason> {
     if args.rcx == 0 {
-        // An exit unwind, which has no target frame, is not modelled.
+        // An exit unwind, which has no target frame. `RtlUnwindEx` says only
+        // that a NULL target frame performs one and that the target IP is
+        // then ignored; where it stops and what follows are not documented,
+        // so it is refused rather than guessed.
         return Err(ExitReason::InvalidUnwind);
     }
     let (origin, scratch) = caller(cpu, memory)?;
@@ -1016,7 +1222,7 @@ fn unwind(
     }
     let dispatch = Dispatch {
         unwind: Some(target),
-        ..Dispatch::search(origin, scratch, None, false)
+        ..Dispatch::search(origin, scratch, false)
     };
     walk(dispatch, cpu, memory)
 }
@@ -1206,6 +1412,171 @@ mod tests {
         assert_eq!(ctx.get(Register::Rbp), 0xBEBE);
         assert_eq!(ctx.rip, 0xCA11E7);
         assert_eq!(ctx.get(Register::Rsp), rsp + 0x40);
+    }
+
+    /// The handler a framed function names, and its data after the slot.
+    const HANDLER: u32 = 0x1F00;
+    /// Where the framed function's fixed allocation starts, and the values
+    /// saved above it: RBX, R12 and the return address.
+    const ALLOCATION: u64 = STACK + 0x200;
+    const SAVED_RBX: u64 = 0xB0B0_B0B0;
+    const SAVED_R12: u64 = 0x1212_1212_1212;
+    const RETURN: u64 = 0xCA11E7;
+
+    /// An image with one function at BEGIN..BEGIN+0x100 that uses R12 as its
+    /// frame register, laid out from Microsoft's "x64 prolog and epilog" and
+    /// "x64 exception handling" pages. The encodings, epilogs included, were
+    /// checked with LLVM `llvm-mc`:
+    ///
+    /// ```text
+    /// 0:  push r12              41 54
+    /// 2:  push rbx              53
+    /// 3:  sub rsp, 0x40         48 83 EC 40
+    /// 7:  lea r12, [rsp + 0x20] 4C 8D 64 24 20
+    /// ```
+    ///
+    /// UNWIND_INFO names R12 (12) with a scaled frame offset of 2, which is
+    /// 0x20 bytes, and an exception handler. `epilog` is written at
+    /// BEGIN+0x80. It also fills the stack: RBX, R12 and the return address
+    /// above the 0x40 allocation at ALLOCATION.
+    fn r12_image(epilog: &[u8]) -> GuestMemory {
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region(BASE, IMAGE as usize, MemoryPermissions::READ_WRITE_EXECUTE)
+            .unwrap();
+        memory
+            .map_region(STACK, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        let entry = [BEGIN as u32, BEGIN as u32 + 0x100, INFO as u32];
+        for (index, value) in entry.iter().enumerate() {
+            memory
+                .write_u32(BASE + 0x3000 + 4 * index as u64, *value)
+                .unwrap();
+        }
+        // Version 1 with UNW_FLAG_EHANDLER, a 12-byte prolog, four codes, and
+        // frame register 12 with scaled offset 2.
+        memory
+            .write_bytes(BASE + INFO, &[1 | UNW_FLAG_EHANDLER << 3, 12, 4, 0x2C])
+            .unwrap();
+        // UWOP_SET_FPREG at 12, UWOP_ALLOC_SMALL of 0x40 at 7, then
+        // UWOP_PUSH_NONVOL of RBX at 3 and of R12 at 2: offset, then the
+        // operation in the low and its information in the high nibble.
+        for (index, code) in [0x030C_u16, 0x7207, 0x3003, 0xC002].iter().enumerate() {
+            memory
+                .write_u16(BASE + INFO + 4 + 2 * index as u64, *code)
+                .unwrap();
+        }
+        memory.write_u32(BASE + INFO + 12, HANDLER).unwrap();
+        memory
+            .write_bytes(
+                BASE + BEGIN,
+                &[
+                    0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x40, 0x4C, 0x8D, 0x64, 0x24, 0x20,
+                ],
+            )
+            .unwrap();
+        memory.write_bytes(BASE + BEGIN + 0x80, epilog).unwrap();
+        memory.write_u64(ALLOCATION + 0x40, SAVED_RBX).unwrap();
+        memory.write_u64(ALLOCATION + 0x48, SAVED_R12).unwrap();
+        memory.write_u64(ALLOCATION + 0x50, RETURN).unwrap();
+        register_exception_directory(&headers(0x3000, 12), BASE, IMAGE, &mut memory).unwrap();
+        memory
+    }
+
+    /// `lea rsp, [r12 + 0x20]; pop rbx; pop r12; ret`, with an 8-bit
+    /// displacement as assemblers emit it.
+    const R12_EPILOG: [u8; 9] = [0x49, 0x8D, 0x64, 0x24, 0x20, 0x5B, 0x41, 0x5C, 0xC3];
+    /// The same epilog with a 32-bit displacement.
+    const R12_EPILOG_DISP32: [u8; 12] = [
+        0x49, 0x8D, 0xA4, 0x24, 0x20, 0x00, 0x00, 0x00, 0x5B, 0x41, 0x5C, 0xC3,
+    ];
+
+    /// Unwind from `pc` with RSP, RBX and R12 as given. The frame register
+    /// R12 holds ALLOCATION + 0x20 until the epilog pops it.
+    fn unwind_r12(
+        memory: &GuestMemory,
+        pc: u64,
+        rsp: u64,
+        rbx: u64,
+        r12: u64,
+    ) -> (CpuState, Frame) {
+        let mut ctx = CpuState::new(pc, rsp);
+        ctx.set(Register::Rbx, rbx);
+        ctx.set(Register::R12, r12);
+        let (base, entry) = lookup(memory, pc).unwrap().expect("in the table");
+        let frame = virtual_unwind(memory, base, entry, &mut ctx, UNW_FLAG_EHANDLER).unwrap();
+        (ctx, frame)
+    }
+
+    /// The caller's registers after any unwind of the framed function.
+    fn assert_caller(ctx: &CpuState, what: &str) {
+        assert_eq!(ctx.get(Register::Rbx), SAVED_RBX, "{what}");
+        assert_eq!(ctx.get(Register::R12), SAVED_R12, "{what}");
+        assert_eq!(ctx.rip, RETURN, "{what}");
+        assert_eq!(ctx.get(Register::Rsp), ALLOCATION + 0x58, "{what}");
+    }
+
+    const R12_FRAME: u64 = ALLOCATION + 0x20;
+    /// RSP in the body, below a further 0x100 bytes the body allocated, so only
+    /// the frame register locates the fixed allocation.
+    const BODY_RSP: u64 = ALLOCATION - 0x100;
+
+    #[test]
+    fn an_r12_frame_body_address_unwinds_from_the_frame_register() {
+        let memory = r12_image(&R12_EPILOG);
+        let (ctx, frame) = unwind_r12(&memory, BASE + BEGIN + 0x40, BODY_RSP, 0x5555, R12_FRAME);
+        assert_caller(&ctx, "body");
+        // R12 - 0x20 is the fixed allocation, and the body selects the handler.
+        assert_eq!(
+            frame,
+            Frame {
+                handler: Some((BASE + u64::from(HANDLER), BASE + INFO + 16)),
+                establisher: ALLOCATION,
+            }
+        );
+    }
+
+    #[test]
+    fn an_r12_frame_epilog_is_finished_from_each_of_its_instructions() {
+        for (epilog, lea) in [(&R12_EPILOG[..], 5), (&R12_EPILOG_DISP32[..], 8)] {
+            let memory = r12_image(epilog);
+            let start = BASE + BEGIN + 0x80;
+            // (PC, RSP, RBX, R12) as each instruction of the epilog finds them.
+            let points = [
+                (start, BODY_RSP, 0x5555, R12_FRAME),
+                (start + lea, ALLOCATION + 0x40, 0x5555, R12_FRAME),
+                (start + lea + 1, ALLOCATION + 0x48, SAVED_RBX, R12_FRAME),
+                (start + lea + 3, ALLOCATION + 0x50, SAVED_RBX, SAVED_R12),
+            ];
+            for (pc, rsp, rbx, r12) in points {
+                let what = format!("{epilog:02X?} at {:#x}", pc - start);
+                let (ctx, frame) = unwind_r12(&memory, pc, rsp, rbx, r12);
+                assert_caller(&ctx, &what);
+                // An epilog address calls no handler (Microsoft, "x64
+                // exception handling", RtlVirtualUnwind).
+                assert_eq!(frame.handler, None, "{what}");
+                if r12 == R12_FRAME {
+                    assert_eq!(frame.establisher, ALLOCATION, "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn an_r12_frame_lea_of_another_form_is_body_code() {
+        let pops = [0x5B, 0x41, 0x5C, 0xC3];
+        for lea in [
+            &[0x49, 0x8D, 0x64, 0x04, 0x20][..], // lea rsp, [r12 + rax + 0x20]: an index
+            &[0x48, 0x8D, 0x64, 0x24, 0x20],     // lea rsp, [rsp + 0x20]: RSP is no frame
+            &[0x49, 0x8D, 0x65, 0x20],           // lea rsp, [r13 + 0x20]: not the frame register
+        ] {
+            let memory = r12_image(&[lea, &pops[..]].concat());
+            let (ctx, frame) =
+                unwind_r12(&memory, BASE + BEGIN + 0x80, BODY_RSP, 0x5555, R12_FRAME);
+            // The body rules apply: the same caller state, and the handler.
+            assert_caller(&ctx, &format!("{lea:02X?}"));
+            assert!(frame.handler.is_some(), "{lea:02X?}");
+        }
     }
 
     #[test]

@@ -30,8 +30,8 @@ const MAX_STACK: u64 = 8 * 1024 * 1024;
 const MAX_SUSPEND: u32 = 127;
 /// GetExitCodeThread result while the thread runs.
 const STILL_ACTIVE: u32 = 259;
-const CREATE_SUSPENDED: u32 = 4;
-const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
+pub(super) const CREATE_SUSPENDED: u32 = 4;
+pub(super) const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
 pub(super) const THREAD_ALL_ACCESS: u32 = 0x001F_FFFF;
 const THREAD_TERMINATE: u32 = 1;
 const THREAD_SUSPEND_RESUME: u32 = 2;
@@ -52,8 +52,12 @@ const TEB_STACK_BASE: u64 = 0x08;
 const TEB_STACK_LIMIT: u64 = 0x10;
 const TEB_SELF: u64 = 0x30;
 
-/// Return address of a thread's start routine. Nothing is mapped there.
-pub(crate) const THREAD_RETURN: u64 = 0xFFFF_FFFF_FFFE_0000;
+/// Return address of a thread's start routine. It is on the reserved
+/// sentinel page, so the import dispatcher stops there before any fetch: a
+/// start routine's return is a host event, never a guest fault.
+pub(crate) const THREAD_RETURN: u64 =
+    crate::tls::TLS_CALLBACK_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(THREAD_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
 
 /// Tail-call the actual ExitThread service with the worker's original return
 /// slot and home area. The worker can use FLS without importing ExitThread.
@@ -294,7 +298,7 @@ impl ThreadTable {
         })
     }
 
-    fn id_of(&self, teb: u64) -> Option<u32> {
+    pub(super) fn id_of(&self, teb: u64) -> Option<u32> {
         self.threads
             .iter()
             .find(|(_, thread)| thread.teb == teb)
@@ -317,15 +321,15 @@ impl ThreadTable {
     }
 }
 
-/// Arguments of CreateThread.
-struct ThreadRequest {
-    stack: u64,
-    start: u64,
-    parameter: u64,
-    suspended: bool,
+/// Arguments of CreateThread, shared with the CRT `_beginthreadex` form.
+pub(super) struct ThreadRequest {
+    pub(super) stack: u64,
+    pub(super) start: u64,
+    pub(super) parameter: u64,
+    pub(super) suspended: bool,
     /// `stack` is the reservation rather than the initial commitment.
-    reservation: bool,
-    id_output: u64,
+    pub(super) reservation: bool,
+    pub(super) id_output: u64,
 }
 
 fn map_thread(
@@ -491,6 +495,7 @@ impl ServicesState {
         }
         self.abandon_mutexes(thread.teb);
         self.retire_thread_last_error(thread.teb);
+        self.com().retire_thread(thread.teb);
         self.synch
             .lock()
             .expect("guest synchronization state")
@@ -600,7 +605,7 @@ impl ServicesState {
         thread.slot.map(|_| Arc::clone(&thread.object))
     }
 
-    fn create_thread(
+    pub(super) fn create_thread(
         &self,
         teb: u64,
         memory: &mut GuestMemory,

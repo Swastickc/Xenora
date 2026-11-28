@@ -20,7 +20,8 @@ use objc2_metal::{
     MTLStorageMode, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 use xenora_texture::{
-    Bc1Upload, BcAlphaFormat, BcAlphaUpload, BcChannelFormat, BcChannelUpload, TiledBc1,
+    AddressMode, Bc1Upload, BcAlphaFormat, BcAlphaUpload, BcChannelFormat, BcChannelUpload,
+    BptcFormat, BptcUpload, FilterMode, TiledBc1,
 };
 
 #[path = "render.rs"]
@@ -147,6 +148,25 @@ kernel void read_bc_snorm(texture2d<float, access::read> image [[texture(0)]],
 }
 ";
 
+// BC6H decodes to half floats. Each texel returns its four channels as
+// binary32 bit patterns, so a value between two half floats stays visible
+// instead of being rounded to one of them.
+const BC_FLOAT_READBACK: &str = r"
+#include <metal_stdlib>
+using namespace metal;
+kernel void read_bc_float(texture2d<float, access::read> image [[texture(0)]],
+                          device uint *output [[buffer(1)]],
+                          uint index [[thread_position_in_grid]]) {
+    uint width = image.get_width();
+    uint texel = index / 4u;
+    float4 value = image.read(uint2(texel % width, texel / width));
+    output[index] = as_type<uint>(value[index % 4u]);
+}
+";
+
+/// Output words of each BC6H texel from [`NativeCompute::read_bptc_upload`].
+const BC_FLOAT_WORDS: usize = 4;
+
 enum ComputeInput<'a> {
     Words(&'a [u32]),
     Texture(&'a ProtocolObject<dyn MTLTexture>, usize),
@@ -154,6 +174,16 @@ enum ComputeInput<'a> {
         texture: &'a ProtocolObject<dyn MTLTexture>,
         sampler: &'a ProtocolObject<dyn MTLSamplerState>,
         coords: &'a [u32],
+    },
+    /// A translated gfx1030 kernel that samples a bound texture: the input
+    /// words go to `[[buffer(0)]]`, output to `[[buffer(1)]]`, and the texture
+    /// and sampler to `[[texture(0)]]` and `[[sampler(0)]]`, and the one-word
+    /// sample-domain fault flag to `[[buffer(2)]]`.
+    WordsSampled {
+        words: &'a [u32],
+        texture: &'a ProtocolObject<dyn MTLTexture>,
+        sampler: &'a ProtocolObject<dyn MTLSamplerState>,
+        fault: &'a ProtocolObject<dyn MTLBuffer>,
     },
 }
 
@@ -163,6 +193,7 @@ impl ComputeInput<'_> {
             Self::Words(words) => words.len(),
             Self::Texture(_, pixels) => *pixels,
             Self::SampledTexture { coords, .. } => coords.len() / 2,
+            Self::WordsSampled { words, .. } => words.len(),
         }
     }
 }
@@ -347,6 +378,7 @@ struct InFlightResources {
     output: SharedBuffer,
     _texture: Option<Retained<ProtocolObject<dyn MTLTexture>>>,
     _sampler: Option<Retained<ProtocolObject<dyn MTLSamplerState>>>,
+    _fault: Option<SharedBuffer>,
     gate: Option<Retained<ProtocolObject<dyn MTLSharedEvent>>>,
     word_count: usize,
 }
@@ -744,23 +776,84 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         )
     }
 
+    /// Read a selected subresource from a validated pitched BC6H or BC7 upload.
+    ///
+    /// The original 16-byte blocks go to a native `BC7_RGBAUnorm`,
+    /// `BC6H_RGBUfloat` or `BC6H_RGBFloat` texture. BC7 output has the layout
+    /// of [`Self::read_bc1_upload`], one word per texel. BC6H output has four
+    /// words per texel, row-major: the red, green, blue and alpha channels as
+    /// the GPU reads them, each as a binary32 bit pattern. Metal fills BC6H
+    /// alpha with 1.0. A BC6H level therefore holds at most 1024 texels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid layer or mip, out-of-policy size,
+    /// unavailable BC compression (operation `supportsBCTextureCompression`),
+    /// or Metal setup or execution failure.
+    pub fn read_bptc_upload(
+        &self,
+        upload: &BptcUpload<'_>,
+        layer: usize,
+        mip: u32,
+    ) -> Result<Vec<u32>, MetalError> {
+        let level = upload
+            .subresource(layer, mip)
+            .map_err(|error| MetalError::new("texture subresource", format!("{error:?}")))?;
+        let (format, words_per_texel, name) = match upload.format() {
+            BptcFormat::Bc6hUfloat => (
+                MTLPixelFormat::BC6H_RGBUfloat,
+                BC_FLOAT_WORDS,
+                "BC6H UFLOAT",
+            ),
+            BptcFormat::Bc6hSfloat => {
+                (MTLPixelFormat::BC6H_RGBFloat, BC_FLOAT_WORDS, "BC6H SFLOAT")
+            }
+            BptcFormat::Bc7Unorm => (MTLPixelFormat::BC7_RGBAUnorm, 1, "BC7 UNORM"),
+        };
+        let words = self.validate_bc_words(level.width, level.height, words_per_texel, name)?;
+        self.read_bc_blocks(
+            format,
+            level.bytes,
+            level.row_pitch,
+            level.width,
+            level.height,
+            words,
+        )
+    }
+
+    /// [`Self::validate_bc_words`] for formats read back as one word per texel.
     fn validate_bc_extent(
         &self,
         width: usize,
         height: usize,
         name: &str,
     ) -> Result<usize, MetalError> {
+        self.validate_bc_words(width, height, 1, name)
+    }
+
+    /// Checks the level's size against the dispatch limit and the device's
+    /// BC support, and returns the number of output words.
+    fn validate_bc_words(
+        &self,
+        width: usize,
+        height: usize,
+        words_per_texel: usize,
+        name: &str,
+    ) -> Result<usize, MetalError> {
+        let limit = MAX_GRID_WORDS / words_per_texel;
         let pixels = width
             .checked_mul(height)
-            .filter(|pixels| (1..=MAX_GRID_WORDS).contains(pixels))
-            .ok_or_else(|| MetalError::new("texture bounds", "expected 1..=4096 texels"))?;
+            .filter(|pixels| (1..=limit).contains(pixels))
+            .ok_or_else(|| {
+                MetalError::new("texture bounds", format!("expected 1..={limit} texels"))
+            })?;
         if !self.device.supportsBCTextureCompression() {
             return Err(MetalError::new(
                 MetalError::BC_UNAVAILABLE,
                 format!("{name} is unavailable"),
             ));
         }
-        Ok(pixels)
+        Ok(pixels * words_per_texel)
     }
 
     fn read_bc_blocks(
@@ -770,7 +863,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         row_pitch: usize,
         width: usize,
         height: usize,
-        pixels: usize,
+        words: usize,
     ) -> Result<Vec<u32>, MetalError> {
         autoreleasepool(|_| {
             // SAFETY: The positive bounded dimensions and supported BC format
@@ -813,10 +906,14 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             let (source, entry) =
                 if format == MTLPixelFormat::BC4_RSnorm || format == MTLPixelFormat::BC5_RGSnorm {
                     (BC_SNORM_READBACK, "read_bc_snorm")
+                } else if format == MTLPixelFormat::BC6H_RGBUfloat
+                    || format == MTLPixelFormat::BC6H_RGBFloat
+                {
+                    (BC_FLOAT_READBACK, "read_bc_float")
                 } else {
                     (BC_READBACK, "read_bc")
                 };
-            self.run(source, entry, ComputeInput::Texture(&texture, pixels))
+            self.run(source, entry, ComputeInput::Texture(&texture, words))
                 .map(|profile| profile.output)
         })
     }
@@ -840,6 +937,54 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
     ) -> Result<Vec<u32>, MetalError> {
         self.run_words_profiled(source, entry, input)
             .map(|profile| profile.output)
+    }
+
+    /// Run trusted MSL that also samples a bound RGBA8 texture and sampler.
+    ///
+    /// The input words reach `[[buffer(0)]]`, the output `[[buffer(1)]]`, and
+    /// the validated texture and sampler `[[texture(0)]]` and `[[sampler(0)]]`.
+    /// The bounds, completion and trusted-kernel requirements of
+    /// [`Self::run_words`] apply. The kernel also takes a zeroed fault word at
+    /// `[[buffer(2)]]`; a nonzero word after completion means an active lane
+    /// sampled outside the supported domain, and the output is discarded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for out-of-policy input sizes, compilation, resource
+    /// setup, dispatch or completion failure, and when an active lane's
+    /// explicit LOD is not a whole mip level or a coordinate is NaN or
+    /// infinite (the cases the CPU reference refuses).
+    pub fn run_words_sampled(
+        &self,
+        source: &str,
+        entry: &str,
+        input: &[u32],
+        texture: &crate::texture_pipeline::MetalRgba8Texture,
+        sampler: &crate::sampler::MetalSampler,
+    ) -> Result<Vec<u32>, MetalError> {
+        validate_words(source, entry, input)?;
+        validate_image_binding(input, texture, sampler)?;
+        autoreleasepool(|_| {
+            let fault = self.new_buffer(&[0])?;
+            let output = self
+                .run_sized(
+                    source,
+                    entry,
+                    ComputeInput::WordsSampled {
+                        words: input,
+                        texture: texture.raw(),
+                        sampler: sampler.raw(),
+                        fault: &fault,
+                    },
+                    None,
+                )?
+                .output;
+            // SAFETY: run_sized returned after the command buffer completed, so
+            // the GPU no longer writes the live, one-word shared buffer.
+            let flags = unsafe { fault.contents().cast::<u32>().as_ptr().read() };
+            sample_domain_result(flags)?;
+            Ok(output)
+        })
     }
 
     /// Resolve a synthetic guest input view and run the trusted fixture kernel.
@@ -1154,6 +1299,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             ComputeInput::SampledTexture { coords, .. } => {
                 Some(pool.acquire(&self.device, coords)?)
             }
+            ComputeInput::WordsSampled { words, .. } => Some(pool.acquire(&self.device, words)?),
             ComputeInput::Texture(..) => None,
         };
         let words = vec![0xA5A5_A5A5; input.len()];
@@ -1236,6 +1382,16 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
                     encoder.setTexture_atIndex(Some(texture), 0);
                     encoder.setSamplerState_atIndex(Some(sampler), 0);
                 }
+                ComputeInput::WordsSampled {
+                    texture,
+                    sampler,
+                    fault,
+                    ..
+                } => {
+                    encoder.setTexture_atIndex(Some(texture), 0);
+                    encoder.setSamplerState_atIndex(Some(sampler), 0);
+                    encoder.setBuffer_offset_atIndex(Some(fault), 0, 2);
+                }
                 ComputeInput::Words(..) => {}
             }
             if let Some(buffer) = input_buffer.as_deref() {
@@ -1246,12 +1402,22 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         encoder.dispatchThreads_threadsPerThreadgroup(size(input.len()), size(width));
         encoder.endEncoding();
         let encode_seconds = encode_start.elapsed().as_secs_f64();
-        let (texture, sampler) = match input {
-            ComputeInput::Texture(texture, _) => (Some(texture.retain()), None),
+        let (texture, sampler, fault) = match input {
+            ComputeInput::Texture(texture, _) => (Some(texture.retain()), None, None),
             ComputeInput::SampledTexture {
                 texture, sampler, ..
-            } => (Some(texture.retain()), Some(sampler.retain())),
-            ComputeInput::Words(_) => (None, None),
+            } => (Some(texture.retain()), Some(sampler.retain()), None),
+            ComputeInput::WordsSampled {
+                texture,
+                sampler,
+                fault,
+                ..
+            } => (
+                Some(texture.retain()),
+                Some(sampler.retain()),
+                Some(fault.retain()),
+            ),
+            ComputeInput::Words(_) => (None, None, None),
         };
         let resources = InFlightResources {
             command,
@@ -1260,6 +1426,7 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
             output: output_buffer,
             _texture: texture,
             _sampler: sampler,
+            _fault: fault,
             gate: gate.map(Message::retain),
             word_count: input.len(),
         };
@@ -1394,6 +1561,98 @@ kernel void sample_rgba8(texture2d<float, access::sample> tex [[texture(0)]],
         }
         .ok_or_else(|| MetalError::new("newBufferWithBytes", "shared buffer allocation failed"))
     }
+}
+
+/// The guard bits a translated sample kernel sets in its fault word. They are
+/// `xenora_shader::SAMPLE_FAULT_LOD` and `SAMPLE_FAULT_COORDINATES`; the metal
+/// crate does not depend on the shader crate, so the values are repeated here
+/// and pinned by the native sample tests.
+const SAMPLE_FAULT_LOD: u32 = 1;
+const SAMPLE_FAULT_COORDINATES: u32 = 2;
+
+/// Refuse a dispatch whose fault word reports an out-of-domain active lane.
+fn sample_domain_result(flags: u32) -> Result<(), MetalError> {
+    if flags == 0 {
+        return Ok(());
+    }
+    let mut reasons = Vec::new();
+    if flags & SAMPLE_FAULT_LOD != 0 {
+        reasons.push("an active lane's explicit LOD is not a whole mip level");
+    }
+    if flags & SAMPLE_FAULT_COORDINATES != 0 {
+        reasons.push("an active lane's texture coordinate is NaN or infinite");
+    }
+    if flags & !(SAMPLE_FAULT_LOD | SAMPLE_FAULT_COORDINATES) != 0 {
+        reasons.push("the kernel set an unknown fault bit");
+    }
+    Err(MetalError::new("image sample domain", reasons.join("; ")))
+}
+
+/// Validate the T# and S# the synthetic input carries against the bound texture
+/// and sampler state before a translated sample runs.
+///
+/// The descriptor words are parsed with the `xenora-ref` reference functions so
+/// the GPU path and the CPU oracle agree on what a valid descriptor is. The
+/// crate graph permits the dependency (the reference crate has no dependencies
+/// of its own); the shared copy alternative was not needed.
+fn validate_image_binding(
+    input: &[u32],
+    texture: &crate::texture_pipeline::MetalRgba8Texture,
+    sampler: &crate::sampler::MetalSampler,
+) -> Result<(), MetalError> {
+    use xenora_ref::texture_sampling;
+
+    let resource: [u32; 8] = input
+        .get(0..8)
+        .ok_or_else(|| {
+            MetalError::new(
+                "image resource descriptor",
+                "input has fewer than eight descriptor words",
+            )
+        })?
+        .try_into()
+        .expect("a slice of length eight");
+    let sampler_words: [u32; 4] = input
+        .get(8..12)
+        .ok_or_else(|| {
+            MetalError::new(
+                "image sampler descriptor",
+                "input has fewer than twelve descriptor words",
+            )
+        })?
+        .try_into()
+        .expect("a slice of length four");
+    let (desc, _base) = texture_sampling::parse_resource_descriptor(resource)
+        .map_err(|error| MetalError::new("image resource descriptor", error.to_string()))?;
+    let last_level = desc.mips - 1;
+    texture_sampling::validate_sampler_descriptor(sampler_words, last_level)
+        .map_err(|error| MetalError::new("image sampler descriptor", error.to_string()))?;
+
+    let bound = texture.desc();
+    if (desc.width, desc.height, desc.mips) != (bound.width, bound.height, bound.mips) {
+        return Err(MetalError::new(
+            "image resource descriptor",
+            "descriptor disagrees with the bound texture width, height or mip count",
+        ));
+    }
+
+    let state = sampler.desc();
+    let nearest = |filter: FilterMode| matches!(filter, FilterMode::Nearest);
+    let clamp = |mode: AddressMode| matches!(mode, AddressMode::ClampToEdge);
+    if !nearest(state.min_filter)
+        || !nearest(state.mag_filter)
+        || !nearest(state.mip_filter)
+        || !clamp(state.address_u)
+        || !clamp(state.address_v)
+        || state.min_lod != 0.0
+        || state.max_lod < last_level as f32
+    {
+        return Err(MetalError::new(
+            "image sampler descriptor",
+            "descriptor disagrees with the bound sampler state",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_words(source: &str, entry: &str, input: &[u32]) -> Result<(), MetalError> {

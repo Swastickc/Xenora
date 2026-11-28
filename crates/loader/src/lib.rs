@@ -9,12 +9,23 @@ pub mod arm64;
 pub mod cpu;
 pub mod dbt;
 pub(crate) mod exceptions;
+pub mod export_table;
 pub mod graphics;
 pub mod import_table;
 pub mod imports;
 pub mod jit;
 pub mod memory;
+pub mod module_binding;
+pub mod module_exceptions;
+pub mod module_graph;
+pub mod module_iat;
+pub mod module_init;
+pub mod module_layout;
+pub mod module_memory;
+pub mod module_store;
+pub mod module_tls;
 pub mod output_path;
+pub mod package;
 pub mod pe;
 pub mod probe;
 pub mod reloc;
@@ -49,6 +60,31 @@ pub use graphics::{
 pub use imports::{ImportError, ImportRegistry, ServiceDescriptor, ServiceHandler, Win64Args};
 pub use jit::{JitError, JitMemory};
 pub use memory::{GuestMemory, MemoryError, MemoryPermissions};
+pub use module_exceptions::{
+    ModuleExceptionError, ModuleExceptionReport, register_module_exception_directories,
+};
+pub use module_init::{
+    ModuleInitializationComponent, ModuleInitializationEntry, ModuleInitializationError,
+    ModuleInitializationMetadata, ModuleInitializationPlan, ModuleInspectionUncertainty,
+    plan_module_initialization,
+};
+pub use module_memory::{
+    ExplicitModuleImage, ModuleMemoryError, ModuleRelocationError, ModuleReservation,
+    ModuleReservationError, map_module_batch, relocate_module_batch,
+};
+pub use module_store::{
+    MAX_PROVISIONED_MODULES, MAX_PROVISIONED_TOTAL_BYTES, ModuleStoreError, PreparedModuleLoad,
+    ProvisionedModule, ProvisionedModuleStore, RuntimeLoadPreparationError, prepare_runtime_load,
+};
+pub use module_tls::{
+    ModuleTlsError, ModuleTlsReport, ModuleTlsStorage, ModuleTlsValidationError, PreparedModuleTls,
+    prepare_module_tls,
+};
+pub use package::{
+    ImportDiagnostic, ImportDisposition, ImportFailure, InitializationOutcome, InitializationPhase,
+    InitializationRecord, ModuleDiagnostic, PackageStartupError, PackageStartupLayout,
+    PackageStartupResult, StartupDiagnostics, run_package_startup,
+};
 pub use pe::{LoadedImage, ParsedPe, PeError, PeSection};
 pub use probe::{
     ImportedSymbol, InstructionRecord, ProbeConfig, ProbeReport, RelocationCensus, TlsCensus,

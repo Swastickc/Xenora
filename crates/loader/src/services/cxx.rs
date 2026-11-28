@@ -3,11 +3,10 @@
 //! C++ runtime services for hosted guest programs.
 //!
 //! A mingw-w64 C++ program imports a handful of symbols from
-//! `libstdc++-6.dll`. Only the three that every such program needs are
-//! provided here: the two allocation operators and libstdc++'s length-error
-//! path. The allocation operators reuse the guest heap the C runtime's
-//! `malloc` and `free` already use, so a C++ guest and a C guest share one
-//! allocator instead of running two.
+//! `libstdc++-6.dll`. The allocation operators and libstdc++'s length-error
+//! path are provided here. Both the scalar and array allocation operators
+//! reuse the guest heap the C runtime's `malloc` and `free` already use, so a
+//! C++ guest and a C guest share one allocator instead of running two.
 
 use super::ServicesState;
 use super::crt;
@@ -256,9 +255,17 @@ fn cxx_assert_fail(
 }
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
-    let handlers: [(&str, ServiceHandler); 3] = [
+    // Itanium C++ ABI section 5.1.4 encodes `nw` as `operator new`, `na` as
+    // `operator new[]`, `dl` as `operator delete` and `da` as `operator
+    // delete[]`. On the 64-bit Windows target `y` is `unsigned long long` and
+    // `Pv` is `void*`, so `_Znay` and `_ZdaPv` are the array forms. They share
+    // the scalar handlers because Xenora's guest heap has one allocator and
+    // the ABI's array cookie, when one is needed, is emitted by the compiler.
+    let handlers: [(&str, ServiceHandler); 5] = [
         ("_Znwy", Box::new(cxx_operator_new)),
+        ("_Znay", Box::new(cxx_operator_new)),
         ("_ZdlPvy", Box::new(cxx_operator_delete)),
+        ("_ZdaPv", Box::new(cxx_operator_delete)),
         (
             "_ZSt20__throw_length_errorPKc",
             Box::new(cxx_throw_length_error),
@@ -482,6 +489,28 @@ mod tests {
         call(registry, "_Znwy", &mut cpu, memory).expect("operator new succeeds")
     }
 
+    fn new_array_block(registry: &ImportRegistry, memory: &mut GuestMemory, size: u64) -> u64 {
+        let mut cpu = CpuState {
+            gs_base: 0x10000,
+            ..CpuState::default()
+        };
+        cpu.set(Register::Rcx, size);
+        call(registry, "_Znay", &mut cpu, memory).expect("operator new[] succeeds")
+    }
+
+    fn delete_array_block(
+        registry: &ImportRegistry,
+        memory: &mut GuestMemory,
+        address: u64,
+    ) -> Result<u64, ExitReason> {
+        let mut cpu = CpuState {
+            gs_base: 0x10000,
+            ..CpuState::default()
+        };
+        cpu.set(Register::Rcx, address);
+        call(registry, "_ZdaPv", &mut cpu, memory)
+    }
+
     #[test]
     fn operator_new_returns_a_distinct_writable_block() {
         let registry = registry();
@@ -572,6 +601,83 @@ mod tests {
             call(&registry, "_ZdlPvy", &mut cpu, &mut memory).expect("a null delete is harmless"),
             0
         );
+    }
+
+    #[test]
+    fn operator_new_array_returns_a_distinct_writable_block() {
+        let registry = registry();
+        let mut memory = GuestMemory::new();
+
+        let first = new_array_block(&registry, &mut memory, 64);
+        assert_ne!(first, 0);
+        let second = new_array_block(&registry, &mut memory, 64);
+        assert_ne!(second, 0);
+        assert_ne!(first, second);
+
+        memory
+            .write_bytes(first, &[0x5A; 64])
+            .expect("operator new[] returns writable memory");
+        let mut read_back = [0u8; 64];
+        memory
+            .read_bytes(first, &mut read_back)
+            .expect("operator new[] block is readable");
+        assert_eq!(read_back, [0x5A; 64]);
+    }
+
+    #[test]
+    fn operator_new_array_of_zero_bytes_returns_a_freeable_block() {
+        let registry = registry();
+        let mut memory = GuestMemory::new();
+
+        let empty = new_array_block(&registry, &mut memory, 0);
+        assert_ne!(empty, 0);
+        let other = new_array_block(&registry, &mut memory, 16);
+        assert_ne!(empty, other);
+
+        assert_eq!(
+            delete_array_block(&registry, &mut memory, empty).expect("delete[] succeeds"),
+            0
+        );
+    }
+
+    #[test]
+    fn operator_delete_array_releases_the_block_and_ignores_null() {
+        let registry = registry();
+        let mut memory = GuestMemory::new();
+
+        let block = new_array_block(&registry, &mut memory, 48);
+        assert_eq!(
+            delete_array_block(&registry, &mut memory, block).expect("delete[] succeeds"),
+            0
+        );
+        let mut read_back = [0u8; 8];
+        assert!(
+            memory.read_bytes(block, &mut read_back).is_err(),
+            "the released block is no longer mapped"
+        );
+
+        assert_eq!(
+            delete_array_block(&registry, &mut memory, 0).expect("a null delete[] is harmless"),
+            0
+        );
+    }
+
+    #[test]
+    fn operator_delete_array_refuses_a_foreign_address() {
+        let registry = registry();
+        let mut memory = GuestMemory::new();
+
+        let block = new_array_block(&registry, &mut memory, 32);
+        assert_eq!(
+            delete_array_block(&registry, &mut memory, block + 8),
+            Err(ExitReason::MemoryFault(MemoryError::UnmappedAddress(
+                block + 8
+            )))
+        );
+        let mut read_back = [0u8; 8];
+        memory
+            .read_bytes(block, &mut read_back)
+            .expect("the failed delete[] did not release the block");
     }
 
     #[test]

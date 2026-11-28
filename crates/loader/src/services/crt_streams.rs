@@ -19,7 +19,7 @@
 //! A pointer that is no stream, reading `stdin` and closing a standard stream
 //! are not modelled and stop the guest with the runtime-limit fault.
 
-use super::crt_files::{self, EACCES, EBADF, EEXIST, EINVAL, ENOENT, ERANGE, FileStreams};
+use super::crt_files::{self, EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOSPC, ERANGE, FileStreams};
 use super::crt_format::{self, Floats, FormatError, Source};
 use super::crt_scan;
 use super::files::DriveEntry;
@@ -98,6 +98,12 @@ pub(super) struct StandardStreams {
     /// streams: 0 unoriented, 1 byte, 2 wide.
     output_orientation: u8,
     error_orientation: u8,
+    /// The standard descriptors a `_dup2` rewired and the guest then closed:
+    /// the CRT slot stays dead, the console stream does not come back. An
+    /// entry only ever sets when a table-carrying standard descriptor is
+    /// closed, because closing the unduplicated standard stream itself is
+    /// still refused outright.
+    closed: [bool; 3],
 }
 
 /// The standard input: bytes the host supplied before the run, after the
@@ -207,6 +213,47 @@ fn drive_name(memory: &GuestMemory, name: u64) -> Result<Option<Option<String>>,
         return Ok(None);
     }
     Ok(Some(ObjectState::drive_path(&bytes)))
+}
+
+/// The wide form of `drive_name`: the CRT wide file services take UTF-16
+/// names. The drive's names are ASCII, so a name with a character beyond
+/// ASCII is one the drive rejects, as a rejected narrow name is.
+fn drive_name_wide(memory: &GuestMemory, name: u64) -> Result<Option<Option<String>>, ExitReason> {
+    if name == 0 {
+        return Ok(None);
+    }
+    let mut units = Vec::new();
+    for index in 0..MAX_NAME + 1 {
+        let unit = memory.read_u16(name + index * 2).map_err(fault)?;
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    if units.len() as u64 > MAX_NAME || units.is_empty() {
+        return Ok(None);
+    }
+    if !units.iter().all(|&unit| unit < 0x80) {
+        return Ok(Some(None));
+    }
+    let bytes: Vec<u8> = units.iter().map(|&unit| unit as u8).collect();
+    Ok(Some(ObjectState::drive_path(&bytes)))
+}
+
+/// The bytes of a wide mode string, ASCII like the narrow one.
+fn wide_ascii(memory: &GuestMemory, address: u64, limit: u64) -> Result<Vec<u8>, MemoryError> {
+    let mut units = Vec::new();
+    for index in 0..limit {
+        let unit = memory.read_u16(address + index * 2)?;
+        if unit == 0 {
+            break;
+        }
+        units.push(unit);
+    }
+    if !units.iter().all(|&unit| unit < 0x80) {
+        return Err(MemoryError::UnmappedAddress(0));
+    }
+    Ok(units.iter().map(|&unit| unit as u8).collect())
 }
 
 pub(super) fn c_string(
@@ -624,6 +671,16 @@ impl StandardStreams {
         stream: Stream,
         bytes: &[u8],
     ) -> Result<Result<(), u32>, ExitReason> {
+        // A closed standard descriptor fails every later write, as on
+        // Windows after `_close` of it succeeds.
+        let mark = match stream {
+            Stream::Output => Some(1),
+            Stream::Error => Some(2),
+            _ => None,
+        };
+        if mark.is_some_and(|fd| self.closed[fd]) {
+            return Ok(Err(EBADF));
+        }
         let orientation = match stream {
             Stream::Output => &mut self.output_orientation,
             Stream::Error => &mut self.error_orientation,
@@ -814,6 +871,171 @@ impl StandardStreams {
         })
     }
 
+    /// `fread`. Reads up to `count` items of `size` bytes from the stream
+    /// and returns how many whole items it read, which is fewer at the end
+    /// of the file or when a read fails — not an error of its own, so the
+    /// indicators separate the two, as the documentation asks. A null buffer
+    /// or stream is `EINVAL` with a return of 0. More than this runtime
+    /// transfers at once stops the guest, as for `fwrite`.
+    pub(super) fn read_items(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &ObjectState,
+        buffer: u64,
+        size: u64,
+        count: u64,
+        file: u64,
+    ) -> Outcome<u64> {
+        if buffer == 0 || file == 0 {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        let stream = self.stream(file)?;
+        let Some(length) = size
+            .checked_mul(count)
+            .filter(|bytes| *bytes <= MAX_TRANSFER)
+        else {
+            return Err(RUNTIME_LIMIT);
+        };
+        if length == 0 {
+            return Ok(Ok(0));
+        }
+        let bytes = match stream {
+            Stream::Input => {
+                if self.closed[0] || !self.input.orient(false) {
+                    return Ok(Err(Failed(0, EBADF)));
+                }
+                self.input.take(length as usize)
+            }
+            Stream::File(file) => match self.opened.read_bytes(drive, file, length as usize) {
+                Ok(bytes) => {
+                    // A short read means the end of the file, as nothing
+                    // else shortens it here; the indicator separates it
+                    // from an error, which is what `feof` is for.
+                    if bytes.len() < length as usize {
+                        self.opened.note_end_of_file(file);
+                    }
+                    bytes
+                }
+                Err(errno) => return Ok(Err(Failed(0, errno))),
+            },
+            _ => return Ok(Err(Failed(0, EBADF))),
+        };
+        if bytes.is_empty() {
+            return Ok(Ok(0));
+        }
+        memory.write_bytes(buffer, &bytes).map_err(fault)?;
+        // Only whole items count, and the bytes of a partial one stay in
+        // the buffer, as the CRT leaves them.
+        Ok(Ok((bytes.len() as u64) / size.max(1)))
+    }
+
+    /// `fgetc`. The next byte of the stream as `unsigned char`, or `EOF` at
+    /// the end of the file. A null stream is `EINVAL` with a return of
+    /// `EOF`; reading a stream open for writing is `EBADF`.
+    pub(super) fn read_character_file(&mut self, drive: &ObjectState, file: u64) -> Outcome<i32> {
+        if file == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::Input => {
+                if self.closed[0] {
+                    return Ok(Err(Failed(-1, EBADF)));
+                }
+                Ok(Ok(match self.input.character() {
+                    Some(byte) => i32::from(byte),
+                    None => -1,
+                }))
+            }
+            Stream::File(file) => match self.opened.read_bytes(drive, file, 1) {
+                Ok(bytes) if !bytes.is_empty() => Ok(Ok(i32::from(bytes[0]))),
+                Ok(_) => {
+                    self.opened.note_end_of_file(file);
+                    Ok(Ok(-1))
+                }
+                Err(errno) => Ok(Err(Failed(-1, errno))),
+            },
+            _ => Ok(Err(Failed(-1, EBADF))),
+        }
+    }
+
+    /// `__stdio_common_vfscanf` and its secure variant read a byte-oriented
+    /// stream. The cursor follows input actually consumed and a read that
+    /// meets end-of-file sets the existing indicator.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn scan(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &ObjectState,
+        options: u64,
+        file: u64,
+        format: u64,
+        locale: u64,
+        arguments: u64,
+    ) -> Outcome<i32> {
+        use super::crt_scan::{Bytes, EOF, Request};
+        if file == 0 || format == 0 {
+            return Ok(Err(Failed(EOF, EINVAL)));
+        }
+        let stream = self.stream(file)?;
+        let request = Request::read(memory, options, format, locale)?;
+        let scanned = match stream {
+            Stream::Input => {
+                if self.closed[0] || !self.input.orient(false) {
+                    return Ok(Err(Failed(EOF, EBADF)));
+                }
+                // The hosted input has already had its CRLFs translated.
+                let mut source = Bytes {
+                    bytes: &self.input.bytes,
+                    at: self.input.position,
+                    text: false,
+                };
+                let pending = request.scan(memory, &mut source, arguments);
+                let scanned = pending.finish(memory)?;
+                self.input.position = source.at;
+                self.input.eof |= scanned.met_end;
+                scanned
+            }
+            Stream::File(file) => {
+                let (bytes, start, text) = match self.opened.reading(drive, file) {
+                    Ok(reading) => reading,
+                    Err(errno) => return Ok(Err(Failed(EOF, errno))),
+                };
+                let mut source = Bytes {
+                    bytes,
+                    at: start,
+                    text,
+                };
+                let pending = request.scan(memory, &mut source, arguments);
+                let scanned = pending.finish(memory)?;
+                self.opened
+                    .finish_scan(file, source.at - start, scanned.met_end);
+                scanned
+            }
+            Stream::Output | Stream::Error => return Ok(Err(Failed(EOF, EBADF))),
+        };
+        Ok(Ok(scanned.result))
+    }
+
+    /// `rewind`: back to the start of the stream, clearing the end-of-file
+    /// and error indicators as the documentation requires, which is what
+    /// separates it from a bare `fseek` to zero. A standard stream, which
+    /// seeking already refuses, is not modelled.
+    pub(super) fn rewind_file(&mut self, drive: &ObjectState, file: u64) -> Outcome<()> {
+        if file == 0 {
+            return Ok(Err(Failed((), EINVAL)));
+        }
+        match self.stream(file)? {
+            Stream::File(file) => match self.opened.seek(drive, file, 0, 0) {
+                Ok(()) => {
+                    self.opened.clear_errors(file);
+                    Ok(Ok(()))
+                }
+                Err(errno) => Ok(Err(Failed((), errno))),
+            },
+            _ => Err(RUNTIME_LIMIT),
+        }
+    }
+
     /// `_lock_file` and `_unlock_file`. The lock itself does nothing, and
     /// that is a consequence of the execution model rather than a swallowed
     /// error: Xenora's guest scheduler runs one guest thread at a time, so
@@ -868,7 +1090,7 @@ impl StandardStreams {
     /// end. Text mode is applied when the input is supplied, so a character
     /// here is already after the replacement.
     pub(super) fn character_stdin(&mut self) -> i32 {
-        if !self.input.orient(false) {
+        if self.closed[0] || !self.input.orient(false) {
             return -1;
         }
         match self.input.character() {
@@ -916,10 +1138,25 @@ impl StandardStreams {
         if fd < 0 {
             return Ok(Err(Failed(-1, EBADF)));
         }
-        if fd < 3 {
-            return Err(RUNTIME_LIMIT);
+        // A standard descriptor the table carries closes through the
+        // ordinary machinery: `_dup2` put it there, and closing it is
+        // closing the duplication. One the table does not carry is the
+        // standard stream itself, which closes as on Windows - the CRT does
+        // not reserve them - and every later operation on it fails with
+        // EBADF. A second close has nothing to close and fails.
+        if fd < 3 && !self.opened.has_descriptor(fd as u32) {
+            let mark = &mut self.closed[fd as usize];
+            if *mark {
+                return Ok(Err(Failed(-1, EBADF)));
+            }
+            *mark = true;
+            return Ok(Ok(0));
         }
-        Ok(if self.opened.descriptor_close(memory, drive, fd as u32) {
+        let closed = self.opened.descriptor_close(memory, drive, fd as u32);
+        if closed && fd < 3 {
+            self.closed[fd as usize] = true;
+        }
+        Ok(if closed {
             Ok(0)
         } else {
             Err(Failed(-1, EBADF))
@@ -944,9 +1181,11 @@ impl StandardStreams {
         if fd < 0 || count as u64 > MAX_TRANSFER {
             return Ok(Err(Failed(-1, EINVAL)));
         }
+        let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let bytes = match fd {
-            0 => self.input.take((count as usize).min(1 << 20)),
-            1 | 2 => return Ok(Err(Failed(-1, EBADF))),
+            0 if !rewired && self.closed[0] => return Ok(Err(Failed(-1, EBADF))),
+            0 if !rewired => self.input.take((count as usize).min(1 << 20)),
+            1 | 2 if !rewired => return Ok(Err(Failed(-1, EBADF))),
             _ => {
                 match self.opened.pipe_end(fd as u32) {
                     Ok(Some((id, false))) => {
@@ -994,10 +1233,16 @@ impl StandardStreams {
         }
         let mut bytes = vec![0; count as usize];
         memory.read_bytes(buffer, &mut bytes).map_err(fault)?;
+        // A standard descriptor the table carries is no standard stream
+        // anymore: `_dup2` rewired it, and the ordinary descriptor machinery
+        // answers for it exactly as the CRT's table does.
+        let rewired = (0..3).contains(&fd) && self.opened.has_descriptor(fd as u32);
         let result = match fd {
-            0 => Err(EBADF),
-            1 => self.write(drive, Stream::Output, &bytes)?,
-            2 => self.write(drive, Stream::Error, &bytes)?,
+            0 if !rewired => Err(EBADF),
+            1 if !rewired && self.closed[1] => Err(EBADF),
+            2 if !rewired && self.closed[2] => Err(EBADF),
+            1 if !rewired => self.write(drive, Stream::Output, &bytes)?,
+            2 if !rewired => self.write(drive, Stream::Error, &bytes)?,
             _ => match self.opened.pipe_end(fd as u32) {
                 Ok(Some((id, true))) => match self.opened.pipe_write(id, &bytes) {
                     Ok(_) => Ok(()),
@@ -1029,7 +1274,7 @@ impl StandardStreams {
         if fd < 0 {
             return Ok(Err(Failed(-1, EBADF)));
         }
-        if fd < 3 {
+        if fd < 3 && !self.opened.has_descriptor(fd as u32) {
             return Ok(Err(Failed(-1, EBADF)));
         }
         Ok(self
@@ -1048,7 +1293,7 @@ impl StandardStreams {
         offset: i64,
         origin: i32,
     ) -> Outcome<i64> {
-        if fd < 3 {
+        if fd < 3 && !self.opened.has_descriptor(fd as u32) {
             return Ok(Err(Failed(-1, EBADF)));
         }
         if origin < 0 {
@@ -1258,6 +1503,9 @@ impl StandardStreams {
             return Ok(Err(Failed(0, EBADF)));
         }
         if fd < 3 {
+            if self.closed[fd as usize] && !self.opened.has_descriptor(fd as u32) {
+                return Ok(Err(Failed(0, EBADF)));
+            }
             return Ok(Ok(0));
         }
         Ok(if self.opened.has_descriptor(fd as u32) {
@@ -1267,30 +1515,102 @@ impl StandardStreams {
         })
     }
 
-    /// `_access`. 0 when the name is a file or a directory; the files the
-    /// drive holds are always readable and writable, so the mode only
-    /// decides the answer for what is missing. -1 with `ENOENT` then, or
-    /// `EINVAL` for a null or empty name or a mode with other bits.
-    pub(super) fn access(
-        &self,
-        memory: &GuestMemory,
-        drive: &ObjectState,
-        name: u64,
-        mode: i32,
-    ) -> Outcome<i32> {
-        if mode & !7 != 0 {
+    /// `ungetc`. The byte pushed, or -1 with `EBADF` for a stream that is
+    /// not open and readable in the byte orientation. EOF in is EOF out
+    /// with nothing done, as ISO C 7.21.7.10 says.
+    pub(super) fn ungetc(&mut self, c: i32, file: u64) -> Outcome<i32> {
+        if c == -1 {
+            return Ok(Ok(-1));
+        }
+        let byte = c as u8;
+        Ok(match self.opened.ungetc_byte(file, byte) {
+            std::result::Result::Ok(()) => Ok(i32::from(byte)),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_open_osfhandle`: the descriptor number wrapping the kernel handle,
+    /// which the CRT takes ownership of. -1 with `EBADF` for a handle that
+    /// is no kernel pipe end — the only object this interop knows.
+    pub(super) fn open_osfhandle(&mut self, drive: &ObjectState, handle: u64) -> Outcome<i32> {
+        Ok(match self.opened.descriptor_open_handle(drive, handle) {
+            std::result::Result::Ok(fd) => Ok(fd as i32),
+            std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+        })
+    }
+
+    /// `_get_osfhandle`: the kernel handle a descriptor wraps, as an
+    /// `intptr_t`. -1 with `EBADF` for one that wraps no kernel object —
+    /// the CRT's own files have none behind them.
+    pub(super) fn get_osfhandle(&mut self, fd: i32) -> Outcome<u64> {
+        if fd < 0 {
+            return Ok(Err(Failed(u64::MAX, EBADF)));
+        }
+        Ok(match self.opened.descriptor_handle(fd as u32) {
+            std::result::Result::Ok(handle) => Ok(handle),
+            std::result::Result::Err(errno) => Err(Failed(u64::MAX, errno)),
+        })
+    }
+
+    /// `_filbuf`. The byte as an unsigned char, or EOF at the end or for a
+    /// stream that is not open and readable. The standard streams are not
+    /// opened files: `stdin` consumes the host-supplied input exactly as
+    /// `fgetc` does, and the output streams cannot be read.
+    pub(super) fn filbuf(&mut self, drive: &ObjectState, file: u64) -> Outcome<i32> {
+        if file == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
         }
-        let Some(path) = drive_name(memory, name)? else {
+        // A pointer that is no stream answers EOF with EBADF rather than
+        // stopping the guest: the primitive has always failed softly, and
+        // the byte-oriented CRT reaches it for every small read.
+        let stream = match self.stream(file) {
+            std::result::Result::Ok(stream) => stream,
+            std::result::Result::Err(_) => return Ok(Err(Failed(-1, EBADF))),
+        };
+        match stream {
+            Stream::Input => {
+                if self.closed[0] || !self.input.orient(false) {
+                    return Ok(Err(Failed(-1, EBADF)));
+                }
+                Ok(Ok(match self.input.character() {
+                    Some(byte) => i32::from(byte),
+                    None => -1,
+                }))
+            }
+            Stream::File(file) => Ok(match self.opened.read_one(drive, file) {
+                std::result::Result::Ok(Some(byte)) => Ok(i32::from(byte)),
+                std::result::Result::Ok(None) => Ok(-1),
+                std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+            }),
+            _ => Ok(Err(Failed(-1, EBADF))),
+        }
+    }
+
+    /// `_flsbuf`. The byte written, or EOF for a stream that is not open
+    /// and writable. The standard streams are not opened files: a byte for
+    /// `stdout` or `stderr` goes through the same capture and text-mode
+    /// translation as every other write, and `stdin` cannot be written.
+    pub(super) fn flsbuf(&mut self, drive: &mut ObjectState, c: i32, file: u64) -> Outcome<i32> {
+        if file == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
+        }
+        let stream = match self.stream(file) {
+            std::result::Result::Ok(stream) => stream,
+            std::result::Result::Err(_) => return Ok(Err(Failed(-1, EBADF))),
         };
-        let Some(path) = path else {
-            return Ok(Err(Failed(-1, ENOENT)));
-        };
-        Ok(match drive.drive_entry(&path) {
-            DriveEntry::File | DriveEntry::Directory => Ok(0),
-            DriveEntry::Missing { .. } => Err(Failed(-1, ENOENT)),
-        })
+        match stream {
+            Stream::Input => Ok(Err(Failed(-1, EBADF))),
+            stream @ (Stream::Output | Stream::Error) => {
+                match self.write(drive, stream, &[c as u8])? {
+                    std::result::Result::Ok(()) => Ok(Ok(i32::from(c as u8))),
+                    std::result::Result::Err(errno) => Ok(Err(Failed(-1, errno))),
+                }
+            }
+            Stream::File(file) => Ok(match self.opened.write_one(drive, file, c as u8) {
+                std::result::Result::Ok(()) => Ok(i32::from(c as u8)),
+                std::result::Result::Err(errno) => Err(Failed(-1, errno)),
+            }),
+        }
     }
 
     /// `feof`: the end-of-file indicator of the stream. Only the standard
@@ -1472,6 +1792,19 @@ impl StandardStreams {
         } else {
             Err(Failed(-1, EINVAL))
         })
+    }
+
+    /// `setbuf`, the legacy reduction of `setvbuf`: a null buffer selects
+    /// no buffering, anything else full buffering with the documented 512
+    /// of `BUFSIZ`. Output here is never held back either way, so past the
+    /// stream validation there is nothing to do - immediate delivery is
+    /// the unbuffered end of what every mode permits.
+    pub(super) fn set_buffer_legacy(&self, file: u64) -> Outcome<()> {
+        if file == 0 {
+            return Ok(Err(Failed((), EINVAL)));
+        }
+        self.stream(file)?;
+        Ok(Ok(()))
     }
 
     /// `fopen`. Returns the new `FILE*`, or null with the `errno` value.
@@ -1931,6 +2264,207 @@ impl StandardStreams {
         }
     }
 
+    /// `_wfopen`: the wide form of `open`; the name and the mode are
+    /// UTF-16. Anything beyond ASCII in either is a name or mode the drive
+    /// rejects, as a rejected narrow one is.
+    pub(super) fn open_wide(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        mode: u64,
+    ) -> Outcome<u64> {
+        if name == 0 || mode == 0 {
+            return Ok(Err(Failed(0, EINVAL)));
+        }
+        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+            return Ok(Err(Failed(0, EINVAL)));
+        };
+        let mode = wide_ascii(memory, mode, 16).map_err(|_| RUNTIME_LIMIT)?;
+        Ok(self
+            .opened
+            .open(memory, drive, path.as_bytes(), &mode)
+            .map_err(|errno| Failed(0, errno)))
+    }
+
+    /// `_unlink` and `_wunlink`: delete a file. 0, or -1 with `ENOENT` for
+    /// a name the drive does not hold, `EACCES` for a directory or a
+    /// read-only file, `EINVAL` for a null or rejected name.
+    pub(super) fn unlink_file(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        wide: bool,
+    ) -> Outcome<i32> {
+        let resolved = if wide {
+            drive_name_wide(memory, name)?
+        } else {
+            drive_name(memory, name)?
+        };
+        let Some(Some(path)) = resolved else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        Ok(match drive.drive_entry(&path) {
+            DriveEntry::File => {
+                if drive.drive_remove(&path) {
+                    Ok(0)
+                } else {
+                    Err(Failed(-1, EACCES))
+                }
+            }
+            DriveEntry::Directory => Err(Failed(-1, EACCES)),
+            DriveEntry::Missing { .. } => Err(Failed(-1, ENOENT)),
+        })
+    }
+
+    /// `_access` and `_waccess`: whether the name exists, and whether it
+    /// answers the mode bits. 0, or -1 with `ENOENT` for a missing name,
+    /// `EACCES` when a write bit meets a read-only file, `EINVAL` for a
+    /// null or rejected name or a mode with other bits.
+    pub(super) fn access_file(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        wide: bool,
+        mode: u32,
+    ) -> Outcome<i32> {
+        if mode & !6 != 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        }
+        let resolved = if wide {
+            drive_name_wide(memory, name)?
+        } else {
+            drive_name(memory, name)?
+        };
+        let Some(Some(path)) = resolved else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        Ok(match drive.drive_entry(&path) {
+            DriveEntry::File | DriveEntry::Directory => {
+                if mode & 2 != 0 && drive.drive_is_readonly(&path) {
+                    Err(Failed(-1, EACCES))
+                } else {
+                    Ok(0)
+                }
+            }
+            DriveEntry::Missing { .. } => Err(Failed(-1, ENOENT)),
+        })
+    }
+
+    /// `_wmkdir`: create a directory. 0, or -1 with `EACCES` when the name
+    /// is taken, `ENOENT` when its parent is missing, `EINVAL` for a null
+    /// or rejected name.
+    pub(super) fn make_dir_wide(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+    ) -> Outcome<i32> {
+        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        match drive.drive_entry(&path) {
+            DriveEntry::Missing { parent: true } => {
+                if drive.drive_create_dir(&path) {
+                    Ok(Ok(0))
+                } else {
+                    Ok(Err(Failed(-1, ENOSPC)))
+                }
+            }
+            DriveEntry::Missing { parent: false } => Ok(Err(Failed(-1, ENOENT))),
+            _ => Ok(Err(Failed(-1, EACCES))),
+        }
+    }
+
+    /// `_chmod`: the narrow form. Only the read-only bit of the mode means
+    /// anything here, exactly as the wide form: the drive's files are
+    /// otherwise readable and writable.
+    pub(super) fn chmod(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        mode: u32,
+    ) -> Outcome<i32> {
+        let Some(Some(path)) = drive_name(memory, name)? else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        if drive.drive_chmod(&path, mode & 0x80 == 0) {
+            Ok(Ok(0))
+        } else {
+            Ok(Err(Failed(-1, ENOENT)))
+        }
+    }
+
+    /// `_wchmod`: the read-only bit of a file. 0, or -1 with `ENOENT` for a
+    /// missing file, `EINVAL` for a null or rejected name. The other
+    /// permission bits do not exist here: the drive's files are otherwise
+    /// readable and writable.
+    pub(super) fn chmod_wide(
+        &self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        mode: u32,
+    ) -> Outcome<i32> {
+        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        if drive.drive_chmod(&path, mode & 0x80 == 0) {
+            Ok(Ok(0))
+        } else {
+            Ok(Err(Failed(-1, ENOENT)))
+        }
+    }
+
+    /// `_wstat64i32`: the 48-byte stat block of mingw-w64. The drive knows
+    /// sizes and the read-only mark; the times answer -1 because it has no
+    /// time stamps, the ids answer 0, the link count 1. The mode is the
+    /// regular-file or directory bit, read always, write unless read-only.
+    pub(super) fn stat_wide(
+        &self,
+        memory: &mut GuestMemory,
+        drive: &mut ObjectState,
+        name: u64,
+        output: u64,
+    ) -> Outcome<i32> {
+        let Some(Some(path)) = drive_name_wide(memory, name)? else {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        if output == 0 {
+            return Ok(Err(Failed(-1, EINVAL)));
+        };
+        let entry = drive.drive_entry(&path);
+        let (present, directory, size) = match entry {
+            DriveEntry::File => (
+                true,
+                false,
+                drive.drive_file(&path).map_or(0, |f| f.len() as u64),
+            ),
+            DriveEntry::Directory => (true, true, 0),
+            DriveEntry::Missing { .. } => (false, false, 0),
+        };
+        if !present {
+            return Ok(Err(Failed(-1, ENOENT)));
+        }
+        let mut block = [0u8; 48];
+        let readonly = drive.drive_is_readonly(&path);
+        let mut mode: u16 = if directory { 0x4000 } else { 0x8000 } | 0x100;
+        if !readonly {
+            mode |= 0x80;
+        }
+        block[6..8].copy_from_slice(&mode.to_le_bytes());
+        block[8..10].copy_from_slice(&1i16.to_le_bytes()); // st_nlink
+        block[20..24].copy_from_slice(&(size as u32).to_le_bytes());
+        for slot in [24, 32, 40] {
+            block[slot..slot + 8].copy_from_slice(&(-1i64).to_le_bytes());
+        }
+        memory.write_bytes(output, &block).map_err(fault)?;
+        Ok(Ok(0))
+    }
+
     /// `perror`: the message, a colon and a space when there is a message,
     /// then the text for `errno` and a newline, to `stderr`.
     pub(super) fn report(
@@ -1953,6 +2487,38 @@ impl StandardStreams {
         text.extend_from_slice(crt_files::error_text(errno).as_bytes());
         text.push(b'\n');
         self.write(drive, Stream::Error, &text).map(|_| ())
+    }
+
+    /// `_assert`: "Assertion failed: <expression>, file <file>, line <line>"
+    /// and a newline on `stderr`, then the process ends with status 3. The
+    /// CRT's abort would raise SIGABRT first; no signal handler can exist
+    /// here, so the end is immediate. The debug dialog does not exist either:
+    /// there is no one to answer it.
+    pub(super) fn assert_failure(
+        &mut self,
+        memory: &GuestMemory,
+        drive: &mut ObjectState,
+        expression: u64,
+        file: u64,
+        line: u32,
+    ) -> Result<(), ExitReason> {
+        let read = |address| {
+            if address == 0 {
+                return Ok(Vec::new());
+            }
+            c_string(memory, address, MAX_TRANSFER + 1).map_err(fault)
+        };
+        let expression = read(expression)?;
+        let file = read(file)?;
+        let mut text = b"Assertion failed: ".to_vec();
+        text.extend_from_slice(&expression);
+        text.extend_from_slice(b", file ");
+        text.extend_from_slice(&file);
+        text.extend_from_slice(format!(", line {line}\n").as_bytes());
+        // The write is best-effort: even a stderr that cannot take the
+        // message does not stop the assertion from ending the process.
+        let _ = self.write(drive, Stream::Error, &text)?;
+        Err(ExitReason::ProcessExit(3))
     }
 }
 

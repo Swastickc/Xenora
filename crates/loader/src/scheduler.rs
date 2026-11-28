@@ -292,7 +292,10 @@ impl Scheduler {
         // The engine does not count a call that stops it.
         let stopped = matches!(
             result.exit_reason,
-            ExitReason::GuestYield | ExitReason::GuestBlocked | ExitReason::GuestThreadExited
+            ExitReason::GuestYield
+                | ExitReason::GuestBlocked
+                | ExitReason::GuestThreadExited
+                | ExitReason::CallbackReturned
         );
         report.instructions += result.instructions_executed + usize::from(stopped);
         let rip = cpu.rip;

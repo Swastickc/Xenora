@@ -39,7 +39,7 @@ FORM_KEYS = {
 }
 TOP_KEYS = {
     "schema", "architecture", "source_sha256", "documents", "operand_rules", "form",
-    "encoding_variant",
+    "encoding_variant", "append_after_variants",
 }
 # An encoding variant is another encoding of a form already in the registry (for
 # example the VOP3 `_e64` encoding of a VOP2 form): pure data that names the base
@@ -65,6 +65,7 @@ OPERATIONS = {
     **{name: variant for name, (variant, _, _) in CONTROL_OPERATIONS.items()},
     "add": "Add", "sub": "Sub", "and": "And", "or": "Or", "xor": "Xor",
     "andn2": "AndNot", "orn2": "OrNot", "nand": "Nand", "nor": "Nor", "xnor": "Xnor",
+    "andn1": "AndNot0", "orn1": "OrNot0",
     "lshl": "ShiftLeft", "lshr": "LogicalShiftRight", "ashr": "ArithmeticShiftRight",
     "compare": "Compare",
     "not": "Not", "brev": "ReverseBits", "bcnt0": "CountZeros", "bcnt1": "CountOnes",
@@ -75,9 +76,28 @@ OPERATIONS = {
     "absdiff": "AbsoluteDifference", "lshl_add": "ShiftLeftAdd",
     "mul24": "Multiply24", "mul_hi24": "MultiplyHigh24",
     "mov": "Move", "cmov": "ConditionalMove", "swap": "Swap",
+    "trunc": "Truncate", "ceil": "Ceiling", "rndne": "RoundNearestEven", "floor": "Floor",
+    # MIMG image sample forms. They have no primitive.rs function: the
+    # operation names the texture sample the decoder, reference, interpreters
+    # and MSL lowering implement.
+    "image_sample_lz": "ImageSampleLz",
+    "image_sample_l": "ImageSampleL",
 }
+# MIMG image operations. Their operand rule has kind "image"; behaviour comes
+# from the MIMG contract (docs/shaders/mimg.md), not from a primitive function.
+IMAGE_OPERATIONS = {"image_sample_lz", "image_sample_l"}
 # Unary operations read one source; they need an operand rule of the unary kind.
-UNARY = {"not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs"}
+UNARY = {
+    "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "flbit", "sext", "abs",
+    "trunc", "ceil", "rndne", "floor",
+}
+# Binary32 rounding to an integral value (guide 12.8). They take float operands only.
+FLOAT_ROUNDING = {"trunc", "ceil", "rndne", "floor"}
+# ---- VOP2 binary32 arithmetic (#784) ----
+# V_ADD/SUB/SUBREV/MUL/MIN/MAX_F32 (guide 12.7, pages 131-133) reuse these
+# operation names with signedness float; only the vop2_f32 rule takes them.
+VOP2_FLOAT_ARITHMETIC = {"add", "sub", "mul", "min", "max"}
+# ---- end VOP2 binary32 arithmetic (#784) ----
 # Sign extension reads only the low source_bits of S0 (required for sext only).
 SOURCE_BITS_KEY = "source_bits"
 SOURCE_BITS = {8, 16}
@@ -86,6 +106,11 @@ RELATION_KEY = "relation"
 RELATIONS = {
     "eq": "Equal", "lg": "NotEqual", "gt": "Greater", "ge": "GreaterOrEqual",
     "lt": "Less", "le": "LessOrEqual", "f": "False", "t": "True",
+    # ---- VOPC binary32 compares (#786): relations that exist only for floats ----
+    # Guide 12.9 Table 61 (pages 152-153): O and U test for NaN operands; the N*
+    # forms are the negations of LT..GE and so hold on unordered inputs.
+    "o": "Ordered", "u": "Unordered", "nge": "NotGreaterOrEqual", "nlg": "NotLessOrGreater",
+    "ngt": "NotGreater", "nle": "NotLessOrEqual", "neq": "NotEqualOrUnordered", "nlt": "NotLess",
 }
 # F and T exist only as VOPC compares (guide Table 59 offsets 0 and 7).
 VECTOR_ONLY_RELATIONS = {"f", "t"}
@@ -97,6 +122,26 @@ VOPC_INTEGER_BASES = {
     64: {"signed": 160, "unsigned": 224},
 }
 VOPC_RELATION_OFFSETS = {"f": 0, "lt": 1, "eq": 2, "le": 3, "gt": 4, "lg": 5, "ge": 6, "t": 7}
+# ---- VOPC binary32 compares (#786) ----
+# Guide 12.9 Table 61 (pages 152-153): V_CMP_*_F32 is opcode 0 + offset, with
+# sixteen relations; TRU (offset 15) is declared as relation "t".
+VOPC_F32_BASE = 0
+VOPC_F32_RELATION_OFFSETS = {
+    "f": 0, "lt": 1, "eq": 2, "le": 3, "gt": 4, "lg": 5, "ge": 6, "o": 7,
+    "u": 8, "nge": 9, "nlg": 10, "ngt": 11, "nle": 12, "neq": 13, "nlt": 14, "t": 15,
+}
+# The operand rule of the float compares; the only rule whose forms are float compares.
+VOPC_F32_RULE = "vopc_vcc_f32"
+# The operand rules whose forms take binary32 operands, and the operations each
+# of them takes: the VOP1 rounding set, the VOP2 binary32 arithmetic (#784) and
+# the VOPC binary32 compares (#786). The rule decides, not the operation name:
+# an integer add shares the operation name `add` with the binary32 one, and
+# only the `vop2_f32` rule takes it.
+FLOAT_RULE_OPERATIONS = {
+    "vop1_f32": FLOAT_ROUNDING,
+    "vop2_f32": VOP2_FLOAT_ARITHMETIC,
+    VOPC_F32_RULE: {"compare"},
+}
 # (relation, signedness) -> primitive. Equality does not depend on signedness,
 # so both declared signednesses of EQ and LG share one primitive.
 COMPARE_PRIMITIVES = {
@@ -108,11 +153,19 @@ COMPARE_PRIMITIVES = {
     ("le", "signed"): "le_i32", ("le", "unsigned"): "le_u32",
     ("f", "signed"): "false_b32", ("f", "unsigned"): "false_b32",
     ("t", "signed"): "true_b32", ("t", "unsigned"): "true_b32",
+    # ---- VOPC binary32 compares (#786): IEEE 754 relations on the f32 bits ----
+    ("f", "float"): "false_b32", ("lt", "float"): "lt_f32", ("eq", "float"): "eq_f32",
+    ("le", "float"): "le_f32", ("gt", "float"): "gt_f32", ("lg", "float"): "lg_f32",
+    ("ge", "float"): "ge_f32", ("o", "float"): "o_f32", ("u", "float"): "u_f32",
+    ("nge", "float"): "nge_f32", ("nlg", "float"): "nlg_f32", ("ngt", "float"): "ngt_f32",
+    ("nle", "float"): "nle_f32", ("neq", "float"): "neq_f32", ("nlt", "float"): "nlt_f32",
+    ("t", "float"): "true_b32",
 }
 # Logical operations take untyped bits; arithmetic ones never do. Shifts take
 # the signedness their primitive names, and their S1 is an unsigned count.
 LOGICAL = {
     "and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor",
+    "andn1", "orn1",
     "not", "brev", "bcnt0", "bcnt1", "ff0", "ff1", "cselect", "bfm", "swap",
 }
 ARITHMETIC = {
@@ -129,6 +182,7 @@ SOURCE_FORMATS = {
     "signed": {"FMT_NUM_I32"},
     "unsigned": {"FMT_NUM_U32"},
     "bitwise": {"FMT_NUM_U32", "FMT_NUM_B32"},
+    "float": {"FMT_NUM_F32"},
 }
 # Optional keys: required exactly when the condition holds.
 SHIFT_KEY = "shift_count_bits"
@@ -139,7 +193,7 @@ SHIFT_AMOUNTS = {1, 2, 3, 4}
 # declare it; the XML records no operand order.
 SOURCE_ORDER_KEY = "source_order"
 SOURCE_ORDERS = {"reversed"}
-SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise"}
+SIGNEDNESS = {"unsigned": "Unsigned", "signed": "Signed", "bitwise": "Bitwise", "float": "Float"}
 CARRY_IN = {"none": "None", "scc": "Scc", "vcc": "Vcc"}
 SCC = {
     "unchanged": "Unchanged",
@@ -154,10 +208,17 @@ SCC = {
 # sdst_lane_mask: the Wave32 compare result written to explicit VOP3A SDST.
 # EXEC writes such as v_cmpx have no contract, so exec must stay unchanged.
 MASK = {"unchanged": "Unchanged", "lane_mask": "LaneMask", "sdst_lane_mask": "SdstLaneMask"}
+# Effects on the EXEC mask. `exec_save` writes the combined result to EXEC_LO and
+# leaves the previous EXEC_LO in the destination; `exec_write` writes the combined
+# result to both EXEC_LO and the destination. Guide 12.3, printed pages 117-122.
+EXEC = {"unchanged": "Unchanged", "exec_save": "ExecSave", "exec_write": "ExecWrite"}
+# The operations that combine S0 with EXEC_LO. The EXEC operand is the second one,
+# except for andn1 and orn1, which negate the first.
+EXEC_COMBINE = {"and", "or", "xor", "andn2", "orn2", "nand", "nor", "xnor", "andn1", "orn1"}
 WAVE = {"any": "Any", "wave32": "Wave32"}
 # The synthetic compute fixture ABI fixes the wave size for these operand-rule
 # kinds and for the VCC-reading VOP2 rule. Other forms declare "any".
-WAVE_BY_KIND = {"control": "wave32", "vector_compare": "wave32", "vector_unary": "wave32", "vector_swap": "wave32"}
+WAVE_BY_KIND = {"control": "wave32", "vector_compare": "wave32", "vector_unary": "wave32", "vector_swap": "wave32", "image": "wave32"}
 VCC_VECTOR_PRIMITIVES = {
     ("cselect", "bitwise"): "Select",
     ("add", "unsigned"): "AddCarry",
@@ -196,6 +257,8 @@ PRIMITIVES = {
     ("xor", "bitwise"): ("nonzero", "xor_nonzero_b32", False),
     ("andn2", "bitwise"): ("nonzero", "andn2_nonzero_b32", False),
     ("orn2", "bitwise"): ("nonzero", "orn2_nonzero_b32", False),
+    ("andn1", "bitwise"): ("nonzero", "andn1_nonzero_b32", False),
+    ("orn1", "bitwise"): ("nonzero", "orn1_nonzero_b32", False),
     ("nand", "bitwise"): ("nonzero", "nand_nonzero_b32", False),
     ("nor", "bitwise"): ("nonzero", "nor_nonzero_b32", False),
     ("xnor", "bitwise"): ("nonzero", "xnor_nonzero_b32", False),
@@ -264,6 +327,14 @@ VECTOR_PRIMITIVES = {
     ("lshl", "bitwise"): "ShiftLeft",
     ("lshr", "bitwise"): "ShiftRight",
     ("ashr", "signed"): "ArithmeticShiftRight",
+    # ---- VOP2 binary32 arithmetic (#784) ----
+    # V_SUBREV_F32 is ("sub", "float") with source_order = "reversed".
+    ("add", "float"): "AddF32",
+    ("sub", "float"): "SubF32",
+    ("mul", "float"): "MulF32",
+    ("min", "float"): "MinF32",
+    ("max", "float"): "MaxF32",
+    # ---- end VOP2 binary32 arithmetic (#784) ----
 }
 
 # Operand rules the decoder implements, each exactly once. A registry rule must
@@ -276,7 +347,9 @@ UNSUPPORTED_COMBOS = {
 # which SOP2 groups under src_vcc and src_special).
 # VOP3 rules also name source classes and encoding fields they refuse.
 VOP3_COMBOS = {"src_sgpr", "src_inline", "src_literal", "modifiers", "src2"}
-ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi"} | VOP3_COMBOS
+# src_nan: a NaN value in a float source, whose result depends on MODE.IEEE
+# and MODE.DX10_CLAMP (guide 3.5); the translator does not model it.
+ALL_COMBOS = UNSUPPORTED_COMBOS | {"src_vcc_hi", "src_null", "dst_vcc_hi", "src_nan"} | VOP3_COMBOS
 VOP3_VGPR2_UNSUPPORTED = {
     "src_sgpr", "src_vcc", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
     "src_float_inline", "src_special", "src_literal", "modifiers", "src2",
@@ -288,6 +361,10 @@ VECTOR_UNARY_PRIMITIVES = {
     ("flbit", "unsigned"): "FindHighUnsigned",
     ("ff1", "bitwise"): "FindLow",
     ("flbit", "signed"): "FindHighSigned",
+    ("trunc", "float"): "TruncateF32",
+    ("ceil", "float"): "CeilingF32",
+    ("rndne", "float"): "RoundNearestEvenF32",
+    ("floor", "float"): "FloorF32",
 }
 
 OPERAND_RULES = {
@@ -325,6 +402,23 @@ OPERAND_RULES = {
         "unsupported": {
             "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_float_inline",
             "src_special",
+        },
+        "kind": "vector_unary",
+    },
+    # Binary32 rounding: the guide does not say how a float operation reads an
+    # integer inline constant, so only VGPR, SGPR, vcc_lo and literal SRC0 are kept.
+    "vop1_f32": {
+        "rust": "Vop1F32",
+        "enum": "VectorUnaryOp",
+        "shape": {
+            "family": "VOP1",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [{"field": "SRC0", "class": "vector_source"}],
+            "max_literals": 1,
+        },
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special", "src_nan",
         },
         "kind": "vector_unary",
     },
@@ -399,6 +493,19 @@ OPERAND_RULES = {
         "unsupported": UNSUPPORTED_COMBOS - {"two_literals", "dst_vcc", "dst_exec"},
         "kind": "unary",
     },
+    "sop1_saveexec": {
+        "rust": "Sop1SaveExec",
+        "enum": "ScalarUnaryOp",
+        "shape": {
+            "family": "SOP1",
+            "dst": {"field": "SDST", "class": "sgpr", "min": 0, "max": 105},
+            "src": [{"field": "SSRC0", "class": "scalar_source"}],
+            "max_literals": 1,
+        },
+        # One source, so two literals cannot occur; the rest are rejected.
+        "unsupported": {combo for combo in UNSUPPORTED_COMBOS if combo != "two_literals"},
+        "kind": "unary",
+    },
     "sopk_sgpr": {
         "rust": "SopkSgpr",
         "enum": "ScalarImmediateOp",
@@ -465,6 +572,28 @@ OPERAND_RULES = {
         },
         "kind": "vector_compare",
         "width": 16,
+    },
+    # ---- VOPC binary32 compares (#786) ----
+    # As vopc_vcc without integer inline constants: the guide does not say how
+    # a float operation reads them (the vop1_f32 reading). NaN sources are
+    # accepted: a compare returns a mask bit, never a quieted float.
+    "vopc_vcc_f32": {
+        "rust": "VopcVccF32",
+        "enum": "VectorCompareOp",
+        "shape": {
+            "family": "VOPC",
+            "src": [
+                {"field": "SRC0", "class": "vector_source"},
+                {"field": "VSRC1", "class": "vgpr"},
+            ],
+            "max_literals": 1,
+        },
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special",
+        },
+        "kind": "vector_compare",
+        "width": 32,
     },
     "vopc_vcc_pair": {
         "rust": "VopcVccPair",
@@ -586,6 +715,41 @@ OPERAND_RULES = {
             "src_float_inline", "src_special", "src_literal",
         },
         "kind": "vector",
+    },
+    # ---- VOP2 binary32 arithmetic (#784) ----
+    # As vop1_f32: the guide does not say how a float operation reads an
+    # integer inline constant, so SRC0 is a VGPR, normal SGPR, vcc_lo or a
+    # literal; NaN source values are an unsupported variant.
+    "vop2_f32": {
+        "rust": "Vop2F32",
+        "enum": "VectorAluOp",
+        "shape": {
+            "family": "VOP2",
+            "dst": {"field": "VDST", "class": "vgpr", "min": 0, "max": 255},
+            "src": [
+                {"field": "SRC0", "class": "vector_source"},
+                {"field": "VSRC1", "class": "vgpr"},
+            ],
+            "max_literals": 1,
+        },
+        "unsupported": {
+            "src_vcc_hi", "src_exec", "src_m0", "src_ttmp", "src_null", "src_inline",
+            "src_float_inline", "src_special", "src_nan",
+        },
+        "kind": "vector",
+    },
+    # ---- end VOP2 binary32 arithmetic (#784) ----
+    # MIMG image sample (IMAGE_SAMPLE_LZ and IMAGE_SAMPLE_L). The image operand
+    # structure (VDATA, VADDR, SRSRC, SSAMP, plus the DMASK, DIM, R128 and
+    # modifier fields) does not fit the src/dst shape of the ALU rules, so the
+    # shape declares no fields and the decoder validates the image encoding. The
+    # generator emits a dedicated `from_word` for the split OP field.
+    "mimg_2d": {
+        "rust": "Mimg2D",
+        "enum": "ImageSampleOp",
+        "shape": {"family": "MIMG", "src": [], "max_literals": 0},
+        "unsupported": set(),
+        "kind": "image",
     },
 }
 
@@ -757,6 +921,7 @@ def _check_xml(form, rule, snapshot, errors):
     scc_in = scc_out = False
     implicit = set()
     vcc_operands = []
+    exec_operands = []
     control_mask = CONTROL_OPERATIONS.get(form["operation"], (None, None, None))[2]
     mask_inputs = 0
     for field, data_format, kind, size, is_input, is_output, is_implicit, encoded in variant["operands"]:
@@ -771,6 +936,10 @@ def _check_xml(form, rule, snapshot, errors):
             operands[field] = (data_format, kind, size, is_input, is_output)
         elif kind == "OPR_VCC":
             vcc_operands.append((data_format, size, is_input, is_output))
+        elif kind == "OPR_SDST_EXEC":
+            # The EXEC mask is an implicit operand: the XML lists it as a read
+            # and a write for the forms that update it.
+            exec_operands.append((is_input, is_output))
         else:
             implicit.add(kind)
     if form["carry_in"] == "vcc":
@@ -791,6 +960,31 @@ def _check_xml(form, rule, snapshot, errors):
         errors.append(f"{label}: carry_in {form['carry_in']} contradicts the XML SCC input")
     if scc_out != (form["scc"] != "unchanged"):
         errors.append(f"{label}: scc {form['scc']} contradicts the XML SCC output")
+    if form["exec"] == "unchanged":
+        if exec_operands:
+            errors.append(f"{label}: the XML has an implicit EXEC operand but no EXEC effect is declared")
+    elif exec_operands.count((True, False)) != 1 or exec_operands.count((False, True)) != 1:
+        errors.append(
+            f"{label}: exec {form['exec']} needs one implicit EXEC read and one implicit EXEC write"
+        )
+    if _rule_kind(form) == "image":
+        # The MIMG operand set is fixed by the image contract: a written VDATA,
+        # a read address tuple and the read resource and sampler descriptors.
+        # Their variable widths (VADDR is 2 or 3 f32 components, SRSRC 4 or 8
+        # SGPRs) are validated by the decoder, not through the ALU field rules.
+        actual = set(operands)
+        if actual != {"VDATA", "VADDR", "SRSRC", "SSAMP"}:
+            errors.append(f"{label}: XML image operands {sorted(actual)} are not VDATA/VADDR/SRSRC/SSAMP")
+        else:
+            if operands["VDATA"][:3] != ("FMT_ANY", "OPR_VGPR", 128) or operands["VDATA"][3:] != (False, True):
+                errors.append(f"{label}: VDATA must be a written 128-bit VGPR")
+            if operands["VADDR"][3:] != (True, False):
+                errors.append(f"{label}: VADDR must be a read address input")
+            if operands["SRSRC"][1:] != ("OPR_SREG_NONULL", 256, True, False):
+                errors.append(f"{label}: SRSRC must be a read 256-bit aligned SGPR")
+            if operands["SSAMP"][1:] != ("OPR_SREG_NONULL", 128, True, False):
+                errors.append(f"{label}: SSAMP must be a read 128-bit aligned SGPR")
+        return
     if rule is None:
         return
     if not _well_formed(rule):
@@ -859,9 +1053,20 @@ def _check_xml(form, rule, snapshot, errors):
 
 def _identifier(encoding, opcode):
     fields = dict((name, ranges) for name, ranges in encoding["fields"])
-    (offset, size), = fields["OP"]
-    base = encoding["identifiers"][0] & ~(((1 << size) - 1) << offset)
-    return base | (opcode << offset)
+    ranges = fields["OP"]
+    base = encoding["identifiers"][0]
+    if len(ranges) == 1:
+        (offset, size), = ranges
+        base &= ~(((1 << size) - 1) << offset)
+        return base | (opcode << offset)
+    # Split OP field (MIMG): the XML lists the ranges high-bits-first, so the
+    # first range holds the low opcode bits and the second the high bit(s).
+    (offset, size), (high_offset, high_size) = ranges
+    base &= ~(((1 << size) - 1) << offset)
+    base &= ~(((1 << high_size) - 1) << high_offset)
+    low = opcode & ((1 << size) - 1)
+    high = opcode >> size
+    return base | (low << offset) | (high << high_offset)
 
 
 def validate(registry, snapshot):
@@ -882,6 +1087,16 @@ def validate(registry, snapshot):
             errors.append(f"unknown document {name}")
         elif document != PINNED_DOCUMENTS[name]:
             errors.append(f"document {name}: differs from the pinned public document")
+    deferred = registry.get("append_after_variants", [])
+    if not isinstance(deferred, list) or any(not isinstance(family, str) for family in deferred):
+        errors.append("append_after_variants must be an array of family names")
+    elif len(set(deferred)) != len(deferred):
+        errors.append("append_after_variants names a family twice")
+    else:
+        declared_families = {form.get("family") for form in registry.get("form", [])}
+        for family in deferred:
+            if family not in declared_families:
+                errors.append(f"append_after_variants: unknown family {family!r}")
     if "guide" not in documents:
         errors.append("the guide document is not declared")
     rules = registry.get("operand_rules", {})
@@ -906,7 +1121,7 @@ def validate(registry, snapshot):
             continue
         for key, vocabulary in (
             ("operation", OPERATIONS), ("signedness", SIGNEDNESS), ("carry_in", CARRY_IN),
-            ("scc", SCC), ("vcc", MASK), ("exec", MASK), ("wave", WAVE),
+            ("scc", SCC), ("vcc", MASK), ("exec", EXEC), ("wave", WAVE),
         ):
             if form[key] not in vocabulary:
                 errors.append(f"{label}: unknown {key} {form[key]!r}")
@@ -932,7 +1147,19 @@ def validate(registry, snapshot):
                 f"(requires {vcc})"
             )
         if form["exec"] != "unchanged":
-            errors.append(f"{label}: exec {form['exec']} has no contract (requires unchanged)")
+            # The EXEC-writing forms are the Wave32 `_B32` SAVEEXEC and WREXEC
+            # families of guide 12.3, printed pages 117-122. Each reads EXEC_LO,
+            # writes the combined result back to EXEC_LO and sets SCC.
+            if form["family"] != "SOP1" or form["width"] != 32:
+                errors.append(f"{label}: exec {form['exec']} is only defined for 32-bit SOP1 forms")
+            elif form["operands"] != "sop1_saveexec":
+                errors.append(f"{label}: exec {form['exec']} requires the sop1_saveexec rule")
+            elif form["operation"] not in EXEC_COMBINE:
+                errors.append(
+                    f"{label}: exec {form['exec']} requires one of the EXEC-combining operations"
+                )
+            elif form["scc"] != "nonzero":
+                errors.append(f"{label}: exec {form['exec']} requires the nonzero SCC effect")
         expected_width = (_implemented_rule(form) or {}).get("width", 32)
         if type(form["width"]) is not int or form["width"] != expected_width:
             errors.append(f"{label}: width {form['width']} is not supported")
@@ -946,8 +1173,26 @@ def validate(registry, snapshot):
                 shown = form["variant"] if key == "variant" else value
                 errors.append(f"{label}: duplicate {key} {shown}")
             seen[key].add(value)
-        if (form["operation"] in LOGICAL and form["signedness"] != "bitwise") or (
-            form["operation"] in ARITHMETIC and form["signedness"] == "bitwise"
+        if (
+            # #818: an image sample operation carries no ALU signedness.
+            form["operation"] not in IMAGE_OPERATIONS
+            and (
+                (form["operation"] in LOGICAL and form["signedness"] != "bitwise")
+                or (form["operation"] in ARITHMETIC and form["signedness"] == "bitwise")
+                # Float operands: the rounding set and the VOP2 binary32 arithmetic
+                # (#784) admit float signedness, and the VOPC binary32 compares
+                # (#786) require it. The operand rule decides, not the operation
+                # name: an integer add shares the name `add` with the binary32 one.
+                or (
+                    (form["operands"] in FLOAT_RULE_OPERATIONS)
+                    != (form["signedness"] == "float")
+                )
+                # A binary32 rule names only the operations that rule takes.
+                or (
+                    form["operands"] in FLOAT_RULE_OPERATIONS
+                    and form["operation"] not in FLOAT_RULE_OPERATIONS[form["operands"]]
+                )
+            )
         ):
             errors.append(
                 f"{label}: signedness {form['signedness']} contradicts operation {form['operation']}"
@@ -999,6 +1244,15 @@ def validate(registry, snapshot):
                         f"{label}: relation {relation}/{form['signedness']} has SOPK opcode "
                         f"{expected} (guide 13.1.2), not {form['opcode']}"
                     )
+            elif _rule_kind(form) == "vector_compare" and form["signedness"] == "float":
+                # VOPC binary32 compares (#786): guide Table 61 offsets 0-15.
+                expected = VOPC_F32_BASE + VOPC_F32_RELATION_OFFSETS[relation] \
+                    if relation in VOPC_F32_RELATION_OFFSETS else None
+                if form["opcode"] != expected:
+                    errors.append(
+                        f"{label}: relation {relation}/float has VOPC opcode "
+                        f"{expected} (guide Table 61), not {form['opcode']}"
+                    )
             elif _rule_kind(form) == "vector_compare":
                 base = VOPC_INTEGER_BASES.get(expected_width, {}).get(form["signedness"])
                 expected = None if base is None else base + VOPC_RELATION_OFFSETS[relation]
@@ -1033,6 +1287,16 @@ def validate(registry, snapshot):
             }[_rule_kind(form)]
             lowering = table.get(key)
             primitive = None if lowering is None else ("unchanged", lowering, False)
+        elif _rule_kind(form) == "image":
+            if RELATION_KEY in form:
+                errors.append(f"{label}: {RELATION_KEY} on an image sample operation")
+            if form["operation"] not in IMAGE_OPERATIONS:
+                errors.append(f"{label}: image rule requires an image sample operation")
+            if form["signedness"] != "float":
+                errors.append(f"{label}: image sample requires float signedness")
+            # Image samples write no SCC, VCC or EXEC and have no primitive.rs
+            # function; behaviour is the MIMG contract, not a shared primitive.
+            primitive = ("unchanged", None, False)
         else:
             if RELATION_KEY in form:
                 errors.append(f"{label}: {RELATION_KEY} on a non-compare operation")
@@ -1063,10 +1327,11 @@ def validate(registry, snapshot):
             else "vector_unary" if _rule_kind(form) == "vector_unary" and form["operation"] in UNARY
             else "unary" if form["operation"] in UNARY or (
                 form["operation"] == "mov" and form["family"] == "SOP1"
-            )
+            ) or form["exec"] != "unchanged"
             else "vector" if _rule_kind(form) == "vector" and form["operation"] not in UNARY
             else "control" if form["operation"] in CONTROL_OPERATIONS
             else "immediate" if _rule_kind(form) == "immediate"
+            else "image" if form["operation"] in IMAGE_OPERATIONS
             else "alu"
         ):
             errors.append(f"{label}: operation {form['operation']} does not fit rule {form['operands']}")
@@ -1251,8 +1516,19 @@ def _check_spec(label, spec, documents, errors):
 def render(registry, snapshot):
     """Return the complete generated Rust source. Requires a valid registry."""
     forms = registry["form"]
-    rule_names = sorted({form["operands"] for form in forms})
-    positions = {form["name"]: position for position, form in enumerate(forms)}
+    # A family listed in append_after_variants is placed after the encoding
+    # variants, so adding it does not move any pre-existing form or variant
+    # index. Everything else keeps registry order.
+    deferred = set(registry.get("append_after_variants", []))
+    base_forms = [form for form in forms if form["family"] not in deferred]
+    deferred_forms = [form for form in forms if form["family"] in deferred]
+    enum_forms = base_forms + deferred_forms
+    variants = registry.get("encoding_variant", [])
+    variant_rows = [variant_row(registry, variant) for variant in variants]
+    positions = {form["name"]: position for position, form in enumerate(base_forms)}
+    for offset, form in enumerate(deferred_forms):
+        positions[form["name"]] = len(base_forms) + len(variant_rows) + offset
+    rule_names = sorted({form["operands"] for form in enum_forms})
     out = [
         "// @generated by crates/isa/generate_semantics.py from crates/isa/semantics/rdna2.toml.",
         "// Do not edit. Regenerate: python3 crates/isa/generate_semantics.py generate",
@@ -1276,20 +1552,25 @@ def render(registry, snapshot):
         if enum in rendered:
             continue
         rendered.add(enum)
-        selected = [form for form in forms if OPERAND_RULES[form["operands"]]["enum"] == enum]
+        selected = [
+            form for form in enum_forms if OPERAND_RULES[form["operands"]]["enum"] == enum
+        ]
         out += _render_enum(rule_name, selected, snapshot, positions)
-    variants = registry.get("encoding_variant", [])
     variant_positions = {
-        (variant["of"], variant["family"]): len(forms) + index for index, variant in enumerate(variants)
+        (variant["of"], variant["family"]): len(base_forms) + index
+        for index, variant in enumerate(variants)
     }
     for rule_name in sorted({variant["operands"] for variant in variants}):
         selected = [variant for variant in variants if variant["operands"] == rule_name]
         out += _render_variants(rule_name, selected, registry, snapshot, variant_positions)
-    # Encoding variants follow the forms, as rows of their own.
-    forms = forms + [variant_row(registry, variant) for variant in variants]
+    # Encoding variants follow the forms, as rows of their own. Deferred
+    # families are appended after them so pre-existing indices stay stable.
+    forms = base_forms + variant_rows + deferred_forms
     out += [
         "",
-        "/// Identity of every registry form and encoding variant, in registry order.",
+        "/// Identity of every registry form and encoding variant; a family named in",
+        "/// append_after_variants follows the encoding variants to keep existing",
+        "/// positions stable, and the rest keep registry order.",
         f"pub const FORM_IDS: [(&str, EncodingFamily); {len(forms)}] = [",
     ]
     for form in forms:
@@ -1324,7 +1605,7 @@ def render(registry, snapshot):
             + (f"Some(CompareRelation::{RELATIONS[form[RELATION_KEY]]})," if RELATION_KEY in form else "None,"),
             f"        scc: SccEffect::{SCC[form['scc']]},",
             f"        vcc: MaskEffect::{MASK[form['vcc']]},",
-            f"        exec: MaskEffect::{MASK[form['exec']]},",
+            f"        exec: MaskEffect::{EXEC[form['exec']]},",
             f"        wave: Wave::{WAVE[form['wave']]},",
             f"        operands: OperandRule::{OPERAND_RULES[form['operands']]['rust']},",
             f"        spec: &[{spec}],",
@@ -1423,9 +1704,99 @@ def _render_variants(rule_name, variants, registry, snapshot, positions):
     return out
 
 
+def _render_image_enum(rule_name, forms, snapshot, positions):
+    """One MIMG image-sample enum with the split OP field and the fixed 2D bits.
+
+    MIMG spreads its 8-bit opcode across bit 0 (the high bit) and bits 24:18
+    (the low seven bits), so the generic `from_word` that reads a contiguous OP
+    field does not apply. The bounded scope fixes NSA, DIM, R128 and every
+    cache/modifier flag; DMASK stays a variable field the decoder validates.
+    """
+    enum = OPERAND_RULES[rule_name]["enum"]
+    family = forms[0]["family"]
+    encoding = snapshot["encodings"][_family_encoding(family)]
+    (offset, size), (low_offset, low_size) = dict(
+        (name, ranges) for name, ranges in encoding["fields"]
+    )["OP"]
+    if (offset, size, low_offset, low_size) != (18, 7, 0, 1):
+        raise ValueError(f"{family}: unexpected split OP field {encoding['fields']['OP']!r}")
+    # The generic `from_word` reads a contiguous OP field; MIMG instead spreads
+    # its opcode across bit 0 (the high bit) and bits 24:18 (the low seven
+    # bits). `from_word` matches only the ENCODING bits and dispatches on the
+    # opcode; the DIM, R128, NSA, DMASK and modifier flags are validated by the
+    # decoder's image operand rule, so a wrong dimension stays `UnsupportedForm`.
+    fixed_mask = 0xFC00_0000
+    fixed_bits = 0xF000_0000
+    out = [
+        "",
+        f"/// {family} image samples declared in the semantic registry (operand rule `{rule_name}`).",
+        "#[derive(Clone, Copy, Debug, Eq, PartialEq)]",
+        f"pub enum {enum} {{",
+    ]
+    for form in forms:
+        out += [
+            f"    /// `{form['name'].lower()}` ({family} opcode {form['opcode']}).",
+            f"    {form['variant']},",
+        ]
+    by_opcode = {form["opcode"]: form["variant"] for form in forms}
+    out += [
+        "}",
+        "",
+        f"impl {enum} {{",
+        f"    /// Every operation, in registry order.",
+        f"    pub const ALL: [Self; {len(forms)}] = [",
+    ]
+    out += [f"        Self::{form['variant']}," for form in forms]
+    out += [
+        "    ];",
+        "",
+        f"    /// Selects the operation from the first word of its {family} encoding:",
+        f"    /// the encoding bits (mask 0x{fixed_mask:09_x}) and then the split OP field",
+        f"    /// (bits {offset}-{offset + size - 1} for the low bits and bit",
+        f"    /// {low_offset} for the high bit). `None` for undeclared opcodes. The DIM,",
+        "    /// R128, NSA, DMASK and modifier flags are checked separately by the decoder.",
+        "    pub const fn from_word(word: u32) -> Option<Self> {",
+        f"        if word & 0x{fixed_mask:09_x} != 0x{fixed_bits:09_x} {{",
+        "            return None;",
+        "        }",
+        f"        let opcode = ((word >> {offset}) & 0x{(1 << size) - 1:x})",
+        f"            | ((word & 0x{(1 << low_size) - 1:x}) << {size});",
+        "        match opcode {",
+    ]
+    for form in sorted(forms, key=lambda form: form["opcode"]):
+        out.append(f"            {form['opcode']} => Some(Self::{form['variant']}),")
+    out += [
+        "            _ => None,",
+        "        }",
+        "    }",
+        "",
+        "    /// Lower-case mnemonic.",
+        "    pub const fn mnemonic(self) -> &'static str {",
+        "        match self {",
+    ]
+    out += [f"            Self::{form['variant']} => \"{form['name'].lower()}\"," for form in forms]
+    out += [
+        "        }",
+        "    }",
+        "",
+        "    /// The validated registry row.",
+        "    pub fn semantics(self) -> &'static FormSemantics {",
+        "        &FORMS[match self {",
+    ]
+    out += [f"            Self::{form['variant']} => {positions[form['name']]}," for form in forms]
+    out += [
+        "        }]",
+        "    }",
+        "}",
+    ]
+    return out
+
+
 def _render_enum(rule_name, forms, snapshot, positions):
     enum = OPERAND_RULES[rule_name]["enum"]
     kind = OPERAND_RULES[rule_name]["kind"]
+    if kind == "image":
+        return _render_image_enum(rule_name, forms, snapshot, positions)
     rules = sorted({form["operands"] for form in forms})
     if any(OPERAND_RULES[name]["kind"] != kind for name in rules):
         raise ValueError(f"{enum}: operand rules {rules} of one enum differ in kind")
@@ -1676,24 +2047,57 @@ def _render_enum(rule_name, forms, snapshot, positions):
             "        }",
             "    }",
             "",
-            "    /// The result and, for forms that write it, the new SCC (`None` leaves SCC",
-            "    /// unchanged).",
-            "    pub const fn evaluate(self, src: u32) -> (u32, Option<bool>) {",
+            "    /// Whether the operation writes the EXEC mask.",
+            "    pub const fn writes_exec(self) -> bool {",
+            "        match self {",
+        ]
+        out += [
+            f"            Self::{form['variant']} => {'false' if form['exec'] == 'unchanged' else 'true'},"
+            for form in forms
+        ]
+        out += [
+            "        }",
+            "    }",
+            "",
+            "    /// The destination value, the new EXEC mask and, for forms that write it,",
+            "    /// the new SCC (`None` leaves SCC unchanged).",
+            "    ///",
+            "    /// EXEC is an implicit operand of the forms that write it: they combine",
+            "    /// the source with the current mask. For every other form the mask is",
+            "    /// returned unchanged.",
+            "    pub const fn evaluate(self, src: u32, exec: u32) -> (u32, u32, Option<bool>) {",
             "        match self {",
         ]
         for form in forms:
             _, function, _ = PRIMITIVES[(form["operation"], form["signedness"])]
+            if form["exec"] != "unchanged":
+                # The combine primitives take the source and the mask, and return
+                # the combined mask with the flag for it.
+                combine = f"primitive::{function}(src, exec)"
+                if form["exec"] == "exec_save":
+                    # The destination receives the previous mask.
+                    destination = "exec"
+                else:
+                    # The destination receives the new mask.
+                    destination = "value"
+                out += [
+                    f"            Self::{form['variant']} => {{",
+                    f"                let (value, scc) = {combine};",
+                    f"                ({destination}, value, Some(scc))",
+                    "            }",
+                ]
+                continue
             if form["operation"] == "sext":
                 value = f"primitive::{function}(src, {form[SOURCE_BITS_KEY]})"
             else:
                 value = f"primitive::{function}(src)"
             if form["scc"] == "unchanged":
-                out.append(f"            Self::{form['variant']} => ({value}, None),")
+                out.append(f"            Self::{form['variant']} => ({value}, exec, None),")
             else:
                 out += [
                     f"            Self::{form['variant']} => {{",
                     f"                let (value, scc) = {value};",
-                    "                (value, Some(scc))",
+                    "                (value, exec, Some(scc))",
                     "            }",
                 ]
         out += ["        }", "    }", "}"]

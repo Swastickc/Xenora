@@ -41,6 +41,15 @@ cargo test --locked -p xenora-loader --features gpu-tests --test graphics_textur
 timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test graphics_textures -- \
     --nocapture --test-threads=1
 
+# Native fences, compiled guest frames, submission lifetimes and threaded draws.
+for target in graphics_fences guest_graphics_fences guest_graphics_path \
+    guest_textured_path hosted_graphics_path shared_resource_lifecycle \
+    threaded_guest_application; do
+    cargo test --locked -p xenora-loader --features gpu-tests --test "$target" --no-run
+    timeout 30s cargo test --locked -p xenora-loader --features gpu-tests --test "$target" -- \
+        --nocapture --test-threads=1
+done
+
 # The native app interface runs the trusted fixture's guest draw on Metal.
 cargo test --locked -p xenora-ffi --features gpu-tests --test native_frame --no-run
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test native_frame -- \
@@ -65,6 +74,25 @@ timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test resour
 cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs --no-run
 timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test audio_vfs -- \
     --nocapture --test-threads=1
+
+# Session input router published into a running native frame loop (Campaign F, #942).
+cargo test --locked -p xenora-ffi --features gpu-tests --test input_router_gpu --no-run
+timeout 30s cargo test --locked -p xenora-ffi --features gpu-tests --test input_router_gpu -- \
+    --nocapture --test-threads=1
+
+# Verify both the persistent CLI session and the hosted runner's final Metal frame.
+cargo test --locked -p xenora --test persistent_session_cli --no-run
+timeout 30s cargo test --locked -p xenora --test persistent_session_cli -- \
+    default_metal_backend_draws_every_frame_natively --ignored --exact --nocapture --test-threads=1
+
+# The threaded session exercises scheduled guest work and native frame exports.
+cargo test --locked -p xenora --test threaded_session_cli --no-run
+timeout 30s cargo test --locked -p xenora --test threaded_session_cli -- \
+    threaded_metal_draws_and_exports_every_frame_for_positional_and_replay --ignored --exact --nocapture --test-threads=1
+
+cargo test --locked -p xenora --test run_program --no-run
+timeout 30s cargo test --locked -p xenora --test run_program -- \
+    startup_report_ends_in_verified_metal_frame --ignored --exact --nocapture --test-threads=1
 
 # Native Metal known answers of the independent semantic review, including SOP2 scalar ALU
 # and VOPC compares.

@@ -24,12 +24,16 @@ mod texture;
 mod texture_bc_alpha;
 #[path = "native/texture_bc_channel.rs"]
 mod texture_bc_channel;
+#[path = "native/texture_bptc.rs"]
+mod texture_bptc;
 #[path = "native/texture_sampling.rs"]
 mod texture_sampling;
 #[path = "native/translated_bc1.rs"]
 mod translated_bc1;
 #[path = "native/translated_render.rs"]
 mod translated_render;
+#[path = "native/translated_sample.rs"]
+mod translated_sample;
 
 const KERNEL_HEADER: &str = r"
 #include <metal_stdlib>

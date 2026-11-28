@@ -155,6 +155,30 @@ class NativeStartupTests(unittest.TestCase):
                 self.assertIn("dir64_applied=8198", result.stderr)
                 self.assertIn("tls_callbacks=2", result.stderr)
 
+    def test_scarlett_runtime_fixture_reports_missing_initialization(self):
+        result = subprocess.run(
+            [sys.executable, SCRIPT, "--config", self.fixtures / "MicrosoftGame.config",
+             "--xenora", self.xenora],
+            capture_output=True, text=True, timeout=40, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["selected_executable"]["id"], "RuntimeFixture")
+        self.assertEqual(report["selected_executable"]["target_device_family"], "Scarlett")
+        self.assertEqual(report["outcome"]["code"], "unverified_console_contract")
+        image = report["static_pe"]
+        self.assertEqual(image["total_imports"], 2)
+        self.assertEqual(image["unresolved_imports"], 2)
+        first = image["first_listed_unresolved_ordinary_import"]
+        self.assertEqual(first["module"], "xgameruntime.dll")
+        self.assertEqual(first["symbol_or_ordinal"], "XGameRuntimeInitialize")
+
+        result, startup = self.run_guest(self.fixtures / "scarlett-runtime.exe")
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertEqual(startup["last_completed_stage"], "relocated")
+        self.assertEqual(startup["outcome"]["phase"], "startup")
+        self.assertIn("xgameruntime.dll!XGameRuntimeInitialize", startup["outcome"]["message"])
+
     def test_adjacent_dlls_do_not_supply_runtime_imports(self):
         for name in ("xenora-launch-one.dll", "xenora-launch-two.dll"):
             self.assertTrue((self.fixtures / name).is_file())
@@ -163,6 +187,21 @@ class NativeStartupTests(unittest.TestCase):
         self.assertEqual(report["last_completed_stage"], "relocated")
         self.assertEqual(report["outcome"]["phase"], "startup")
         self.assertIn("xenora-launch-one.dll!first_action", report["outcome"]["message"])
+
+    def test_ordinary_import_terminator_must_fit_the_directory(self):
+        data = bytearray((self.fixtures / "dependent-startup.exe").read_bytes())
+        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+        # Two 20-byte descriptors followed by a 20-byte zero terminator.
+        import_size_offset = pe_offset + 24 + 124
+        struct.pack_into("<I", data, import_size_offset, 59)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "short-import-directory.exe"
+            path.write_bytes(data)
+            result, report = self.run_guest(path)
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertEqual(report["last_completed_stage"], "relocated")
+        self.assertEqual(report["outcome"]["phase"], "startup")
+        self.assertIn("before its empty descriptor", report["outcome"]["message"])
 
     def test_rejected_images_and_entry_budget_come_from_different_stages(self):
         data = (self.fixtures / "large-startup.exe").read_bytes()

@@ -414,8 +414,12 @@ fn test_fixture_b_xmem_guest_allocator() {
     // 0x1014: 48 89 c3                    mov rbx, rax    (save allocated address in rbx)
     // 0x1017: 48 c7 03 42 00 00 00        mov qword ptr [rbx], 0x42 (write to allocated memory)
     // 0x101e: 48 8b 0b                    mov rcx, [rbx]  (read back into rcx)
-    // 0x1021: 48 83 c4 28                 add rsp, 0x28
-    // 0x1025: f4                          hlt
+    // 0x1021: 49 89 cc                    mov r12, rcx    (keep the checked value)
+    // 0x1024: 48 89 d9                    mov rcx, rbx    (free the exact allocation base)
+    // 0x1027: 31 d2                       xor edx, edx    (attributes = 0)
+    // 0x1029: ff 15 71 11 00 00           call qword ptr [rip + 0x1171] -> XMemFree IAT at 0x21a0
+    // 0x102f: 48 83 c4 28                 add rsp, 0x28
+    // 0x1033: f4                          hlt
     let mut code = vec![0u8; 0x100];
     code[0..4].copy_from_slice(&[0x48, 0x83, 0xec, 0x28]);
     code[4..11].copy_from_slice(&[0x48, 0xc7, 0xc1, 0x00, 0x10, 0x00, 0x00]);
@@ -426,12 +430,18 @@ fn test_fixture_b_xmem_guest_allocator() {
     code[23..30].copy_from_slice(&[0x48, 0xc7, 0x03, 0x42, 0x00, 0x00, 0x00]);
     // 48 8b 0b -> mov rcx, [rbx]
     code[30..33].copy_from_slice(&[0x48, 0x8b, 0x0b]);
-    code[33..37].copy_from_slice(&[0x48, 0x83, 0xc4, 0x28]);
-    code[37] = 0xf4;
+    // 49 89 cc -> mov r12, rcx
+    code[33..36].copy_from_slice(&[0x49, 0x89, 0xcc]);
+    // 48 89 d9 -> mov rcx, rbx; 31 d2 -> xor edx, edx
+    code[36..41].copy_from_slice(&[0x48, 0x89, 0xd9, 0x31, 0xd2]);
+    code[41..47].copy_from_slice(&[0xff, 0x15, 0x71, 0x11, 0x00, 0x00]);
+    code[47..51].copy_from_slice(&[0x48, 0x83, 0xc4, 0x28]);
+    code[51] = 0xf4;
 
     let pe_bytes = TestPeBuilder::new(pref_base, 0x1000)
         .code(&code)
         .add_import("xmem.dll", "XMemAlloc")
+        .add_import("xmem.dll", "XMemFree")
         .build();
 
     let pe = ParsedPe::parse(&pe_bytes).expect("parse pe");
@@ -455,7 +465,7 @@ fn test_fixture_b_xmem_guest_allocator() {
     let bound = import_registry
         .bind_imports(&pe, &pe_bytes, pref_base, &mut memory)
         .expect("bind xmem");
-    assert_eq!(bound, 1);
+    assert_eq!(bound, 2);
 
     let stack_top = 0x500000000u64;
     memory
@@ -479,7 +489,56 @@ fn test_fixture_b_xmem_guest_allocator() {
     assert_eq!(result.exit_reason, ExitReason::Halt);
     let allocated_addr = result.final_state.get(Register::Rbx);
     assert!(allocated_addr >= 0x200000000); // In allocated guest heap range
-    assert_eq!(result.final_state.get(Register::Rcx), 0x42); // Read back correctly!
+    assert_eq!(result.final_state.get(Register::R12), 0x42); // Read back before free
+    assert!(
+        memory.read_u8(allocated_addr).is_err(),
+        "XMemFree left the exact allocation base readable"
+    );
+}
+
+#[test]
+fn test_xmem_free_rejects_foreign_address() {
+    // A foreign exact address is not owned by XMemAlloc. Since the public
+    // signature has no error return, the implementation must stop explicitly
+    // rather than silently accepting ownership corruption.
+    let pref_base = 0x140000000u64;
+    // mov rcx, 0xdead0000; xor edx, edx; call XMemFree; hlt
+    let mut code = vec![0u8; 0x100];
+    code[0..7].copy_from_slice(&[0x48, 0xc7, 0xc1, 0x00, 0x00, 0xad, 0xde]);
+    code[7..9].copy_from_slice(&[0x31, 0xd2]);
+    // The call ends at RVA 0x100f; IAT is RVA 0x2060 when XMemFree is first.
+    code[9..15].copy_from_slice(&[0xff, 0x15, 0x51, 0x10, 0x00, 0x00]);
+    code[15] = 0xf4;
+
+    let pe_bytes = TestPeBuilder::new(pref_base, 0x1000)
+        .code(&code)
+        .add_import("xmem.dll", "XMemFree")
+        .build();
+    let pe = ParsedPe::parse(&pe_bytes).expect("parse pe");
+    let mut memory = xenora_loader::memory::GuestMemory::new();
+    for sec in &pe.sections {
+        let base = pref_base + sec.virtual_address as u64;
+        let size = std::cmp::max(sec.virtual_size, sec.raw_data_size) as usize;
+        let file_off = sec.raw_data_ptr as usize;
+        let data = &pe_bytes[file_off..file_off + sec.raw_data_size as usize];
+        memory
+            .map_region_with_data(base, size, sec.permissions, data)
+            .expect("map section");
+    }
+    let mut import_registry = ImportRegistry::new();
+    let clock = Arc::new(MockClock::new(100));
+    register_standard_services(&mut import_registry, Arc::new(ServicesState::new(clock)));
+    import_registry
+        .bind_imports(&pe, &pe_bytes, pref_base, &mut memory)
+        .expect("bind xmem free");
+    memory
+        .map_region(0x4FFFF0000, 0x10000, MemoryPermissions::READ_WRITE)
+        .expect("map stack");
+    let mut dbt = DbtEngine::new(1024 * 1024).expect("init JIT");
+    dbt.set_import_registry(import_registry);
+    let mut cpu = CpuState::new(pref_base + 0x1000, 0x500000000);
+    let result = dbt.run(&mut cpu, &mut memory, 1000);
+    assert_eq!(result.exit_reason, ExitReason::IllegalInstruction(0xFE));
 }
 
 fn run_fixture_c(handler: xenora_loader::imports::ServiceHandler) {
@@ -2620,4 +2679,222 @@ fn test_virtual_allocation_release_through_iat() {
         let (_, value, error) = run(args, None);
         assert_eq!((value, error), (0, expected_error));
     }
+}
+
+fn create_fixture_file(state: &Arc<ServicesState>, name: &str) -> u64 {
+    const IMAGE: u64 = 0x140000000;
+    let mut code = vec![0x48, 0x83, 0xec, 0x48];
+    // CreateFileW(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    // NULL, OPEN_ALWAYS, NORMAL, NULL)
+    for (register, value) in [
+        ([0x48, 0xb9], IMAGE + 0x1080),
+        ([0x48, 0xba], 0xc000_0000),
+        ([0x49, 0xb8], 3),
+        ([0x49, 0xb9], 0),
+    ] {
+        code.extend_from_slice(&register);
+        code.extend_from_slice(&value.to_le_bytes());
+    }
+    for (offset, value) in [(0x20u8, 4u64), (0x28, 0x80), (0x30, 0)] {
+        code.extend_from_slice(&[0x48, 0xb8]);
+        code.extend_from_slice(&value.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, offset]);
+    }
+    append_import_call(&mut code, 0x2060);
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x48, 0xf4]);
+    code.resize(0x80, 0);
+    code.extend(name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+    let bytes = TestPeBuilder::new(IMAGE, 0x1000)
+        .add_import("kernel32.dll", "CreateFileW")
+        .code(&code)
+        .build();
+    let mut imports = ImportRegistry::new();
+    register_standard_services(&mut imports, Arc::clone(state));
+    let result = run_synthetic_startup(
+        &bytes,
+        StartupLayout {
+            image_base: IMAGE,
+            stack_top: PROCESS_FIXTURE_STACK_TOP,
+            tls_base: 0x300000000,
+        },
+        imports,
+        100,
+    )
+    .unwrap();
+    assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    let handle = result.execution.final_state.get(Register::Rax);
+    assert_ne!(handle, u64::MAX);
+    handle
+}
+
+#[test]
+fn guest_byte_range_locks_follow_windows_conflict_rules() {
+    const ERROR_LOCK_VIOLATION: u64 = 33;
+    const ERROR_NOT_LOCKED: u64 = 158;
+    const SHARED: u64 = 1; // LOCKFILE_FAIL_IMMEDIATELY
+    const EXCLUSIVE: u64 = 3; // | LOCKFILE_EXCLUSIVE_LOCK
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let rax = |symbol: &str, args: &[u64]| {
+        call_service_fixture(&state, "kernel32.dll", symbol, args)
+            .execution
+            .final_state
+            .get(Register::Rax)
+    };
+    let last_error = || rax("GetLastError", &[]);
+    let first = create_fixture_file(&state, "C:/locks.db");
+    let second = create_fixture_file(&state, "C:/locks.db");
+
+    // LockFile(handle, offset low, offset high, length low, length high) is exclusive.
+    assert_eq!(rax("LockFile", &[first, 0, 0, 10, 0]), 1);
+    assert_eq!(rax("LockFile", &[second, 9, 0, 1, 0]), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+    assert_eq!(rax("LockFile", &[second, 10, 0, 5, 0]), 1);
+    // Unlocking must name exactly a range the same handle locked.
+    assert_eq!(rax("UnlockFile", &[first, 0, 0, 9, 0]), 0);
+    assert_eq!(last_error(), ERROR_NOT_LOCKED);
+    assert_eq!(rax("UnlockFile", &[second, 0, 0, 10, 0]), 0);
+    assert_eq!(rax("UnlockFile", &[first, 0, 0, 10, 0]), 1);
+    assert_eq!(rax("LockFile", &[second, 0, 0, 10, 0]), 1);
+    assert_eq!(rax("UnlockFile", &[second, 0, 0, 10, 0]), 1);
+    assert_eq!(rax("UnlockFile", &[second, 10, 0, 5, 0]), 1);
+
+    // LockFileEx(handle, flags, reserved, length low, length high, overlapped):
+    // the fixture output slot holds an OVERLAPPED; its Internal field is seeded
+    // with all ones and its Offset fields at byte 16 stay zero.
+    let overlapped = PROCESS_FIXTURE_OUTPUT;
+    assert_eq!(rax("LockFileEx", &[first, SHARED, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("LockFileEx", &[second, SHARED, 0, 4, 0, overlapped]), 1);
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 2, 0, overlapped]),
+        0
+    );
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+    // A length above 4 GiB uses the high half: it overlaps the shared range.
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 0, 1, overlapped]),
+        0
+    );
+    // UnlockFileEx(handle, reserved, length low, length high, overlapped).
+    assert_eq!(rax("UnlockFileEx", &[first, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("UnlockFileEx", &[second, 0, 4, 0, overlapped]), 1);
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 0, 1, overlapped]),
+        1
+    );
+    assert_eq!(rax("UnlockFileEx", &[second, 0, 0, 1, overlapped]), 1);
+
+    // The same handle may place a shared lock over its exclusive lock. The
+    // first exact unlock removes the exclusive lock and leaves the shared one.
+    assert_eq!(
+        rax("LockFileEx", &[first, EXCLUSIVE, 0, 4, 0, overlapped]),
+        1
+    );
+    assert_eq!(rax("LockFileEx", &[first, SHARED, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("LockFileEx", &[second, SHARED, 0, 4, 0, overlapped]), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+    assert_eq!(rax("UnlockFileEx", &[first, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("LockFileEx", &[second, SHARED, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("UnlockFileEx", &[second, 0, 4, 0, overlapped]), 1);
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 4, 0, overlapped]),
+        0
+    );
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+    assert_eq!(rax("UnlockFileEx", &[first, 0, 4, 0, overlapped]), 1);
+    assert_eq!(
+        rax("LockFileEx", &[second, EXCLUSIVE, 0, 4, 0, overlapped]),
+        1
+    );
+    assert_eq!(rax("UnlockFileEx", &[second, 0, 4, 0, overlapped]), 1);
+    assert_eq!(rax("LockFile", &[0xdead, 0, 0, 1, 0]), 0);
+    assert_eq!(rax("CloseHandle", &[first]), 1);
+    assert_eq!(rax("CloseHandle", &[second]), 1);
+}
+
+#[test]
+fn closing_a_guest_file_releases_only_that_handles_locks() {
+    const ERROR_INVALID_HANDLE: u64 = 6;
+    const ERROR_LOCK_VIOLATION: u64 = 33;
+    const CURRENT_PROCESS: u64 = u64::MAX;
+    const DUPLICATE_SAME_ACCESS: u64 = 2;
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call =
+        |symbol: &str, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);
+    let rax =
+        |symbol: &str, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    let first = create_fixture_file(&state, "C:/close-locks.db");
+    let second = create_fixture_file(&state, "C:/close-locks.db");
+    let observer = create_fixture_file(&state, "C:/close-locks.db");
+    let lock = |handle, offset| rax("LockFile", &[handle, offset, 0, 4, 0]);
+    let last_error = || rax("GetLastError", &[]);
+    assert_eq!(lock(first, 0), 1);
+    assert_eq!(lock(second, 4), 1);
+
+    let result = call(
+        "DuplicateHandle",
+        &[
+            CURRENT_PROCESS,
+            first,
+            CURRENT_PROCESS,
+            PROCESS_FIXTURE_OUTPUT,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        ],
+    );
+    assert_eq!(result.execution.final_state.get(Register::Rax), 1);
+    let duplicate = result
+        .image
+        .memory
+        .read_u64(PROCESS_FIXTURE_OUTPUT)
+        .unwrap();
+    assert_ne!(duplicate, first);
+    assert_eq!(rax("CloseHandle", &[duplicate]), 1);
+    assert_eq!(lock(observer, 0), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+
+    assert_eq!(rax("CloseHandle", &[first]), 1);
+    assert_eq!(lock(first, 0), 0);
+    assert_eq!(last_error(), ERROR_INVALID_HANDLE);
+    assert_eq!(lock(observer, 0), 1);
+    assert_eq!(lock(observer, 4), 0);
+    assert_eq!(last_error(), ERROR_LOCK_VIOLATION);
+
+    assert_eq!(rax("CloseHandle", &[second]), 1);
+    assert_eq!(lock(observer, 4), 1);
+    assert_eq!(rax("CloseHandle", &[observer]), 1);
+    let later = create_fixture_file(&state, "C:/close-locks.db");
+    assert_eq!(lock(later, 0), 1);
+    assert_eq!(lock(later, 4), 1);
+    assert_eq!(rax("CloseHandle", &[later]), 1);
+}
+
+#[test]
+fn guest_file_api_mode_disk_space_and_heap_queries() {
+    const ERROR_INVALID_PARAMETER: u64 = 87;
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let call =
+        |symbol: &str, args: &[u64]| call_service_fixture(&state, "kernel32.dll", symbol, args);
+    let rax =
+        |symbol: &str, args: &[u64]| call(symbol, args).execution.final_state.get(Register::Rax);
+    assert_eq!(rax("AreFileApisANSI", &[]), 1);
+    rax("SetFileApisToOEM", &[]);
+    assert_eq!(rax("AreFileApisANSI", &[]), 0);
+    rax("SetFileApisToANSI", &[]);
+    assert_eq!(rax("AreFileApisANSI", &[]), 1);
+
+    let out = PROCESS_FIXTURE_OUTPUT;
+    let space = call("GetDiskFreeSpaceW", &[0, out, out + 8, out + 16, out + 24]);
+    assert_eq!(space.execution.final_state.get(Register::Rax), 1);
+    let memory = &space.image.memory;
+    let field = |offset| memory.read_u32(out + offset).unwrap();
+    let (sectors, bytes, free, total) = (field(0), field(8), field(16), field(24));
+    assert!(sectors > 0 && bytes > 0 && total > 0 && free <= total);
+
+    let heap = rax("GetProcessHeap", &[]);
+    assert_eq!(rax("HeapValidate", &[heap, 0, 0]), 1);
+    assert_eq!(rax("HeapValidate", &[0xdead_0000, 0, 0]), 0);
+    assert_eq!(rax("HeapCompact", &[heap, 0]), 0);
+    assert_eq!(rax("FlushViewOfFile", &[0x1234_0000, 0]), 0);
+    assert_eq!(rax("GetLastError", &[]), ERROR_INVALID_PARAMETER);
 }

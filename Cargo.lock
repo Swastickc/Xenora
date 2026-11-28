@@ -185,6 +185,7 @@ dependencies = [
 name = "xenora-ffi"
 version = "0.1.0"
 dependencies = [
+ "xenora-input",
  "xenora-loader",
  "xenora-metal",
  "xenora-shader",
@@ -193,6 +194,13 @@ dependencies = [
 [[package]]
 name = "xenora-import-gen"
 version = "0.1.0"
+
+[[package]]
+name = "xenora-input"
+version = "0.1.0"
+dependencies = [
+ "xenora-loader",
+]
 
 [[package]]
 name = "xenora-isa"
@@ -243,4 +251,8 @@ dependencies = [
 
 [[package]]
 name = "xenora-texture"
+version = "0.1.0"
+
+[[package]]
+name = "xenora-xaudio2"
 version = "0.1.0"

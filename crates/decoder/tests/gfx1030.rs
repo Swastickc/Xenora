@@ -10,7 +10,7 @@ use xenora_decoder::{
 use xenora_isa::semantics::Signedness;
 use xenora_ref::{
     BranchCondition, CompareSource, CompareWidth, Comparison, Op, ScalarAlu, ScalarImmediate,
-    ScalarUnary, Source, VectorAlu, VectorInteger, VectorUnary,
+    ScalarUnary, Source, VectorAlu, VectorFloat, VectorInteger, VectorUnary,
 };
 
 const FIXTURE: &[u8] = include_bytes!("../../../fixtures/rdna2/add.bin");
@@ -289,7 +289,38 @@ fn decodes_image_sample_lz_and_rejects_malformed_variants() {
                 coord: 2,
                 resource: 0,
                 sampler: 8,
+                dmask: 0xf,
             },
+        }
+    );
+
+    // A nonzero DMASK below 0xf selects a single component (guide Table 41).
+    let single = [0xf09c_0108_u32, 0x0040_0402_u32];
+    let single_bytes: Vec<u8> = single.iter().flat_map(|w| w.to_le_bytes()).collect();
+    assert_eq!(
+        decode(Architecture::Gfx1030, &single_bytes).expect("decode image_sample_lz dmask:0x1")[0]
+            .instruction,
+        Instruction::ImageSampleLz {
+            dst: 4,
+            coord: 2,
+            resource: 0,
+            sampler: 8,
+            dmask: 0x1,
+        }
+    );
+
+    // image_sample_l carries an explicit LOD in a third address VGPR.
+    let sample_l = [0xf090_0f08_u32, 0x0040_0402_u32];
+    let sample_l_bytes: Vec<u8> = sample_l.iter().flat_map(|w| w.to_le_bytes()).collect();
+    assert_eq!(
+        decode(Architecture::Gfx1030, &sample_l_bytes).expect("decode image_sample_l")[0]
+            .instruction,
+        Instruction::ImageSampleL {
+            dst: 4,
+            coord: 2,
+            resource: 0,
+            sampler: 8,
+            dmask: 0xf,
         }
     );
 
@@ -316,8 +347,8 @@ fn decodes_image_sample_lz_and_rejects_malformed_variants() {
         }
     ));
 
-    // 3. Unsupported dmask (dmask != 0xf, e.g. dmask = 0x1)
-    let bad_dmask = [0xf09c_0108_u32, 0x0040_0402_u32];
+    // 3. Unsupported dmask (dmask = 0 selects no component)
+    let bad_dmask = [0xf09c_0008_u32, 0x0040_0402_u32];
     let bad_dmask_bytes: Vec<u8> = bad_dmask.iter().flat_map(|w| w.to_le_bytes()).collect();
     assert!(matches!(
         decode(Architecture::Gfx1030, &bad_dmask_bytes)
@@ -425,6 +456,13 @@ fn reference_scalar(scalar: ScalarSource) -> Source {
 }
 
 fn reference_comparison(op: VectorCompareOp) -> Comparison {
+    if op.semantics().signedness == Signedness::Float {
+        // VOPC binary32 compares (#786): the opcode is the Table 61 offset.
+        return Comparison {
+            offset: op.semantics().opcode as u8,
+            signed: false,
+        };
+    }
     Comparison {
         offset: match op.relation() {
             CompareRelation::Less => 1,
@@ -435,6 +473,7 @@ fn reference_comparison(op: VectorCompareOp) -> Comparison {
             CompareRelation::GreaterOrEqual => 6,
             CompareRelation::False => 0,
             CompareRelation::True => 7,
+            relation => panic!("integer compare with float relation {relation:?}"),
         },
         signed: op.signed(),
     }
@@ -510,6 +549,10 @@ fn reference_op(instruction: Instruction) -> Op {
                 VectorUnaryOp::FfbhU32 => VectorUnary::FindFirstOneFromMsb,
                 VectorUnaryOp::FfblB32 => VectorUnary::FindFirstOneFromLsb,
                 VectorUnaryOp::FfbhI32 => VectorUnary::FindSignChange,
+                VectorUnaryOp::TruncF32 => VectorUnary::Truncate,
+                VectorUnaryOp::CeilF32 => VectorUnary::Ceiling,
+                VectorUnaryOp::RndneF32 => VectorUnary::RoundNearestEven,
+                VectorUnaryOp::FloorF32 => VectorUnary::Floor,
             },
             dst,
             match src {
@@ -596,6 +639,18 @@ fn reference_op(instruction: Instruction) -> Op {
                 ScalarUnaryOp::SextI32I8 => ScalarUnary::SignExtendByte,
                 ScalarUnaryOp::SextI32I16 => ScalarUnary::SignExtendShort,
                 ScalarUnaryOp::AbsI32 => ScalarUnary::Absolute,
+                ScalarUnaryOp::AndSaveExecB32 => ScalarUnary::AndSaveExec,
+                ScalarUnaryOp::OrSaveExecB32 => ScalarUnary::OrSaveExec,
+                ScalarUnaryOp::XorSaveExecB32 => ScalarUnary::XorSaveExec,
+                ScalarUnaryOp::Andn2SaveExecB32 => ScalarUnary::Andn2SaveExec,
+                ScalarUnaryOp::Orn2SaveExecB32 => ScalarUnary::Orn2SaveExec,
+                ScalarUnaryOp::NandSaveExecB32 => ScalarUnary::NandSaveExec,
+                ScalarUnaryOp::NorSaveExecB32 => ScalarUnary::NorSaveExec,
+                ScalarUnaryOp::XnorSaveExecB32 => ScalarUnary::XnorSaveExec,
+                ScalarUnaryOp::Andn1SaveExecB32 => ScalarUnary::Andn1SaveExec,
+                ScalarUnaryOp::Orn1SaveExecB32 => ScalarUnary::Orn1SaveExec,
+                ScalarUnaryOp::Andn1WrexecB32 => ScalarUnary::Andn1Wrexec,
+                ScalarUnaryOp::Andn2WrexecB32 => ScalarUnary::Andn2Wrexec,
             };
             Op::ScalarUnary(unary, dst, src)
         }
@@ -676,16 +731,36 @@ fn reference_op(instruction: Instruction) -> Op {
             src0,
             src1,
         ),
-        Instruction::VectorAddF32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::FloatAdd, dst, src0, src1)
-        }
-        Instruction::VectorMulF32 { dst, src0, src1 } => {
-            Op::Vector(VectorAlu::FloatMultiply, dst, src0, src1)
-        }
-        Instruction::Export { .. }
-        | Instruction::Interpolate { .. }
-        | Instruction::ImageSampleLz { .. } => {
-            panic!("compute reference matrix received a graphics/image instruction")
+        Instruction::ImageSampleLz {
+            dst,
+            coord,
+            resource,
+            sampler,
+            dmask,
+        } => Op::ImageSample {
+            dst,
+            coord,
+            resource,
+            sampler,
+            dmask,
+            explicit_lod: false,
+        },
+        Instruction::ImageSampleL {
+            dst,
+            coord,
+            resource,
+            sampler,
+            dmask,
+        } => Op::ImageSample {
+            dst,
+            coord,
+            resource,
+            sampler,
+            dmask,
+            explicit_lod: true,
+        },
+        Instruction::Export { .. } | Instruction::Interpolate { .. } => {
+            panic!("compute reference matrix received a graphics instruction")
         }
 
         Instruction::VectorCompare { op, src0, src1 } => {
@@ -697,6 +772,9 @@ fn reference_op(instruction: Instruction) -> Op {
             };
             match op.semantics().width {
                 16 => Op::WideCompare(comparison, CompareWidth::Half, src0, src1),
+                32 if op.semantics().signedness == Signedness::Float => {
+                    Op::WideCompare(comparison, CompareWidth::Binary32, src0, src1)
+                }
                 32 => Op::Compare(comparison, src0, src1),
                 64 => Op::WideCompare(comparison, CompareWidth::Double, src0, src1),
                 width => panic!("unexpected VOPC operand width {width}"),
@@ -711,6 +789,34 @@ fn reference_op(instruction: Instruction) -> Op {
             sdst,
             reference_comparison(op.base()),
             CompareSource::Vector(src0),
+            src1,
+        ),
+        Instruction::VectorAlu {
+            op:
+                op @ (VectorAluOp::AddF32
+                | VectorAluOp::SubF32
+                | VectorAluOp::SubrevF32
+                | VectorAluOp::MulF32
+                | VectorAluOp::MinF32
+                | VectorAluOp::MaxF32),
+            dst,
+            src0,
+            src1,
+        } => Op::VectorFloat(
+            match op {
+                VectorAluOp::AddF32 => VectorFloat::Add,
+                VectorAluOp::SubF32 => VectorFloat::Subtract,
+                VectorAluOp::SubrevF32 => VectorFloat::SubtractReverse,
+                VectorAluOp::MulF32 => VectorFloat::Multiply,
+                VectorAluOp::MinF32 => VectorFloat::Minimum,
+                _ => VectorFloat::Maximum,
+            },
+            dst,
+            match src0 {
+                VectorSource::Register(reg) => CompareSource::Vector(reg),
+                VectorSource::Scalar(reg) => CompareSource::Scalar(reg),
+                VectorSource::Immediate(bits) => CompareSource::Immediate(bits),
+            },
             src1,
         ),
         Instruction::VectorAlu {
@@ -791,6 +897,38 @@ fn scalar_buffer_load_operands_are_checked_when_decoding() {
 }
 
 #[test]
+fn displays_single_component_image_destination_like_llvm() {
+    // llvm-mc prints a one-component VDATA as `v5`, not `v[5:5]`; a multi-
+    // component mask keeps the range form.
+    for (fixture, expected) in [
+        (
+            &include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask1.bin")[..],
+            "image_sample_lz v5, v[2:3], s[8:15], s[16:19] dmask:0x1 dim:SQ_RSRC_IMG_2D",
+        ),
+        (
+            &include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmaskf.bin")[..],
+            "image_sample_lz v[5:8], v[2:3], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D",
+        ),
+        (
+            &include_bytes!("../../../fixtures/rdna2/image-sample-l-lod0.bin")[..],
+            "image_sample_l v[5:8], v[2:4], s[8:15], s[16:19] dmask:0xf dim:SQ_RSRC_IMG_2D",
+        ),
+    ] {
+        let decoded = decode(Architecture::Gfx1030, fixture).unwrap();
+        let image = decoded
+            .iter()
+            .find(|instruction| {
+                instruction
+                    .instruction
+                    .mnemonic()
+                    .starts_with("image_sample")
+            })
+            .expect("image sample instruction");
+        assert_eq!(image.instruction.to_string(), expected);
+    }
+}
+
+#[test]
 #[ignore = "requires LLVM with the gfx1030 AMDGPU target"]
 fn compares_fixture_instructions_against_llvm() {
     let high_registers: &[u8] = &[
@@ -810,6 +948,7 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/scalar-logic.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/scalar-saveexec.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-arith.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-immediate.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-integer.bin"),
@@ -817,17 +956,26 @@ fn compares_fixture_instructions_against_llvm() {
         include_bytes!("../../../fixtures/rdna2/vector-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare-ft.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-unary.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-round.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-f32.bin"),
         include_bytes!("../../../fixtures/rdna2/vector-compare-16.bin"),
+        include_bytes!("../../../fixtures/rdna2/vector-compare-f32.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-integer.bin"),
         include_bytes!("../../../fixtures/rdna2/vop3-compare.bin"),
         include_bytes!("../../../fixtures/rdna2/scalar-memory.bin"),
         include_bytes!("../../../fixtures/rdna2/runtime-branch.bin"),
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask1.bin"),
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask8.bin"),
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmask5.bin"),
+        include_bytes!("../../../fixtures/rdna2/image-sample-lz-dmaskf.bin"),
+        include_bytes!("../../../fixtures/rdna2/image-sample-l-lod0.bin"),
+        include_bytes!("../../../fixtures/rdna2/image-sample-l-lod1.bin"),
         high_registers,
         &matrix,
     ] {
         count += compare_against_llvm(fixture, &mut forms);
     }
-    assert_eq!(forms.len(), 172, "forms compared: {forms:?}");
+    assert_eq!(forms.len(), 210, "forms compared: {forms:?}");
     eprintln!(
         "{count} three-way instruction comparisons across {} forms",
         forms.len()
@@ -923,6 +1071,22 @@ fn assemble_matrix() -> Vec<u8> {
                 writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, {src0}, v128").unwrap();
             }
             writeln!(assembly, "v_cmp_{relation}_{kind}_e32 vcc_lo, v1, v255").unwrap();
+        }
+    }
+    // Every binary32 rounding form with each accepted SRC0 class: VGPRs at both
+    // ends, SGPRs at both ends, vcc_lo and a literal (no integer inline).
+    for name in ["trunc", "ceil", "rndne", "floor"] {
+        for src0 in ["v255", "v0", "s0", "s105", "vcc_lo", "0x80000001"] {
+            writeln!(assembly, "v_{name}_f32_e32 v128, {src0}").unwrap();
+        }
+    }
+    // Every VOP2 binary32 form with each accepted SRC0 class (no integer
+    // inline) and VSRC1 at both ends.
+    for name in ["add", "sub", "subrev", "mul", "min", "max"] {
+        for src0 in ["v255", "v0", "s0", "s105", "vcc_lo", "0x80000001"] {
+            for vsrc1 in ["v0", "v255"] {
+                writeln!(assembly, "v_{name}_f32_e32 v128, {src0}, {vsrc1}").unwrap();
+            }
         }
     }
     // Every SOPK compare on the lowest and highest readable SGPR.

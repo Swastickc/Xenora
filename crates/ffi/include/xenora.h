@@ -66,6 +66,96 @@ typedef struct {
     uint16_t right_trigger;
 } xenora_controller_input;
 
+/* Controller snapshot in public XInput units for guest runtime services.
+ * Trigger values span 0 to 255. `connected` must be 0 or 1, `features` may
+ * contain only XENORA_XINPUT_FEATURE_* bits and reserved bytes must be zero.
+ * Unlike xenora_controller_input, this carries both thumbsticks
+ * and uses the public XInput button bit assignments directly.
+ */
+typedef struct {
+    uint16_t buttons;
+    uint8_t left_trigger;
+    uint8_t right_trigger;
+    int16_t left_x;
+    int16_t left_y;
+    int16_t right_x;
+    int16_t right_y;
+    uint8_t connected;
+    uint8_t features;
+    uint8_t reserved[2];
+} xenora_xinput_state;
+
+#define XENORA_XINPUT_FEATURE_VIBRATION 0x01u
+
+#define XENORA_XINPUT_BATTERY_STATE_UNKNOWN 0u
+#define XENORA_XINPUT_BATTERY_STATE_DISCHARGING 1u
+#define XENORA_XINPUT_BATTERY_STATE_CHARGING 2u
+#define XENORA_XINPUT_BATTERY_STATE_FULL 3u
+#define XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN 255u
+
+/* Host battery evidence for one XInput controller. present=0 means the host
+ * exposed no battery object and requires zero state/level. For a present
+ * object, level is 0..100 or XENORA_XINPUT_BATTERY_LEVEL_UNKNOWN. Charging
+ * state is host evidence only and is never battery chemistry.
+ */
+typedef struct {
+    uint8_t present;
+    uint8_t state;
+    uint8_t level;
+    uint8_t reserved;
+} xenora_xinput_battery;
+
+/* Latest vibration command accepted from the guest. When `connected` is zero,
+ * sequence and motor values are zero and the host must stop actuators. When
+ * `enabled` is zero the motor values are registered but must not actuate;
+ * output stops until XInput reporting is re-enabled. The sequence increments
+ * for every accepted command while the virtual slot stays connected. Reserved
+ * bytes are zero in output written by this library.
+ */
+typedef struct {
+    uint32_t sequence;
+    uint16_t left_motor;
+    uint16_t right_motor;
+    uint8_t connected;
+    uint8_t enabled;
+    uint8_t reserved[2];
+} xenora_xinput_vibration;
+
+/* Host input router (Campaign F). Each session owns one router; see
+ * docs/coordination/input-campaign.md. Times are host milliseconds from any
+ * monotonic origin. */
+#define XENORA_INPUT_MODE_AUTOMATIC 0u
+#define XENORA_INPUT_MODE_KEYBOARD_MOUSE_ONLY 1u
+#define XENORA_INPUT_MODE_PHYSICAL_ONLY 2u
+#define XENORA_INPUT_MODE_COMBINED 3u
+#define XENORA_INPUT_MODE_LAST_ACTIVE 4u
+#define XENORA_INPUT_MODE_EXPLICIT 5u
+
+#define XENORA_CONTROLLER_FAMILY_XBOX_SERIES 0u
+#define XENORA_CONTROLLER_FAMILY_XBOX_ONE 1u
+#define XENORA_CONTROLLER_FAMILY_XBOX_ELITE 2u
+#define XENORA_CONTROLLER_FAMILY_DUALSHOCK4 3u
+#define XENORA_CONTROLLER_FAMILY_DUALSENSE 4u
+#define XENORA_CONTROLLER_FAMILY_SWITCH_PRO 5u
+#define XENORA_CONTROLLER_FAMILY_GENERIC_EXTENDED 6u
+#define XENORA_CONTROLLER_FAMILY_MICRO 7u
+
+/* Raw GameController values for one physical controller. `elements` holds
+ * xenora_input positional element bits; sticks are -1..1 with Y up; triggers
+ * 0..1. `features` may contain only XENORA_XINPUT_FEATURE_VIBRATION; reserved
+ * bytes must be zero. */
+typedef struct {
+    uint32_t elements;
+    float left_x;
+    float left_y;
+    float right_x;
+    float right_y;
+    float left_trigger;
+    float right_trigger;
+    uint8_t features;
+    uint8_t reserved[3];
+} xenora_controller_raw;
+
 #define XENORA_INPUT_NONE     0u
 #define XENORA_INPUT_RIGHT    (1u << 0)
 #define XENORA_INPUT_LEFT     (1u << 1)
@@ -73,6 +163,23 @@ typedef struct {
 #define XENORA_INPUT_DOWN     (1u << 3)
 #define XENORA_INPUT_ACTION_A (1u << 4)
 #define XENORA_INPUT_ACTION_B (1u << 5)
+
+/* Public XInput button bit assignments carried by xenora_xinput_state. */
+#define XENORA_XINPUT_GAMEPAD_DPAD_UP 0x0001u
+#define XENORA_XINPUT_GAMEPAD_DPAD_DOWN 0x0002u
+#define XENORA_XINPUT_GAMEPAD_DPAD_LEFT 0x0004u
+#define XENORA_XINPUT_GAMEPAD_DPAD_RIGHT 0x0008u
+#define XENORA_XINPUT_GAMEPAD_START 0x0010u
+#define XENORA_XINPUT_GAMEPAD_BACK 0x0020u
+#define XENORA_XINPUT_GAMEPAD_LEFT_THUMB 0x0040u
+#define XENORA_XINPUT_GAMEPAD_RIGHT_THUMB 0x0080u
+#define XENORA_XINPUT_GAMEPAD_LEFT_SHOULDER 0x0100u
+#define XENORA_XINPUT_GAMEPAD_RIGHT_SHOULDER 0x0200u
+#define XENORA_XINPUT_GAMEPAD_GUIDE 0x0400u
+#define XENORA_XINPUT_GAMEPAD_A 0x1000u
+#define XENORA_XINPUT_GAMEPAD_B 0x2000u
+#define XENORA_XINPUT_GAMEPAD_X 0x4000u
+#define XENORA_XINPUT_GAMEPAD_Y 0x8000u
 
 /* Size of the frame drawn by the trusted fixture: RGBA8, rows top to bottom. */
 #define XENORA_FIXTURE_FRAME_WIDTH 4u
@@ -124,6 +231,148 @@ xenora_status xenora_session_start_frame_loop(xenora_session session, uint32_t f
 xenora_status xenora_session_start_interactive_loop(xenora_session session, uint32_t frame_count);
 xenora_status xenora_session_send_input(xenora_session session, const xenora_input_state *input);
 xenora_status xenora_session_send_controller_input(xenora_session session, const xenora_controller_input *input);
+/* Install or remove a full XInput-unit controller snapshot for user_index 0-3
+ * in the running frame loop's guest runtime services. The legacy fixture input
+ * above is not changed. Returns XENORA_INVALID_ARGUMENT for an invalid index,
+ * connected value, feature bits or reserved bytes, and XENORA_INVALID_STATE when no loop runs.
+ */
+xenora_status xenora_session_send_xinput_state(xenora_session session, uint32_t user_index, const xenora_xinput_state *input);
+/* Atomically replace one XInput snapshot and its latest battery evidence. */
+xenora_status xenora_session_send_xinput_state_with_battery(
+    xenora_session session,
+    uint32_t user_index,
+    const xenora_xinput_state *input,
+    const xenora_xinput_battery *battery);
+/* Poll the latest vibration command for user_index 0-3 without consuming it.
+ * A disconnected slot succeeds with a zeroed disconnected command so the host
+ * can stop output. Returns XENORA_INVALID_STATE when no loop runs.
+ */
+xenora_status xenora_session_poll_xinput_vibration(xenora_session session, uint32_t user_index, xenora_xinput_vibration *output);
+
+/*
+ * Host input router. Every session owns one router, which turns the host's
+ * keyboard, mouse and controller events into the four XInput-unit gamepad
+ * snapshots the runtime services carry. The routing rules are Xenora host
+ * policy, described in docs/coordination/input-campaign.md.
+ */
+
+/* Choose the routing mode of the session's input router: which host sources
+ * fill which XInput slot. `mode` is one of the XENORA_INPUT_MODE_* values.
+ * Returns XENORA_OK, XENORA_INVALID_ARGUMENT for any other mode value, or
+ * XENORA_INVALID_HANDLE for a handle that names no live session. */
+xenora_status xenora_session_input_set_mode(xenora_session session, uint32_t mode);
+
+/* Record a key press or a key release in the session's input router.
+ * `key_code` is a physical macOS virtual key code and may not exceed 0x7F;
+ * `down` is 1 for a press and 0 for a release; `time_ms` is the host time in
+ * milliseconds. When `out_consumed` is not null it receives 1 when the router
+ * took the key and 0 when it did not, which happens for a key with no binding
+ * and while the router is unfocused. Returns XENORA_OK,
+ * XENORA_INVALID_ARGUMENT for a key code above 0x7F or a `down` value that is
+ * neither 0 nor 1, or XENORA_INVALID_HANDLE for a handle that names no live
+ * session. */
+xenora_status xenora_session_input_key(xenora_session session, uint16_t key_code, uint8_t down, uint64_t time_ms, uint8_t *out_consumed);
+
+/* Record a mouse motion in the session's input router. `dx` and `dy` are the
+ * motion deltas in points, with a positive x pointing right and a positive y
+ * pointing down; `time_ms` is the host time in milliseconds. Returns
+ * XENORA_OK, XENORA_INVALID_ARGUMENT for a delta that is not a number, or
+ * XENORA_INVALID_HANDLE for a handle that names no live session. */
+xenora_status xenora_session_input_mouse_motion(xenora_session session, double dx, double dy, uint64_t time_ms);
+
+/* Record a mouse button press or release in the session's input router.
+ * `button` is the AppKit button number and may not exceed 31; `down` is 1 for
+ * a press and 0 for a release; `time_ms` is the host time in milliseconds.
+ * When `out_consumed` is not null it receives 1 when the router took the
+ * button and 0 when it did not, which happens for a button with no binding
+ * and while the router is unfocused. Returns XENORA_OK,
+ * XENORA_INVALID_ARGUMENT for a button number above 31 or a `down` value that
+ * is neither 0 nor 1, or XENORA_INVALID_HANDLE for a handle that names no
+ * live session. */
+xenora_status xenora_session_input_mouse_button(xenora_session session, uint8_t button, uint8_t down, uint64_t time_ms, uint8_t *out_consumed);
+
+/* Set or clear the focus of the session's input router. `focused` is 1 while
+ * the host window has the focus and 0 while it does not. Losing the focus
+ * releases every key and every button and neutralizes every connected
+ * device; the router then refuses input until the focus returns. Returns
+ * XENORA_OK, XENORA_INVALID_ARGUMENT for a `focused` value that is neither 0
+ * nor 1, or XENORA_INVALID_HANDLE for a handle that names no live session. */
+xenora_status xenora_session_input_focus(xenora_session session, uint8_t focused);
+
+/* Connect a physical controller to the session's input router. `device_id` is
+ * the stable host identifier of the controller and `family` is one of the
+ * XENORA_CONTROLLER_FAMILY_* values, naming the profile the device starts
+ * with. `out_slot` receives the XInput slot the device occupies; a device
+ * that is already connected keeps its slot and its profile. Returns
+ * XENORA_OK, XENORA_INVALID_ARGUMENT for an unknown family or a null
+ * `out_slot`, XENORA_LIMIT_EXCEEDED when the router already tracks four
+ * devices, or XENORA_INVALID_HANDLE for a handle that names no live session.
+ * The slot is not written when the call fails. */
+xenora_status xenora_session_input_connect_device(xenora_session session, uint64_t device_id, uint32_t family, uint32_t *out_slot);
+
+/* Disconnect a physical controller from the session's input router.
+ * `device_id` is the stable host identifier of the controller. The device
+ * keeps no state: a device that connects again starts neutral. Returns
+ * XENORA_OK, XENORA_INVALID_ARGUMENT for a device the router does not track,
+ * or XENORA_INVALID_HANDLE for a handle that names no live session. */
+xenora_status xenora_session_input_disconnect_device(xenora_session session, uint64_t device_id);
+
+/* Replace the profile of a connected physical controller. `text` holds
+ * `length` bytes of the versioned profile text format described in
+ * docs/coordination/input-campaign.md; the text may not be longer than 16
+ * KiB. The new profile replaces the one the device started with. Returns
+ * XENORA_OK, XENORA_INVALID_ARGUMENT for a null pointer, a text longer than
+ * 16 KiB, text that is not valid UTF-8, text that is not a valid profile, or
+ * a device the router does not track, or XENORA_INVALID_HANDLE for a handle
+ * that names no live session. */
+xenora_status xenora_session_input_set_device_profile(xenora_session session, uint64_t device_id, const uint8_t *text, uint64_t length);
+
+/* Record the raw reading of a connected physical controller. `raw` holds the
+ * elements, the stick axes and the trigger values the host reports, and the
+ * device's profile translates them into the public XInput units. `battery`
+ * holds the latest battery evidence and may be null when the host reported no
+ * battery object; `time_ms` is the host time in milliseconds. Returns
+ * XENORA_OK, XENORA_INVALID_ARGUMENT for a null `raw`, a feature bit the
+ * interface does not know, a reserved byte that is not zero, a battery that is
+ * not a valid wire shape, or a device the router does not track, or
+ * XENORA_INVALID_HANDLE for a handle that names no live session. A reading
+ * that arrives while the router is unfocused is ignored and the call still
+ * succeeds. */
+xenora_status xenora_session_input_device_raw(xenora_session session, uint64_t device_id, const xenora_controller_raw *raw, const xenora_xinput_battery *battery, uint64_t time_ms);
+
+/* Read the four XInput slots of the session's input router. `out_slots`
+ * receives four xenora_xinput_state entries, one per slot. A slot with a
+ * source reads as connected and carries that source's buttons, triggers and
+ * axes; a slot without one reads as disconnected and zeroed. The vibration
+ * bit and the battery evidence follow the slot's own device in the automatic
+ * and the physical-only modes. Returns XENORA_OK, XENORA_INVALID_ARGUMENT for
+ * a null `out_slots`, or XENORA_INVALID_HANDLE for a handle that names no
+ * live session. */
+xenora_status xenora_session_input_snapshot(xenora_session session, uint64_t time_ms, xenora_xinput_state *out_slots /* 4 entries */);
+
+/* Publish the four XInput slots of the session's input router into the
+ * running frame loop. `time_ms` is the host time in milliseconds. Every slot
+ * is installed with the router's snapshot for it and with the battery
+ * evidence of the device that owns it, so a slot without a device is
+ * published as disconnected. Returns XENORA_OK, XENORA_INVALID_STATE when no
+ * frame loop runs in the session, XENORA_INTERNAL_ERROR when the running loop
+ * refuses a slot, or XENORA_INVALID_HANDLE for a handle that names no live
+ * session. */
+xenora_status xenora_session_input_publish(xenora_session session, uint64_t time_ms);
+
+/* Recognize a controller family from what GameController reports.
+ * `category` is the UTF-8 `productCategory` (up to 256 bytes, may be empty);
+ * `extended` is 1 for an extended gamepad; `has_paddles` and `has_share` are
+ * 1 when the GCXboxGamepad paddle or Share buttons exist. Every flag must be
+ * 0 or 1. Writes one XENORA_CONTROLLER_FAMILY_* value. Matching is exact; a
+ * category without a documented constant is the generic extended family. */
+xenora_status xenora_controller_recognize(
+    const uint8_t *category,
+    uint64_t length,
+    uint8_t extended,
+    uint8_t has_paddles,
+    uint8_t has_share,
+    uint32_t *out_family);
 xenora_status xenora_session_queue_input(xenora_session session, const xenora_input_state *input);
 xenora_status xenora_session_pause_frame_loop(xenora_session session);
 xenora_status xenora_session_resume_frame_loop(xenora_session session);
@@ -153,6 +402,24 @@ xenora_status xenora_session_frame_loop_status(
     uint32_t *out_frame_id,
     uint8_t *out_rgba,
     uint64_t capacity);
+
+/*
+ * Read the verified guest journal once a frame loop has cleanly finished or
+ * stopped. Each byte records one completed frame. The low two bits hold
+ * the column. Standard mode uses 0x10; interactive neutral, right and left
+ * use 0x20, 0x24 and 0x28 respectively, before adding the column.
+ *
+ * out_required is mandatory. Query with NULL out_records and zero capacity.
+ * An insufficient buffer returns XENORA_BUFFER_TOO_SMALL, reports the full
+ * size and leaves out_records unchanged. A verified empty journal returns
+ * XENORA_OK with size zero. No finalized journal returns XENORA_INVALID_STATE
+ * and size zero. The maximum size is XENORA_FRAME_LOOP_MAX_FRAMES bytes.
+ */
+xenora_status xenora_session_frame_loop_journal(
+    xenora_session session,
+    uint8_t *out_records,
+    uint64_t capacity,
+    uint64_t *out_required);
 
 /* Largest file xenora_inspect_executable accepts, in bytes. */
 #define XENORA_MAX_INSPECT_BYTES 268435456u
@@ -245,6 +512,10 @@ enum {
 
 /*
  * Initialize the audio subsystem for a session.
+ *
+ * Reinitialization discards queued PCM and resets the underrun count. The
+ * volume, mute state and cumulative submitted-byte count are preserved. The
+ * new sample rate, channel count and format take effect immediately.
  */
 xenora_status xenora_session_audio_init(
     xenora_session session,
@@ -256,6 +527,11 @@ xenora_status xenora_session_audio_init(
 /*
  * Submit PCM audio bytes into the session audio queue.
  * byte_count must contain a whole number of interleaved sample frames.
+ *
+ * The queue stores raw PCM and keeps at most the newest 256 KiB. An oversized
+ * submission discards its oldest bytes and enough older queued bytes to fit.
+ * The submitted-byte count includes discarded bytes. Gain and mute are applied
+ * when frames are read or rendered, not when they are submitted.
  */
 xenora_status xenora_session_audio_submit(
     xenora_session session,
@@ -266,6 +542,10 @@ xenora_status xenora_session_audio_submit(
 /*
  * Read PCM audio bytes from the session audio queue.
  * Only whole frames are returned. Any remaining output bytes are untouched.
+ *
+ * The current volume and mute state are applied to the returned frames. Muted
+ * frames still count as read. Frames queued before a control change use the
+ * setting in effect when they are read.
  */
 xenora_status xenora_session_audio_read(
     xenora_session session,
@@ -277,6 +557,9 @@ xenora_status xenora_session_audio_read(
 /*
  * Fill one playback block with whole frames, padding a shortfall with silence.
  * out_source_bytes reports how much PCM was supplied before padding.
+ *
+ * Current volume and mute are applied to supplied frames. Muted frames count
+ * as supplied; a shortfall still increments the underrun count.
  */
 xenora_status xenora_session_audio_render(
     xenora_session session,
@@ -287,6 +570,8 @@ xenora_status xenora_session_audio_render(
 
 /*
  * Query queued bytes, render calls that ran short, and total bytes submitted.
+ * The queued count is raw PCM. The total includes bytes discarded by the
+ * retention bound or by reinitialization.
  */
 xenora_status xenora_session_audio_status(
     xenora_session session,
@@ -297,6 +582,9 @@ xenora_status xenora_session_audio_status(
 
 /*
  * Set audio volume (0.0 to 1.0) and mute state (non-zero = muted).
+ *
+ * The setting applies to the next read or render, including frames already
+ * queued. Volume and mute are preserved across reinitialization.
  */
 xenora_status xenora_session_audio_set_volume(
     xenora_session session,

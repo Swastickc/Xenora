@@ -7,7 +7,7 @@
 //! guest services without exposing raw host function pointers.
 
 use crate::cpu::{CpuState, ExitReason, Register};
-use crate::import_table::{ImportName, ImportTableError, MAX_NAME_LEN, parse_imports};
+use crate::import_table::{ImportKind, ImportName, ImportTableError, MAX_NAME_LEN, parse_imports};
 use crate::memory::{GuestMemory, MemoryError};
 use crate::pe::ParsedPe;
 use std::collections::HashMap;
@@ -133,6 +133,28 @@ pub type ServiceHandler = Box<
     dyn Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason> + Send + Sync,
 >;
 
+/// The guest-visible value written for one import slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotBinding {
+    /// A dispatch trampoline the engine intercepts before execution.
+    Function {
+        trampoline: u64,
+        service_index: usize,
+    },
+    /// The address of a service-owned variable cell.
+    Data { address: u64, service_index: usize },
+}
+
+impl SlotBinding {
+    /// The eight-byte value stored in the import slot.
+    pub fn address(self) -> u64 {
+        match self {
+            Self::Function { trampoline, .. } => trampoline,
+            Self::Data { address, .. } => address,
+        }
+    }
+}
+
 /// Provider of the guest address of a data import's variable cell. The CRT
 /// variables live behind the same state the modern accessors use, so the
 /// provider allocates or finds the cell through it; the address is stable
@@ -161,9 +183,37 @@ impl ServiceStatus {
 /// Registration entry for an imported symbol.
 pub struct ServiceDescriptor {
     pub module: String,
+    /// Display form of the canonical symbol. Use [`Self::kind`] together with
+    /// this field for identity: a name spelled `Ordinal#7` and ordinal 7 have
+    /// the same display form but are different imports.
     pub symbol: String,
+    /// Whether the canonical registration key is a symbolic name or an ordinal.
+    pub kind: ImportKind,
     pub handler: ServiceHandler,
     pub status: ServiceStatus,
+    /// Whether the status came from an explicit status argument or a later
+    /// [`ImportRegistry::set_status`] call. [`ImportRegistry::register`] uses
+    /// `implemented` as its default and leaves this false so audits can tell
+    /// that default apart from a reviewed status.
+    pub status_explicit: bool,
+    /// Whether binding writes the address of a data cell rather than a dispatch
+    /// trampoline. This metadata does not change how a function is dispatched.
+    pub data_import: bool,
+}
+
+impl ServiceDescriptor {
+    /// Reconstruct the exact typed canonical import key for this descriptor.
+    pub fn import_name(&self) -> ImportName {
+        match self.kind {
+            ImportKind::Name => ImportName::Name(self.symbol.clone()),
+            ImportKind::Ordinal => ImportName::Ordinal(
+                self.symbol
+                    .strip_prefix("Ordinal#")
+                    .and_then(|digits| digits.parse::<u16>().ok())
+                    .expect("ordinal descriptor symbol"),
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -303,6 +353,10 @@ pub struct ImportRegistry {
     data_providers: HashMap<usize, DataProvider>,
     dynamic_trampolines: DynamicTrampolines,
     trampoline_to_service: HashMap<u64, usize>, // Trampoline VA -> service_index
+    /// Module identity/export catalog owned by this service registry. Kernel32
+    /// initializes its built-in portion during service registration; the
+    /// dynamic half is crate-internal and per registry, not process-global.
+    pub(crate) module_catalog: crate::services::modules::ModuleCatalog,
 }
 
 impl Default for ImportRegistry {
@@ -323,6 +377,7 @@ impl ImportRegistry {
             data_providers: HashMap::new(),
             trampoline_to_service: HashMap::new(),
             dynamic_trampolines: DynamicTrampolines::default(),
+            module_catalog: crate::services::modules::ModuleCatalog::default(),
         }
     }
 
@@ -404,12 +459,31 @@ impl ImportRegistry {
         self.service_index(module, symbol).is_some()
     }
 
+    /// Check whether an exact typed import key has a binding. Unlike
+    /// [`Self::has_binding`], this preserves the distinction between an ordinal
+    /// and a named export that happens to be spelled like an ordinal.
+    pub fn has_binding_key(&self, module: &str, name: &ImportName) -> bool {
+        self.index(module, name).is_some()
+    }
+
     /// Register a host-provided guest service under a name or an ordinal.
+    /// The caller passes a status explicitly, so it is marked as such.
     pub fn try_register(
         &mut self,
         module: &str,
         name: ImportName,
         status: ServiceStatus,
+        handler: ServiceHandler,
+    ) -> Result<(), RegistryError> {
+        self.try_register_inner(module, name, status, true, handler)
+    }
+
+    fn try_register_inner(
+        &mut self,
+        module: &str,
+        name: ImportName,
+        status: ServiceStatus,
+        status_explicit: bool,
         handler: ServiceHandler,
     ) -> Result<(), RegistryError> {
         Self::check_key(module, &name)?;
@@ -424,14 +498,21 @@ impl ImportRegistry {
         self.handlers.push(ServiceDescriptor {
             module: key.0.clone(),
             symbol: key.1.to_string(),
+            kind: key.1.kind(),
             handler,
             status,
+            status_explicit,
+            data_import: false,
         });
         self.services.insert(key, index);
         Ok(())
     }
 
     /// Register a named service.
+    ///
+    /// The status defaults to `implemented` and is marked as implicit. Use
+    /// [`Self::register_with_status`] or [`Self::set_status`] to record a
+    /// reviewed status.
     ///
     /// # Panics
     ///
@@ -444,13 +525,39 @@ impl ImportRegistry {
             + Sync
             + 'static,
     {
-        self.register_with_status(module, symbol, ServiceStatus::Implemented, handler);
+        self.register_inner(module, symbol, ServiceStatus::Implemented, false, handler);
+    }
+
+    fn register_inner<F>(
+        &mut self,
+        module: &str,
+        symbol: &str,
+        status: ServiceStatus,
+        status_explicit: bool,
+        handler: F,
+    ) where
+        F: Fn(&Win64Args, &mut CpuState, &mut GuestMemory) -> Result<u64, ExitReason>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let name = ImportName::Name(symbol.to_owned());
+        if let Err(error) =
+            self.try_register_inner(module, name, status, status_explicit, Box::new(handler))
+        {
+            panic!("{error}");
+        }
     }
 
     /// Describe the canonical binding behind an import without calling it.
     pub fn binding(&self, module: &str, symbol: &str) -> Option<&ServiceDescriptor> {
         self.service_index(module, symbol)
             .map(|index| &self.handlers[index])
+    }
+
+    /// Resolve an exact typed import key to its service descriptor.
+    pub fn binding_key(&self, module: &str, name: &ImportName) -> Option<&ServiceDescriptor> {
+        self.index(module, name).map(|index| &self.handlers[index])
     }
 
     /// Iterate all canonical registered (module, symbol, status) tuples.
@@ -461,6 +568,24 @@ impl ImportRegistry {
         self.handlers
             .iter()
             .map(|d| (d.module.as_str(), d.symbol.as_str(), d.status))
+    }
+
+    /// Iterate every canonical service descriptor exactly once. Unlike
+    /// [`Self::iter_registered`], this exposes the descriptor's metadata, including
+    /// whether its status was explicit.
+    pub fn iter_service_descriptors(&self) -> impl Iterator<Item = &ServiceDescriptor> {
+        self.handlers.iter()
+    }
+
+    /// Iterate every key that can resolve an import: canonical keys, named
+    /// cross-module aliases, same-module aliases and ordinal aliases. The
+    /// descriptor is the canonical service the key resolves to.
+    pub fn iter_resolution_keys(
+        &self,
+    ) -> impl Iterator<Item = (&str, &ImportName, &ServiceDescriptor)> {
+        self.services
+            .iter()
+            .map(|((module, name), &index)| (module.as_str(), name, &self.handlers[index]))
     }
 
     /// Return (alias_module_lowercase, symbol) pairs that resolve to a canonical handler
@@ -490,6 +615,7 @@ impl ImportRegistry {
             .service_index(module, symbol)
             .expect("registered service");
         self.handlers[index].status = status;
+        self.handlers[index].status_explicit = true;
     }
 
     /// Register a named service with an explicit implementation status.
@@ -588,7 +714,48 @@ impl ImportRegistry {
         let index = self
             .service_index(module, symbol)
             .expect("registered data service");
+        self.handlers[index].data_import = true;
         self.data_providers.insert(index, Box::new(provider));
+    }
+
+    /// Bind one import slot to the service registered for `module` and `name`.
+    ///
+    /// This is the single-slot form used by the multi-module startup path,
+    /// where in-package exports and host services share one image's import
+    /// table. Resolution and the guest memory write happen together: an
+    /// unresolved key or an unmapped slot changes nothing. Data imports write
+    /// the provider's variable-cell address instead of a dispatch trampoline.
+    pub fn bind_slot(
+        &mut self,
+        module: &str,
+        name: &ImportName,
+        slot_address: u64,
+        memory: &mut GuestMemory,
+    ) -> Result<SlotBinding, ImportError> {
+        let Some(index) = self.index(module, name) else {
+            return Err(ImportError::UnresolvedImport {
+                module: module.to_owned(),
+                symbol: name.to_string(),
+            });
+        };
+        // The loader writes slots regardless of page permissions, so only
+        // mapping is checked here.
+        memory.read_u64_bypass(slot_address)?;
+        if let Some(provider) = self.data_providers.get(&index) {
+            let cell = provider(memory)?;
+            memory.write_u64_bypass(slot_address, cell)?;
+            return Ok(SlotBinding::Data {
+                address: cell,
+                service_index: index,
+            });
+        }
+        let trampoline = IMPORT_TRAMPOLINE_BASE_VA + (index as u64) * IMPORT_TRAMPOLINE_STRIDE;
+        memory.write_u64_bypass(slot_address, trampoline)?;
+        self.trampoline_to_service.insert(trampoline, index);
+        Ok(SlotBinding::Function {
+            trampoline,
+            service_index: index,
+        })
     }
 
     /// Bind the PE's Import Address Table (IAT) in guest memory to synthetic trampoline VAs.
@@ -599,10 +766,10 @@ impl ImportRegistry {
         loaded_base: u64,
         memory: &mut GuestMemory,
     ) -> Result<usize, ImportError> {
-        let Some(directory) = find_import_directory(bytes) else {
+        let Some((rva, size)) = find_import_directory(bytes) else {
             return Ok(0);
         };
-        let (entries, error) = parse_imports(bytes, directory, |rva| pe.rva_to_file_offset(rva));
+        let (entries, error) = parse_imports(bytes, rva, size, |rva| pe.rva_to_file_offset(rva));
         if let Some(error) = error {
             return Err(ImportError::Table(error));
         }
@@ -610,29 +777,22 @@ impl ImportRegistry {
         // Resolve everything first: a refused image must leave memory unbound.
         let mut slots = Vec::with_capacity(entries.len());
         for entry in entries {
-            let Some(index) = self.index(&entry.module, &entry.name) else {
+            if self.index(&entry.module, &entry.name).is_none() {
                 return Err(ImportError::UnresolvedImport {
                     module: entry.module,
                     symbol: entry.name.to_string(),
                 });
-            };
+            }
             let address = loaded_base
                 .checked_add(u64::from(entry.iat_rva))
                 .ok_or(MemoryError::Overflow)?;
             // The loader writes slots regardless of page permissions, so only
             // mapping is checked here.
             memory.read_u64_bypass(address)?;
-            slots.push((address, index));
+            slots.push((address, entry.module, entry.name));
         }
-        for &(address, index) in &slots {
-            if let Some(provider) = self.data_providers.get(&index) {
-                let cell = provider(memory)?;
-                memory.write_u64_bypass(address, cell)?;
-                continue;
-            }
-            let trampoline = IMPORT_TRAMPOLINE_BASE_VA + (index as u64) * IMPORT_TRAMPOLINE_STRIDE;
-            memory.write_u64_bypass(address, trampoline)?;
-            self.trampoline_to_service.insert(trampoline, index);
+        for (address, module, name) in &slots {
+            self.bind_slot(module, name, *address, memory)?;
         }
         Ok(slots.len())
     }
@@ -697,6 +857,7 @@ impl ImportRegistry {
 
     /// Enter a guest callback from the task frame whose return slot is `slot`.
     fn enter_task_callback(
+        &self,
         cpu: &mut CpuState,
         memory: &mut GuestMemory,
         frame: CallbackFrame,
@@ -710,9 +871,21 @@ impl ImportRegistry {
         {
             return Err(ExitReason::ServiceAbiViolation);
         }
-        memory
-            .fetch_instruction_byte(entry)
-            .map_err(ExitReason::MemoryFault)?;
+        // A callback entry can be an imported function's resolved address:
+        // the mingw runtime registers WSACleanup through `_onexit` this way
+        // after WSAStartup, which is valid on Windows because the pointer
+        // the import address table holds is the callable function. Service
+        // trampolines are synthetic and have no guest bytes to pre-flight;
+        // the dispatcher recognizes them when execution reaches them. Any
+        // other entry must be backed by guest memory, exactly as jumping to
+        // unmapped memory faults on Windows.
+        let trampoline = self.trampoline_to_service.contains_key(&entry)
+            || self.dynamic_trampolines.get(entry).is_some();
+        if !trampoline {
+            memory
+                .fetch_instruction_byte(entry)
+                .map_err(ExitReason::MemoryFault)?;
+        }
         memory
             .write_u64(slot, CALLBACK_RETURN)
             .map_err(ExitReason::MemoryFault)?;
@@ -734,6 +907,9 @@ impl ImportRegistry {
             || rip == ENTRY_RETURN
             || rip == crate::exceptions::EXCEPTION_RETURN
             || rip == crate::exceptions::SCOPE_RETURN
+            || rip == crate::exceptions::FILTER_RETURN
+            || rip == crate::tls::TLS_CALLBACK_RETURN
+            || rip == crate::services::threads::THREAD_RETURN
             || self.trampoline_to_service.contains_key(&rip)
             || self.dynamic_trampolines.get(rip).is_some()
     }
@@ -767,6 +943,13 @@ impl ImportRegistry {
         if rip == crate::exceptions::SCOPE_RETURN {
             return crate::exceptions::scope_resume(cpu, memory);
         }
+        if rip == crate::exceptions::FILTER_RETURN {
+            return crate::exceptions::filter_resume(cpu, memory);
+        }
+        if rip == crate::tls::TLS_CALLBACK_RETURN || rip == crate::services::threads::THREAD_RETURN
+        {
+            return Err(ExitReason::CallbackReturned);
+        }
         if rip == CALLBACK_RETURN {
             let key = (cpu.gs_base, cpu.get(Register::Rsp));
             let frame = memory
@@ -789,7 +972,7 @@ impl ImportRegistry {
             return match step {
                 CallbackStep::Call { entry, args } => {
                     let slot = key.1 - 8;
-                    Self::enter_task_callback(cpu, memory, frame, slot, entry, args)
+                    self.enter_task_callback(cpu, memory, frame, slot, entry, args)
                 }
                 CallbackStep::Return(value) => {
                     cpu.set(Register::Rax, value);
@@ -843,7 +1026,7 @@ impl ImportRegistry {
                         task: Some(Arc::new(Mutex::new(task))),
                         after,
                     };
-                    Self::enter_task_callback(cpu, memory, frame, slot, entry, args)?;
+                    self.enter_task_callback(cpu, memory, frame, slot, entry, args)?;
                 }
             }
             return Ok(());
@@ -922,20 +1105,20 @@ impl Nonvolatile {
     }
 }
 
-/// RVA of the import directory, if the image has one.
-pub(crate) fn find_import_directory(bytes: &[u8]) -> Option<u32> {
+/// RVA and size of the import directory, if the image has one.
+pub(crate) fn find_import_directory(bytes: &[u8]) -> Option<(u32, u32)> {
     let field = |offset: usize, len: usize| bytes.get(offset..offset.checked_add(len)?);
     let u32_at = |offset| Some(u32::from_le_bytes(field(offset, 4)?.try_into().ok()?));
     let coff = (u32_at(0x3C)? as usize).checked_add(4)?;
     let optional = coff.checked_add(20)?;
     let optional_len = u16::from_le_bytes(field(coff + 16, 2)?.try_into().ok()?);
     // The import directory is data directory 1, at offset 120.
-    if optional_len < 128 {
+    if optional_len < 128 || u32_at(optional.checked_add(108)?)? < 2 {
         return None;
     }
     let rva = u32_at(optional.checked_add(120)?)?;
     let size = u32_at(optional.checked_add(124)?)?;
-    (rva != 0 && size != 0).then_some(rva)
+    (rva != 0).then_some((rva, size))
 }
 
 #[cfg(test)]
@@ -984,5 +1167,164 @@ mod tests {
         );
         args.rsp = u64::MAX - 39;
         assert_eq!(args.get(4, &memory), Err(MemoryError::Overflow));
+    }
+
+    #[test]
+    fn service_status_explicitness_is_tracked_without_changing_the_status() {
+        let mut registry = ImportRegistry::new();
+        registry.register("kernel32.dll", "Defaulted", |_, _, _| Ok(0));
+        let defaulted = registry
+            .binding("KERNEL32.DLL", "Defaulted")
+            .expect("defaulted service");
+        assert_eq!(defaulted.status, ServiceStatus::Implemented);
+        assert!(!defaulted.status_explicit);
+
+        registry.set_status("kernel32.dll", "Defaulted", ServiceStatus::Implemented);
+        let reviewed = registry
+            .binding("kernel32.dll", "Defaulted")
+            .expect("reviewed service");
+        assert_eq!(reviewed.status, ServiceStatus::Implemented);
+        assert!(reviewed.status_explicit);
+
+        registry.register_with_status("kernel32.dll", "Stopped", ServiceStatus::Stub, |_, _, _| {
+            Ok(0)
+        });
+        assert!(
+            registry
+                .binding("kernel32.dll", "Stopped")
+                .expect("explicit service")
+                .status_explicit
+        );
+
+        registry
+            .try_register(
+                "xenora.dll",
+                ImportName::Name("Direct".to_owned()),
+                ServiceStatus::Partial,
+                Box::new(|_, _, _| Ok(0)),
+            )
+            .expect("direct registration");
+        assert!(
+            registry
+                .binding("xenora.dll", "Direct")
+                .expect("try_register service")
+                .status_explicit
+        );
+    }
+
+    #[test]
+    fn resolution_keys_cover_canonical_named_and_ordinal_bindings() {
+        let mut registry = ImportRegistry::new();
+        registry.register("kernel32.dll", "SyntheticExport", |_, _, _| Ok(0));
+        registry
+            .try_alias(
+                "api-ms-win-core-test-l1-1-0.dll",
+                "kernel32.dll",
+                "SyntheticExport",
+            )
+            .expect("named alias");
+        registry
+            .try_ordinal_alias("kernel32.dll", "SyntheticExport", 42)
+            .expect("ordinal alias");
+
+        let rows: Vec<(String, String, ImportKind, String, String, ImportKind)> = registry
+            .iter_resolution_keys()
+            .map(|(module, name, descriptor)| {
+                (
+                    module.to_owned(),
+                    name.to_string(),
+                    name.kind(),
+                    descriptor.module.clone(),
+                    descriptor.symbol.clone(),
+                    descriptor.kind,
+                )
+            })
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for (module, symbol, kind) in [
+            ("kernel32.dll", "SyntheticExport", ImportKind::Name),
+            (
+                "api-ms-win-core-test-l1-1-0.dll",
+                "SyntheticExport",
+                ImportKind::Name,
+            ),
+            ("kernel32.dll", "Ordinal#42", ImportKind::Ordinal),
+        ] {
+            assert!(
+                rows.iter().any(|row| {
+                    row.0 == module
+                        && row.1 == symbol
+                        && row.2 == kind
+                        && row.3 == "kernel32.dll"
+                        && row.4 == "SyntheticExport"
+                        && row.5 == ImportKind::Name
+                }),
+                "missing resolution key {module}!{symbol}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_identity_distinguishes_a_name_spelled_like_an_ordinal() {
+        let mut registry = ImportRegistry::new();
+        registry.register("collision.dll", "Ordinal#7", |_, _, _| Ok(1));
+        registry
+            .try_register(
+                "collision.dll",
+                ImportName::Ordinal(7),
+                ServiceStatus::Partial,
+                Box::new(|_, _, _| Ok(2)),
+            )
+            .expect("ordinal registration");
+
+        let named = registry
+            .resolve("collision.dll", &ImportName::Name("Ordinal#7".into()))
+            .expect("named service");
+        let ordinal = registry
+            .resolve("collision.dll", &ImportName::Ordinal(7))
+            .expect("ordinal service");
+        assert!(!std::ptr::eq(named, ordinal));
+        assert_eq!(named.kind, ImportKind::Name);
+        assert_eq!(ordinal.kind, ImportKind::Ordinal);
+        assert_eq!(named.symbol, "Ordinal#7");
+        assert_eq!(ordinal.symbol, "Ordinal#7");
+
+        let identities: Vec<_> = registry
+            .iter_service_descriptors()
+            .map(|service| {
+                (
+                    service.module.as_str(),
+                    service.kind,
+                    service.symbol.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            identities,
+            [
+                ("collision.dll", ImportKind::Name, "Ordinal#7"),
+                ("collision.dll", ImportKind::Ordinal, "Ordinal#7"),
+            ]
+        );
+        let mut resolution_rows: Vec<_> = registry
+            .iter_resolution_keys()
+            .map(|(module, name, descriptor)| (module.to_owned(), name.clone(), descriptor.kind))
+            .collect();
+        resolution_rows.sort();
+        assert_eq!(
+            resolution_rows,
+            [
+                (
+                    "collision.dll".to_owned(),
+                    ImportName::Name("Ordinal#7".to_owned()),
+                    ImportKind::Name,
+                ),
+                (
+                    "collision.dll".to_owned(),
+                    ImportName::Ordinal(7),
+                    ImportKind::Ordinal,
+                ),
+            ]
+        );
     }
 }

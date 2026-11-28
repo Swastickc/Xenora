@@ -847,13 +847,14 @@ fn reference(m: &mut Machine, text: &str) -> Outcome {
         }
         "cpuid" => {
             // Xenora's guest CPUID contract, restated: the vendor "Xenora guest"
-            // and the five features whose every instruction exists, CMOV and
-            // POPCNT in leaf 1, LAHF/SAHF, LZCNT and long mode in leaf
-            // 0x8000_0001.
+            // and the seven features whose every instruction exists, CX8
+            // (EDX bit 8), CMOV (EDX bit 15), CMPXCHG16B (ECX bit 13) and
+            // POPCNT (ECX bit 23) in leaf 1, LAHF/SAHF, LZCNT and long mode in
+            // leaf 0x8000_0001.
             let word = |text: &[u8; 4]| u32::from_le_bytes(*text);
             let values = match m.gpr[RAX] as u32 {
                 0 => [1, word(b"Xeno"), word(b"uest"), word(b"ra g")],
-                1 => [0, 0, 1 << 23, 1 << 15],
+                1 => [0, 0, 1 << 13 | 1 << 23, 1 << 8 | 1 << 15],
                 0x8000_0000 => [0x8000_0001, 0, 0, 0],
                 0x8000_0001 => [0, 0, 1 | 1 << 5, 1 << 29],
                 _ => [0; 4],
@@ -1114,7 +1115,10 @@ fn every_declared_form_is_executed_by_a_fixture() {
     }
     // Control flow and exits are covered by the tests below. String
     // instructions and the direction flag need their own memory layout and
-    // are covered form by form in `tests/cpu_rep.rs`.
+    // are covered form by form in `tests/cpu_rep.rs` and, for LODS, SCAS and
+    // CMPS, `tests/cpu_string_compare.rs`. CMPXCHG8B and CMPXCHG16B take an
+    // 8- or 16-byte operand and two register pairs, and are covered in
+    // `tests/x86_cmpxchg_pair.rs`.
     let separate = [
         Op::Ldmxcsr,
         Op::Jcc,
@@ -1129,8 +1133,12 @@ fn every_declared_form_is_executed_by_a_fixture() {
         Op::Syscall,
         Op::Movs,
         Op::Stos,
+        Op::Lods,
+        Op::Scas,
+        Op::Cmps,
         Op::Cld,
         Op::Std,
+        Op::Cmpxchg8b,
     ];
     let mut missing: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (index, form) in FORMS.iter().enumerate() {
@@ -1354,7 +1362,7 @@ fn undeclared_and_ambiguous_encodings_are_rejected() {
         &[0xF2, 0x90],             // repne nop
         &[0xF3, 0xC3],             // rep ret
         &[0xF2, 0xA4],             // repne movsb
-        &[0xF3, 0xA6],             // repe cmpsb
+        &[0xF2, 0xAC],             // repne lodsb
         &[0x67, 0x8B, 0x06],       // address-size override
         &[0x67, 0xA1, 0, 0, 0, 0], // mov eax, [moffs32]
         &[0x64, 0x2E, 0x8B, 0x06], // CS after FS

@@ -66,7 +66,6 @@ fn build_image(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> (Vec<u8>, Vec<
     put(&mut pe, optional + 60, &0x200u32.to_le_bytes());
     put(&mut pe, optional + 108, &16u32.to_le_bytes());
     put(&mut pe, optional + 120, &IDATA_RVA.to_le_bytes());
-    put(&mut pe, optional + 124, &0x100u32.to_le_bytes());
     for (index, (name, rva, raw, len, flags)) in [
         (b".text", CODE_RVA, 0x200, 0x2000, 0x6000_0020u32),
         (b".idat", IDATA_RVA, IDATA_RAW, IDATA_LEN, 0xC000_0040),
@@ -85,7 +84,9 @@ fn build_image(imports: &[(&str, &str)], routines: &[Vec<u8>]) -> (Vec<u8>, Vec<
 
     assert!(16 * imports.len() <= (ROUTINES_RVA - CODE_RVA) as usize);
     let file = |rva: u32| IDATA_RAW + (rva - IDATA_RVA) as usize;
-    let mut next = IDATA_RVA + 20 * (imports.len() as u32 + 1);
+    let descriptor_size = 20 * (imports.len() as u32 + 1);
+    put(&mut pe, optional + 124, &descriptor_size.to_le_bytes());
+    let mut next = IDATA_RVA + descriptor_size;
     let mut take = |len: usize| {
         let rva = next;
         next = (next + len as u32 + 7) & !7;

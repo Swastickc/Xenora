@@ -10,6 +10,7 @@ use crate::dbt::DbtEngine;
 use crate::memory::{GuestMemory, MemoryError, MemoryPermissions};
 use crate::pe::ParsedPe;
 use std::fmt;
+use std::ops::Range;
 
 /// Most callbacks one TLS directory may list.
 pub const MAX_TLS_CALLBACKS: usize = 64;
@@ -17,6 +18,12 @@ pub const MAX_TLS_CALLBACKS: usize = 64;
 /// Bytes below the stack top that a callback is entered with: the return
 /// address and the 32-byte home space the Win64 convention gives every callee.
 const CALLBACK_FRAME: u64 = 40;
+/// Return address under a TLS callback. It is on the reserved sentinel page,
+/// so the import dispatcher sees it before any fetch: a callback's return is
+/// a host event, never a guest fault for the exception dispatcher to raise.
+pub(crate) const TLS_CALLBACK_RETURN: u64 =
+    crate::exceptions::FILTER_RETURN - crate::imports::IMPORT_TRAMPOLINE_STRIDE;
+const _: () = assert!(TLS_CALLBACK_RETURN & !0xFFF == crate::imports::RETURN_SENTINEL_PAGE);
 
 /// Errors arising during TLS setup or callback invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,16 +149,9 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
         return Ok(None);
     }
 
-    let tls_rva = u32::from_le_bytes(
-        bytes[opt_offset + 184..opt_offset + 188]
-            .try_into()
-            .unwrap(),
-    );
-    let tls_size = u32::from_le_bytes(
-        bytes[opt_offset + 188..opt_offset + 192]
-            .try_into()
-            .unwrap(),
-    );
+    let Some((tls_rva, tls_size)) = tls_directory_entry(bytes) else {
+        return Ok(None);
+    };
 
     if tls_rva == 0 || tls_size == 0 {
         return Ok(None);
@@ -185,6 +185,30 @@ pub fn parse_tls_directory(bytes: &[u8], pe: &ParsedPe) -> Result<Option<TlsDire
         characteristics,
         callbacks,
     }))
+}
+
+/// Locate data directory 9 without interpreting it. Shared by the trusted
+/// single-image parser and the explicit-module batch validator.
+pub(crate) fn tls_directory_entry(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 0x40 {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
+    let opt_offset = e_lfanew.checked_add(24)?;
+    if bytes.len() < opt_offset.checked_add(192)? {
+        return None;
+    }
+    let tls_rva = u32::from_le_bytes(
+        bytes[opt_offset + 184..opt_offset + 188]
+            .try_into()
+            .unwrap(),
+    );
+    let tls_size = u32::from_le_bytes(
+        bytes[opt_offset + 188..opt_offset + 192]
+            .try_into()
+            .unwrap(),
+    );
+    (tls_rva != 0 && tls_size != 0).then_some((tls_rva, tls_size))
 }
 
 /// Read the known directory fields by RVA, across raw-backed sections if needed.
@@ -265,7 +289,7 @@ fn read_callbacks(bytes: &[u8], pe: &ParsedPe, address: u64) -> Result<Vec<u64>,
 }
 
 /// Bytes reserved at `thread_tls_base` for the thread's TLS pointer array.
-const TLS_ARRAY_SIZE: usize = 0x1000;
+pub(crate) const TLS_ARRAY_SIZE: usize = 0x1000;
 
 /// Bytes read per step when a template is checked and then copied into its
 /// block.
@@ -307,6 +331,26 @@ pub fn setup_tls(
     memory: &mut GuestMemory,
     thread_tls_base: u64,
 ) -> Result<(), TlsError> {
+    setup_tls_avoiding(
+        tls,
+        loaded_base,
+        preferred_base,
+        memory,
+        thread_tls_base,
+        None,
+    )
+}
+
+/// Set up the TLS array at its usual address, placing a block that intersects
+/// the reserved range after that range.
+pub(crate) fn setup_tls_avoiding(
+    tls: &TlsDirectory,
+    loaded_base: u64,
+    preferred_base: u64,
+    memory: &mut GuestMemory,
+    thread_tls_base: u64,
+    reserved: Option<Range<u64>>,
+) -> Result<(), TlsError> {
     let delta = (loaded_base as i128) - (preferred_base as i128);
     let rebase = |va: u64| -> u64 {
         if va == 0 {
@@ -331,7 +375,9 @@ pub fn setup_tls(
     }
 
     let template_size = (actual_end - actual_start) as usize;
-    let total_size = template_size + (tls.size_of_zero_fill as usize);
+    let total_size = template_size
+        .checked_add(tls.size_of_zero_fill as usize)
+        .ok_or(MemoryError::Overflow)?;
 
     if total_size > 0 {
         let direct = (DIRECT_TEMPLATE_MIN..DIRECT_TEMPLATE_LIMIT).contains(&template_size);
@@ -349,16 +395,34 @@ pub fn setup_tls(
         };
 
         // Allocate the pointer array and the per-thread TLS block.
-        let block_base = thread_tls_base
+        let mut block_base = thread_tls_base
             .checked_add(TLS_ARRAY_SIZE as u64)
             .ok_or(MemoryError::Overflow)?;
         let page_size = 4096;
-        let map_size = (total_size + page_size - 1) & !(page_size - 1);
-        memory.map_region(
-            thread_tls_base,
-            TLS_ARRAY_SIZE,
-            MemoryPermissions::READ_WRITE,
-        )?;
+        let map_size = total_size
+            .checked_next_multiple_of(page_size)
+            .ok_or(MemoryError::Overflow)?;
+        if let Some(reserved) = reserved {
+            let block_end = block_base
+                .checked_add(map_size as u64)
+                .ok_or(MemoryError::Overflow)?;
+            if block_base < reserved.end && reserved.start < block_end {
+                block_base = reserved.end;
+            }
+        }
+        // The startup claims the array before binding imports, so that a
+        // heap allocation cannot land where it belongs. Standalone callers
+        // map it here.
+        if memory
+            .first_region_overlap(thread_tls_base, thread_tls_base + TLS_ARRAY_SIZE as u64)
+            .is_none()
+        {
+            memory.map_region(
+                thread_tls_base,
+                TLS_ARRAY_SIZE,
+                MemoryPermissions::READ_WRITE,
+            )?;
+        }
         if let Some(staged) = staged.as_deref() {
             memory.map_region_with_data(
                 block_base,
@@ -434,6 +498,34 @@ pub fn execute_tls_callbacks(
     memory: &mut GuestMemory,
     dbt: &mut DbtEngine,
 ) -> Result<usize, TlsError> {
+    execute_tls_callbacks_with_reason(
+        callbacks,
+        loaded_base,
+        preferred_base,
+        stack_top,
+        DLL_PROCESS_ATTACH,
+        cpu,
+        memory,
+        dbt,
+    )
+}
+
+/// `DLL_PROCESS_ATTACH` as defined by Microsoft's public PE format page.
+pub const DLL_PROCESS_ATTACH: u64 = 1;
+
+/// As [`execute_tls_callbacks`], with an explicit callback reason so the same
+/// bounded executor can run detach callbacks after the process ends.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_tls_callbacks_with_reason(
+    callbacks: &[u64],
+    loaded_base: u64,
+    preferred_base: u64,
+    stack_top: u64,
+    reason: u64,
+    cpu: &mut CpuState,
+    memory: &mut GuestMemory,
+    dbt: &mut DbtEngine,
+) -> Result<usize, TlsError> {
     if callbacks.is_empty() {
         return Ok(0);
     }
@@ -451,19 +543,20 @@ pub fn execute_tls_callbacks(
         // Stack pointer aligned with 32-byte shadow space + return address
         let rsp = stack_top - CALLBACK_FRAME;
         cpu.set(Register::Rsp, rsp);
-        // Write synthetic magic return address (0xFFFF_FFFF_FFFF_0000) into [RSP]
-        let magic_ret = 0xFFFF_FFFF_FFFF_0000u64;
+        // The callback returns to the TLS sentinel.
+        let magic_ret = TLS_CALLBACK_RETURN;
         memory.write_u64(rsp, magic_ret)?;
 
         // Set Win64 arguments:
         // RCX = DllHandle (image base)
         cpu.set(Register::Rcx, loaded_base);
-        // RDX = DLL_PROCESS_ATTACH (1)
-        cpu.set(Register::Rdx, 1);
+        // RDX = Reason
+        cpu.set(Register::Rdx, reason);
         // R8 = 0
         cpu.set(Register::R8, 0);
 
-        // RET lands at the sentinel, which has no guest code mapped.
+        // RET lands at the sentinel; the dispatcher stops there, or, with no
+        // import registry, its fetch faults with RIP left on it.
         let mut steps = 0;
         while cpu.rip != magic_ret {
             let res = dbt.run(cpu, memory, 100);
@@ -514,6 +607,7 @@ mod tests {
             machine: 0x8664,
             number_of_sections: 1,
             time_date_stamp: 0,
+            characteristics: crate::pe::IMAGE_FILE_DLL,
             image_base: IMAGE_BASE,
             section_alignment: 0x1000,
             file_alignment: 0x200,
@@ -766,7 +860,7 @@ mod tests {
 
     const CODE: u64 = 0x40_0000;
     const STACK_TOP: u64 = 0x80_0000;
-    const SENTINEL: u64 = 0xFFFF_FFFF_FFFF_0000;
+    const SENTINEL: u64 = super::TLS_CALLBACK_RETURN;
 
     /// Code at `CODE`, a 4 KiB stack below `STACK_TOP` and a fresh translator.
     fn guest(code: &[u8]) -> (CpuState, GuestMemory, DbtEngine) {

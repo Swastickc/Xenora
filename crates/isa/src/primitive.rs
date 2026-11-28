@@ -80,6 +80,20 @@ pub const fn xnor_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
     (value, value != 0)
 }
 
+/// Bitwise `!a & b` and whether the result is nonzero.
+///
+/// The `andn1` forms negate the first operand. Guide 12.3, printed page 122.
+pub const fn andn1_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    andn2_nonzero_b32(b, a)
+}
+
+/// Bitwise `!a | b` and whether the result is nonzero.
+///
+/// The `orn1` forms negate the first operand. Guide 12.3, printed page 122.
+pub const fn orn1_nonzero_b32(a: u32, b: u32) -> (u32, bool) {
+    orn2_nonzero_b32(b, a)
+}
+
 /// `a << count` and whether the result is nonzero. The caller masks the count
 /// to the declared count width, so `count` is below 32.
 pub const fn lshl_nonzero_b32(a: u32, count: u32) -> (u32, bool) {
@@ -335,4 +349,80 @@ pub const fn lshl_add_carry_u32(a: u32, b: u32, shift: u32) -> (u32, bool) {
 /// A bitwise copy of the source (RDNA 2 guide section 12.3).
 pub(crate) const fn mov_b32(src: u32) -> u32 {
     src
+}
+
+// ---- VOPC binary32 compares (#786) ----
+// Guide 12.9 Table 61 (pages 152-153). The operands are binary32 bit patterns
+// compared as IEEE 754 values: every relation except the N* forms and U is
+// false when either operand is a NaN (quiet or signalling), +0 equals -0 and
+// subnormals keep their exact value (MODE input denormals allowed).
+
+/// `a < b` (`V_CMP_LT_F32`).
+pub const fn lt_f32(a: u32, b: u32) -> bool {
+    f32::from_bits(a) < f32::from_bits(b)
+}
+
+/// `a == b` (`V_CMP_EQ_F32`).
+pub const fn eq_f32(a: u32, b: u32) -> bool {
+    f32::from_bits(a) == f32::from_bits(b)
+}
+
+/// `a <= b` (`V_CMP_LE_F32`).
+pub const fn le_f32(a: u32, b: u32) -> bool {
+    f32::from_bits(a) <= f32::from_bits(b)
+}
+
+/// `a > b` (`V_CMP_GT_F32`).
+pub const fn gt_f32(a: u32, b: u32) -> bool {
+    f32::from_bits(a) > f32::from_bits(b)
+}
+
+/// `a <> b`, less or greater: false on unordered operands (`V_CMP_LG_F32`).
+pub const fn lg_f32(a: u32, b: u32) -> bool {
+    lt_f32(a, b) || gt_f32(a, b)
+}
+
+/// `a >= b` (`V_CMP_GE_F32`).
+pub const fn ge_f32(a: u32, b: u32) -> bool {
+    f32::from_bits(a) >= f32::from_bits(b)
+}
+
+/// Neither operand is a NaN (`V_CMP_O_F32`).
+pub const fn o_f32(a: u32, b: u32) -> bool {
+    !u_f32(a, b)
+}
+
+/// Either operand is a NaN (`V_CMP_U_F32`, per-opcode table).
+pub const fn u_f32(a: u32, b: u32) -> bool {
+    f32::from_bits(a).is_nan() || f32::from_bits(b).is_nan()
+}
+
+/// `!(a >= b)`: true on unordered operands (`V_CMP_NGE_F32`).
+pub const fn nge_f32(a: u32, b: u32) -> bool {
+    !ge_f32(a, b)
+}
+
+/// `!(a <> b)`: true on unordered operands (`V_CMP_NLG_F32`).
+pub const fn nlg_f32(a: u32, b: u32) -> bool {
+    !lg_f32(a, b)
+}
+
+/// `!(a > b)`: true on unordered operands (`V_CMP_NGT_F32`).
+pub const fn ngt_f32(a: u32, b: u32) -> bool {
+    !gt_f32(a, b)
+}
+
+/// `!(a <= b)`: true on unordered operands (`V_CMP_NLE_F32`).
+pub const fn nle_f32(a: u32, b: u32) -> bool {
+    !le_f32(a, b)
+}
+
+/// `!(a == b)`: true on unordered operands (`V_CMP_NEQ_F32`).
+pub const fn neq_f32(a: u32, b: u32) -> bool {
+    !eq_f32(a, b)
+}
+
+/// `!(a < b)`: true on unordered operands (`V_CMP_NLT_F32`).
+pub const fn nlt_f32(a: u32, b: u32) -> bool {
+    !lt_f32(a, b)
 }

@@ -139,6 +139,11 @@ fn crt_winsys(name: &str) -> PathBuf {
     build("build-crt-winsys.sh", "run-program-crt-winsys", &OUT).join(format!("{name}.exe"))
 }
 
+fn crt_winlocks(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-winlocks.sh", "run-program-crt-winlocks", &OUT).join(format!("{name}.exe"))
+}
+
 fn crt_crtutils(name: &str) -> PathBuf {
     static OUT: OnceLock<PathBuf> = OnceLock::new();
     build("build-crt-crtutils.sh", "run-program-crt-crtutils", &OUT).join(format!("{name}.exe"))
@@ -276,6 +281,33 @@ fn a_wrong_line_count_is_detected_and_input_beyond_the_limit_is_refused() {
         run.stderr
     );
     assert!(!run.stdout.contains("crt_stdin"), "{}", run.stdout);
+}
+
+fn crt_scanf(name: &str) -> PathBuf {
+    static OUT: OnceLock<PathBuf> = OnceLock::new();
+    build("build-crt-scanf.sh", "run-program-crt-scanf", &OUT).join(format!("{name}.exe"))
+}
+
+/// The input `crt_scanf.c` expects on its standard input, in CR LF.
+const SCANF_INPUT: &[u8] = b"42 word\r\n3.25,tail\r\nend";
+
+#[test]
+fn a_program_reading_formatted_input_from_strings_stdin_and_files_passes_its_checks() {
+    for name in ["crt-scanf-O0", "crt-scanf-O2"] {
+        let run = run_program_with_input(&crt_scanf(name), &[], SCANF_INPUT);
+        assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
+        assert_eq!(
+            run.stdout, "crt_scanf: 27 of 27 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    let run = run_program_with_input(&crt_scanf("crt-scanf-break"), &[], SCANF_INPUT);
+    assert_eq!(run.code, Some(17), "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "check 17 failed: stdin line feed left unread\r\ncrt_scanf: 26 of 27 checks passed\r\n"
+    );
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -1160,6 +1192,22 @@ fn a_program_using_the_error_environment_and_system_services_runs() {
     // The control must fail its last check: the exit code is its number.
     let run = run_program(&crt_winsys("crt-winsys-break"), &[], &[]);
     assert_eq!(run.code, Some(26), "control: {:?}", run.stdout);
+}
+
+#[test]
+fn a_program_using_byte_range_locks_and_the_file_mode_services_runs() {
+    for name in ["crt-winlocks-O0", "crt-winlocks-O2"] {
+        let run = run_program(&crt_winlocks(name), &[], &[]);
+        assert_eq!(run.code, Some(0), "{name}: {:?}", run.stdout);
+        assert_eq!(
+            run.stdout, "crt-winlocks: 56/56 checks passed\r\n",
+            "{name}"
+        );
+        assert_eq!(run.stderr, "", "{name}");
+    }
+    // The control must fail its last check: the exit code is its number.
+    let run = run_program(&crt_winlocks("crt-winlocks-break"), &[], &[]);
+    assert_eq!(run.code, Some(57), "control: {:?}", run.stdout);
 }
 
 #[test]

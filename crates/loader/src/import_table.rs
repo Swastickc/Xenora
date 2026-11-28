@@ -23,12 +23,37 @@ const DELAY_DESCRIPTOR_LEN: u32 = 32;
 const DELAY_RVA_BASED: u32 = 1;
 const ORDINAL_FLAG: u64 = 1 << 63;
 
+/// Whether an import or service key is a symbolic name or a numeric ordinal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ImportKind {
+    Name,
+    Ordinal,
+}
+
+impl ImportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Ordinal => "ordinal",
+        }
+    }
+}
+
 /// How an import names its target. A symbol that happens to be spelled like an
 /// ordinal is still a name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ImportName {
     Name(String),
     Ordinal(u16),
+}
+
+impl ImportName {
+    pub fn kind(&self) -> ImportKind {
+        match self {
+            Self::Name(_) => ImportKind::Name,
+            Self::Ordinal(_) => ImportKind::Ordinal,
+        }
+    }
 }
 
 impl fmt::Display for ImportName {
@@ -104,6 +129,9 @@ pub enum ImportTableError {
     DelayDirectoryEnd {
         rva: u32,
     },
+    ImportDirectoryEnd {
+        rva: u32,
+    },
     TooManyDescriptors,
     TooManyImports,
 }
@@ -140,6 +168,10 @@ impl fmt::Display for ImportTableError {
             Self::DelayDirectoryEnd { rva } => write!(
                 f,
                 "delay-load directory ends at RVA 0x{rva:08x} before its empty descriptor"
+            ),
+            Self::ImportDirectoryEnd { rva } => write!(
+                f,
+                "import directory ends at RVA 0x{rva:08x} before its empty descriptor"
             ),
             Self::TooManyDescriptors => write!(f, "more than {MAX_DESCRIPTORS} import descriptors"),
             Self::TooManyImports => write!(f, "more than {MAX_IMPORTS} imported symbols"),
@@ -194,13 +226,14 @@ impl<F: Fn(u32) -> Option<usize>> Reader<'_, F> {
     }
 }
 
-/// Parse the import directory at `directory_rva`.
+/// Parse the import descriptors within the declared directory extent.
 ///
 /// Returns every import before the first problem, and the problem. Callers that
 /// execute an image must refuse it if there is one; inspection may report both.
 pub fn parse_imports(
     bytes: &[u8],
     directory_rva: u32,
+    directory_size: u32,
     rva_to_offset: impl Fn(u32) -> Option<usize>,
 ) -> (Vec<ImportEntry>, Option<ImportTableError>) {
     let reader = Reader {
@@ -208,17 +241,24 @@ pub fn parse_imports(
         rva_to_offset,
     };
     let mut entries = Vec::new();
-    let error = collect(&reader, directory_rva, &mut entries).err();
+    let error = collect(&reader, directory_rva, directory_size, &mut entries).err();
     (entries, error)
 }
 
 fn collect<F: Fn(u32) -> Option<usize>>(
     reader: &Reader<'_, F>,
     directory_rva: u32,
+    directory_size: u32,
     entries: &mut Vec<ImportEntry>,
 ) -> Result<(), ImportTableError> {
+    let end = directory_rva
+        .checked_add(directory_size)
+        .ok_or(ImportTableError::OutOfBounds { rva: directory_rva })?;
     let mut descriptor = directory_rva;
     for _ in 0..MAX_DESCRIPTORS {
+        if end - descriptor < DESCRIPTOR_LEN {
+            return Err(ImportTableError::ImportDirectoryEnd { rva: end });
+        }
         let fields = reader.array::<{ DESCRIPTOR_LEN as usize }>(descriptor)?;
         // The timestamp and forwarder chain are part of the zero terminator.
         if fields == [0; DESCRIPTOR_LEN as usize] {
@@ -358,8 +398,11 @@ fn collect_symbols<F: Fn(u32) -> Option<usize>>(
                 .ok()
                 .filter(|rva| rva >> 31 == 0)
                 .ok_or(ImportTableError::ReservedBits { rva: lookup })?;
-            // The name follows a two-byte export-table hint.
-            ImportName::Name(reader.name(hint + 2)?)
+            // Keep name diagnostics for unreadable strings. A valid name
+            // still needs both hint bytes before this record can be admitted.
+            let name = reader.name(hint + 2)?;
+            reader.array::<2>(hint)?;
+            ImportName::Name(name)
         };
         entries.push(ImportEntry {
             module: module.to_owned(),
@@ -373,6 +416,69 @@ fn collect_symbols<F: Fn(u32) -> Option<usize>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_import_requires_both_hint_bytes_in_ordinary_and_delay_tables() {
+        const LOOKUP_RVA: u32 = 0x1000;
+        const ADDRESS_RVA: u32 = 0x2000;
+        const HINT_RVA: u32 = 0x3000;
+        let mut bytes = [0; 64];
+        bytes[..8].copy_from_slice(&(ORDINAL_FLAG | 42).to_le_bytes());
+        bytes[8..16].copy_from_slice(&u64::from(HINT_RVA).to_le_bytes());
+        bytes[48] = 0x34;
+        bytes[32] = 0x12;
+        bytes[33..40].copy_from_slice(b"Symbol\0");
+
+        let ordinal = ImportEntry {
+            module: "guest.dll".into(),
+            name: ImportName::Ordinal(42),
+            iat_rva: ADDRESS_RVA,
+        };
+        for slots_on_disk in [false, true] {
+            for (first_backed, second_backed) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let reader = Reader {
+                    bytes: &bytes,
+                    rva_to_offset: |rva| match rva {
+                        0x1000..=0x1017 => Some((rva - LOOKUP_RVA) as usize),
+                        0x2000..=0x200f => Some(16 + (rva - ADDRESS_RVA) as usize),
+                        HINT_RVA if first_backed => Some(48),
+                        0x3001 if second_backed => Some(32),
+                        0x3002..=0x3008 => Some(32 + (rva - 0x3001) as usize),
+                        _ => None,
+                    },
+                };
+                let mut entries = Vec::new();
+                let result = collect_symbols(
+                    &reader,
+                    "guest.dll",
+                    LOOKUP_RVA,
+                    ADDRESS_RVA,
+                    slots_on_disk,
+                    &mut entries,
+                );
+
+                if first_backed && second_backed {
+                    assert_eq!(result, Ok(()));
+                    assert_eq!(
+                        entries,
+                        [
+                            ordinal.clone(),
+                            ImportEntry {
+                                module: "guest.dll".into(),
+                                name: ImportName::Name("Symbol".into()),
+                                iat_rva: ADDRESS_RVA + 8,
+                            },
+                        ],
+                    );
+                } else {
+                    assert_eq!(result, Err(ImportTableError::OutOfBounds { rva: HINT_RVA }));
+                    assert_eq!(entries.as_slice(), std::slice::from_ref(&ordinal));
+                }
+            }
+        }
+    }
 
     #[test]
     fn import_names_keep_printable_bytes_and_reject_malformed_strings() {

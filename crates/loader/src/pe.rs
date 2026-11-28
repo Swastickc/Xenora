@@ -7,6 +7,7 @@
 //! permissions.
 
 use crate::memory::{GuestMemory, MemoryError, MemoryPermissions};
+use std::borrow::Cow;
 use std::fmt;
 
 /// Errors that can occur during PE32+ parsing and loading.
@@ -25,6 +26,11 @@ pub enum PeError {
     /// file, or its pages reach into a section; or the bytes given to the
     /// loader do not hold the PE32+ headers that were parsed.
     InvalidHeaderSize,
+    /// `SizeOfImage` is smaller than the highest mapped RVA plus one.
+    InvalidImageSize {
+        declared: u32,
+        required: u64,
+    },
 }
 
 impl fmt::Display for PeError {
@@ -54,6 +60,10 @@ impl fmt::Display for PeError {
                  table, longer than the file or reaches into a section, or the bytes do not match \
                  the parsed headers"
             ),
+            Self::InvalidImageSize { declared, required } => write!(
+                f,
+                "SizeOfImage {declared:#x} is too small: the PE mappings require {required:#x} bytes of image space"
+            ),
         }
     }
 }
@@ -72,12 +82,14 @@ pub struct PeSection {
     pub permissions: MemoryPermissions,
 }
 
-/// Parsed metadata from a PE32+ executable.
+/// Parsed metadata from a PE32+ executable or DLL image.
 #[derive(Clone, Debug)]
 pub struct ParsedPe {
     pub machine: u16,
     pub number_of_sections: u16,
     pub time_date_stamp: u32,
+    /// The COFF characteristics word, including `IMAGE_FILE_DLL`.
+    pub characteristics: u16,
     pub image_base: u64,
     pub section_alignment: u32,
     pub file_alignment: u32,
@@ -91,6 +103,8 @@ pub struct ParsedPe {
 pub struct LoadedImage {
     pub pe: ParsedPe,
     pub memory: GuestMemory,
+    /// Load base plus `entry_point_rva`. A zero entry RVA means the image has
+    /// no entry point; it is valid only for a DLL.
     pub entry_point: u64,
     /// Guest address of the `ImageBase` field in the mapped optional header.
     /// Startup writes the load base there once relocations have been applied.
@@ -105,17 +119,20 @@ pub const IMAGE_SCN_MEM_WRITE: u32 = 0x80000000;
 
 // Standard Constants
 pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+/// COFF characteristics bit identifying a DLL rather than an executable image.
+pub const IMAGE_FILE_DLL: u16 = 0x2000;
 pub const PE32_PLUS_MAGIC: u16 = 0x020B;
 /// PE32+ optional header length up to and including NumberOfRvaAndSizes.
 const PE32_PLUS_MIN_OPTIONAL_HEADER: usize = 112;
 const SECTION_HEADER_SIZE: usize = 40;
 /// Host memory budget for the mapped headers and sections of one image. This is a
 /// loader policy limit, not a property of the PE format.
-const MAX_MAPPED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_MAPPED_IMAGE_BUDGET: u64 = 256 * 1024 * 1024;
 /// The mapped headers end on a guest page boundary.
 const HEADER_PAGE: u64 = 0x1000;
-/// `ImageBase` and `SizeOfHeaders` within the PE32+ optional header.
+/// Field offsets within the PE32+ optional header.
 const OPTIONAL_IMAGE_BASE: usize = 24;
+const OPTIONAL_SIZE_OF_IMAGE: usize = 56;
 const OPTIONAL_SIZE_OF_HEADERS: usize = 60;
 
 fn read_u16(bytes: &[u8], at: usize) -> u16 {
@@ -126,77 +143,235 @@ fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
+/// A nonzero entry must lie inside executable image code. Entry RVA zero is
+/// the documented absence of an entry point and is admissible only for a DLL.
+fn entry_point_is_valid(
+    characteristics: u16,
+    entry_point_rva: u32,
+    sections: &[PeSection],
+) -> bool {
+    if entry_point_rva == 0 {
+        return characteristics & IMAGE_FILE_DLL != 0;
+    }
+    sections.iter().any(|section| {
+        section.permissions.execute
+            && entry_point_rva >= section.virtual_address
+            && entry_point_rva - section.virtual_address
+                < section.virtual_size.max(section.raw_data_size)
+    })
+}
+
+fn section_initial_data<'a>(bytes: &'a [u8], section: &PeSection) -> Result<&'a [u8], PeError> {
+    if section.raw_data_size == 0 || section.raw_data_ptr == 0 {
+        return Ok(&[]);
+    }
+    let start = section.raw_data_ptr as usize;
+    let end = start
+        .checked_add(section.raw_data_size as usize)
+        .ok_or(PeError::InvalidSectionHeaders)?;
+    bytes.get(start..end).ok_or(PeError::InvalidSectionHeaders)
+}
+
+struct SectionMapping<'a> {
+    base: u64,
+    size: usize,
+    permissions: MemoryPermissions,
+    initial_data: &'a [u8],
+}
+
+struct MappingPlan<'a> {
+    headers: &'a [u8],
+    header_map_size: usize,
+    image_base_field: u64,
+    entry_point: u64,
+    sections: Vec<SectionMapping<'a>>,
+}
+
+struct MappingOutcome {
+    entry_point: u64,
+    image_base_field: u64,
+}
+
+fn map_plan(
+    base: u64,
+    memory: &mut GuestMemory,
+    plan: MappingPlan<'_>,
+) -> Result<MappingOutcome, PeError> {
+    // Windows maps the headers read-only at the image base, and programs read
+    // them: a C runtime finds its own sections this way before `main`. The
+    // file bytes are the initial data of the mapping.
+    memory
+        .map_region_with_data(
+            base,
+            plan.header_map_size,
+            MemoryPermissions::READ_ONLY,
+            plan.headers,
+        )
+        .map_err(PeError::SectionMappingError)?;
+
+    for section in plan.sections {
+        memory
+            .map_region_with_data(
+                section.base,
+                section.size,
+                section.permissions,
+                section.initial_data,
+            )
+            .map_err(PeError::SectionMappingError)?;
+    }
+
+    Ok(MappingOutcome {
+        entry_point: plan.entry_point,
+        image_base_field: plan.image_base_field,
+    })
+}
+
+/// Committed image-header and section intervals used to decide whether an
+/// RVA range is image-backed rather than merely inside `SizeOfImage`.
+pub(crate) struct MappedImageBacking {
+    intervals: Vec<(u64, u64)>,
+}
+
+impl MappedImageBacking {
+    pub(crate) fn new(pe: &ParsedPe) -> Self {
+        let mut intervals = Vec::with_capacity(pe.sections.len() + 1);
+        let headers_end = u64::from(pe.size_of_headers).next_multiple_of(HEADER_PAGE);
+        if headers_end != 0 {
+            intervals.push((0, headers_end));
+        }
+        for section in &pe.sections {
+            let size = u64::from(section.virtual_size.max(section.raw_data_size));
+            if size != 0 {
+                intervals.push((
+                    u64::from(section.virtual_address),
+                    u64::from(section.virtual_address) + size,
+                ));
+            }
+        }
+        intervals.sort_unstable();
+        Self { intervals }
+    }
+
+    /// Whether `[rva, rva + len)` is continuously covered. The header interval
+    /// includes the zero-filled remainder of its final mapping page. A section
+    /// interval covers the larger of virtual and raw size because the smaller
+    /// side is zero-filled in the same mapping. Adjacent intervals may jointly
+    /// cover a crossing range.
+    pub(crate) fn covers(&self, rva: u32, len: u64) -> bool {
+        let start = u64::from(rva);
+        let Some(end) = start.checked_add(len) else {
+            return false;
+        };
+        if start == end {
+            return true;
+        }
+
+        let mut covered = start;
+        for &(interval_start, interval_end) in &self.intervals {
+            if interval_end <= covered {
+                continue;
+            }
+            if interval_start > covered {
+                return false;
+            }
+            if interval_end >= end {
+                return true;
+            }
+            covered = interval_end;
+        }
+        false
+    }
+}
+
 impl ParsedPe {
     /// Parse PE32+ headers from an in-memory byte slice.
     pub fn parse(bytes: &[u8]) -> Result<Self, PeError> {
-        if bytes.len() < 0x40 {
-            return Err(PeError::TooSmall);
+        Self::parse_headers(bytes.len() as u64, |offset, len| {
+            let start = offset as usize;
+            Ok(Cow::Borrowed(&bytes[start..start + len]))
+        })
+    }
+
+    /// Read only the fields needed for PE metadata. The reader receives
+    /// in-range requests and returns exactly the requested bytes.
+    pub(crate) fn parse_headers<'data, E: From<PeError>>(
+        file_len: u64,
+        mut read: impl FnMut(u64, usize) -> Result<Cow<'data, [u8]>, E>,
+    ) -> Result<Self, E> {
+        const DOS_HEADER_SIZE: usize = 0x40;
+        const PE_AND_COFF_SIZE: usize = 24;
+        if file_len < DOS_HEADER_SIZE as u64 {
+            return Err(PeError::TooSmall.into());
         }
 
-        // 1. DOS Header
-        if &bytes[0..2] != b"MZ" {
-            return Err(PeError::InvalidDosSignature);
+        let dos = read(0, DOS_HEADER_SIZE)?;
+        if &dos[..2] != b"MZ" {
+            return Err(PeError::InvalidDosSignature.into());
         }
 
-        let e_lfanew = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
-        let coff_offset = e_lfanew.checked_add(4).ok_or(PeError::TooSmall)?;
-        if bytes.len() < coff_offset.checked_add(20).ok_or(PeError::TooSmall)? {
-            return Err(PeError::TooSmall);
+        let pe_offset = u64::from(read_u32(&dos, 0x3c));
+        let opt_offset = pe_offset + PE_AND_COFF_SIZE as u64;
+        if file_len < opt_offset {
+            return Err(PeError::TooSmall.into());
         }
 
-        // 2. PE Signature
-        if &bytes[e_lfanew..coff_offset] != b"PE\0\0" {
-            return Err(PeError::InvalidPeSignature);
+        let coff = read(pe_offset, PE_AND_COFF_SIZE)?;
+        if &coff[..4] != b"PE\0\0" {
+            return Err(PeError::InvalidPeSignature.into());
         }
 
-        // 3. COFF File Header
-        let machine = read_u16(bytes, coff_offset);
+        let machine = read_u16(&coff, 4);
         if machine != IMAGE_FILE_MACHINE_AMD64 {
-            return Err(PeError::UnsupportedMachine(machine));
+            return Err(PeError::UnsupportedMachine(machine).into());
         }
-        let number_of_sections = read_u16(bytes, coff_offset + 2);
-        let time_date_stamp = read_u32(bytes, coff_offset + 4);
-        let size_of_optional_header = usize::from(read_u16(bytes, coff_offset + 16));
+        let number_of_sections = read_u16(&coff, 6);
+        let time_date_stamp = read_u32(&coff, 8);
+        let coff_characteristics = read_u16(&coff, 22);
+        let size_of_optional_header = usize::from(read_u16(&coff, 20));
 
-        // 4. Optional Header (PE32+ is required). The fixed PE32+ fields end at
-        // NumberOfRvaAndSizes (offset 108, 4 bytes); a shorter header is malformed.
-        let opt_offset = coff_offset + 20;
-        let section_table_offset = opt_offset + size_of_optional_header;
-        if bytes.len() < opt_offset + 2 {
-            return Err(PeError::TooSmall);
+        let section_table_offset = opt_offset + size_of_optional_header as u64;
+        if file_len < opt_offset + 2 {
+            return Err(PeError::TooSmall.into());
         }
-        let magic = read_u16(bytes, opt_offset);
+        let full_optional_header = size_of_optional_header >= PE32_PLUS_MIN_OPTIONAL_HEADER
+            && file_len >= section_table_offset;
+        // Diagnose the magic first even if the advertised header is incomplete.
+        let optional = read(
+            opt_offset,
+            if full_optional_header {
+                PE32_PLUS_MIN_OPTIONAL_HEADER
+            } else {
+                2
+            },
+        )?;
+        let magic = read_u16(&optional, 0);
         if magic != PE32_PLUS_MAGIC {
-            return Err(PeError::InvalidMagic(magic));
+            return Err(PeError::InvalidMagic(magic).into());
         }
-        if size_of_optional_header < PE32_PLUS_MIN_OPTIONAL_HEADER
-            || bytes.len() < section_table_offset
-        {
-            return Err(PeError::TooSmall);
+        if !full_optional_header {
+            return Err(PeError::TooSmall.into());
         }
 
-        let entry_point_rva = read_u32(bytes, opt_offset + 16);
-        let image_base =
-            u64::from_le_bytes(bytes[opt_offset + 24..opt_offset + 32].try_into().unwrap());
-        let section_alignment = read_u32(bytes, opt_offset + 32);
-        let file_alignment = read_u32(bytes, opt_offset + 36);
-        let size_of_image = read_u32(bytes, opt_offset + 56);
-        let size_of_headers = read_u32(bytes, opt_offset + 60);
+        let entry_point_rva = read_u32(&optional, 16);
+        let image_base = u64::from_le_bytes(
+            optional[OPTIONAL_IMAGE_BASE..OPTIONAL_IMAGE_BASE + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let section_alignment = read_u32(&optional, 32);
+        let file_alignment = read_u32(&optional, 36);
+        let size_of_image = read_u32(&optional, OPTIONAL_SIZE_OF_IMAGE);
+        let size_of_headers = read_u32(&optional, OPTIONAL_SIZE_OF_HEADERS);
 
-        // 5. Section Headers
-        let table_end = usize::from(number_of_sections)
-            .checked_mul(SECTION_HEADER_SIZE)
-            .and_then(|len| section_table_offset.checked_add(len))
-            .ok_or(PeError::InvalidSectionHeaders)?;
-        if bytes.len() < table_end {
-            return Err(PeError::InvalidSectionHeaders);
+        // A 32-bit PE offset and 16-bit optional size and section count all
+        // fit in these file coordinates. Read only the table itself.
+        let table_size = usize::from(number_of_sections) * SECTION_HEADER_SIZE;
+        if file_len < section_table_offset + table_size as u64 {
+            return Err(PeError::InvalidSectionHeaders.into());
         }
-
+        let table = read(section_table_offset, table_size)?;
         let mut sections = Vec::with_capacity(usize::from(number_of_sections));
-        for sec_bytes in bytes[section_table_offset..table_end]
-            .as_chunks::<SECTION_HEADER_SIZE>()
-            .0
-        {
+        for sec_bytes in table.as_chunks::<SECTION_HEADER_SIZE>().0 {
             // Section name (up to 8 bytes UTF-8 or null-padded ASCII)
             let name_raw = &sec_bytes[0..8];
             let name_len = name_raw.iter().position(|&b| b == 0).unwrap_or(8);
@@ -214,8 +389,8 @@ impl ParsedPe {
                 .ok_or(PeError::InvalidSectionHeaders)?;
             if raw_data_size > 0 {
                 let raw_end = u64::from(raw_data_ptr) + u64::from(raw_data_size);
-                if raw_end > bytes.len() as u64 {
-                    return Err(PeError::InvalidSectionHeaders);
+                if raw_end > file_len {
+                    return Err(PeError::InvalidSectionHeaders.into());
                 }
             }
 
@@ -247,24 +422,19 @@ impl ParsedPe {
             let mut ranges: Vec<_> = ranges.collect();
             ranges.sort_unstable();
             if ranges.windows(2).any(|pair| pair[1].0 < pair[0].1) {
-                return Err(PeError::InvalidSectionHeaders);
+                return Err(PeError::InvalidSectionHeaders.into());
             }
         }
 
-        // The entry point must lie inside an executable section.
-        let entry_ok = sections.iter().any(|s| {
-            s.permissions.execute
-                && entry_point_rva >= s.virtual_address
-                && entry_point_rva - s.virtual_address < s.virtual_size.max(s.raw_data_size)
-        });
-        if !entry_ok {
-            return Err(PeError::InvalidEntryPoint);
+        if !entry_point_is_valid(coff_characteristics, entry_point_rva, &sections) {
+            return Err(PeError::InvalidEntryPoint.into());
         }
 
         Ok(ParsedPe {
             machine,
             number_of_sections,
             time_date_stamp,
+            characteristics: coff_characteristics,
             image_base,
             section_alignment,
             file_alignment,
@@ -273,6 +443,19 @@ impl ParsedPe {
             entry_point_rva,
             sections,
         })
+    }
+
+    /// Whether the COFF characteristics mark this image as a DLL.
+    pub fn is_dll(&self) -> bool {
+        self.characteristics & IMAGE_FILE_DLL != 0
+    }
+
+    fn validate_entry_point(&self) -> Result<(), PeError> {
+        if entry_point_is_valid(self.characteristics, self.entry_point_rva, &self.sections) {
+            Ok(())
+        } else {
+            Err(PeError::InvalidEntryPoint)
+        }
     }
 
     /// Translate a Relative Virtual Address (RVA) to a raw file offset.
@@ -310,7 +493,10 @@ impl ParsedPe {
             let agrees = u16_at(optional)? == PE32_PLUS_MAGIC
                 && optional_size >= PE32_PLUS_MIN_OPTIONAL_HEADER
                 && sections == self.number_of_sections
+                && u16_at(coff.checked_add(18)?)? == self.characteristics
+                && u32_at(optional.checked_add(16)?)? == self.entry_point_rva
                 && u64::from_le_bytes(field(image_base, 8)?.try_into().ok()?) == self.image_base
+                && u32_at(optional.checked_add(OPTIONAL_SIZE_OF_IMAGE)?)? == self.size_of_image
                 && u32_at(optional.checked_add(OPTIONAL_SIZE_OF_HEADERS)?)? == self.size_of_headers;
             let table_end = optional
                 .checked_add(optional_size)?
@@ -334,10 +520,149 @@ impl ParsedPe {
         Ok((len, mapped, image_base))
     }
 
+    /// Whether the half-open RVA range is continuously backed by the bytes
+    /// this image would commit as headers or sections.
+    pub(crate) fn mapped_rva_range_is_backed(&self, rva: u32, len: u64) -> bool {
+        MappedImageBacking::new(self).covers(rva, len)
+    }
+
+    /// Validate the input and arithmetic of a mapping without changing memory.
+    /// The plan borrows section data from `bytes`, so the mapping itself does
+    /// not need to rediscover file-slice errors.
+    fn mapping_plan<'a>(
+        &self,
+        bytes: &'a [u8],
+        base: u64,
+        budget: u64,
+    ) -> Result<MappingPlan<'a>, PeError> {
+        let (headers_len, headers_mapped, image_base_field_offset) = self.headers_for(bytes)?;
+
+        // Count allocated bytes and measure the full image span separately.
+        // RVA gaps do not consume host memory.
+        let mut mapped = headers_mapped;
+        let mut required = headers_mapped;
+        for sec in &self.sections {
+            let size = u64::from(sec.virtual_size.max(sec.raw_data_size));
+            mapped = mapped
+                .checked_add(size)
+                .ok_or(PeError::SectionMappingError(MemoryError::AllocationFailed))?;
+            if size != 0 {
+                required = required.max(u64::from(sec.virtual_address) + size);
+            }
+        }
+        if mapped > budget {
+            return Err(PeError::SectionMappingError(MemoryError::AllocationFailed));
+        }
+        let declared = self.size_of_image;
+        if required > u64::from(declared) {
+            return Err(PeError::InvalidImageSize { declared, required });
+        }
+
+        base.checked_add(headers_mapped)
+            .ok_or(PeError::SectionMappingError(MemoryError::Overflow))?;
+        let image_base_field = base
+            .checked_add(image_base_field_offset as u64)
+            .ok_or(PeError::InvalidHeaderSize)?;
+        let header_map_size = usize::try_from(headers_mapped)
+            .map_err(|_| PeError::SectionMappingError(MemoryError::AllocationFailed))?;
+
+        let mut sections = Vec::with_capacity(self.sections.len());
+        for sec in &self.sections {
+            let size = u64::from(sec.virtual_size.max(sec.raw_data_size));
+            if size == 0 {
+                continue;
+            }
+            let section_base = base
+                .checked_add(u64::from(sec.virtual_address))
+                .ok_or(PeError::SectionMappingError(MemoryError::Overflow))?;
+            section_base
+                .checked_add(size)
+                .ok_or(PeError::SectionMappingError(MemoryError::Overflow))?;
+            let size = usize::try_from(size)
+                .map_err(|_| PeError::SectionMappingError(MemoryError::AllocationFailed))?;
+            sections.push(SectionMapping {
+                base: section_base,
+                size,
+                permissions: sec.permissions,
+                initial_data: section_initial_data(bytes, sec)?,
+            });
+        }
+
+        let entry_point = base
+            .checked_add(u64::from(self.entry_point_rva))
+            .ok_or(PeError::InvalidEntryPoint)?;
+        self.validate_entry_point()?;
+
+        Ok(MappingPlan {
+            headers: &bytes[..headers_len],
+            header_map_size,
+            image_base_field,
+            entry_point,
+            sections,
+        })
+    }
+
+    /// Validate without mutation that these exact bytes can be mapped at
+    /// `base` under the same header, extent, budget, arithmetic and entry rules
+    /// used by `map_into_memory`.
+    pub(crate) fn validate_mapping_at(&self, bytes: &[u8], base: u64) -> Result<(), PeError> {
+        self.mapping_plan(bytes, base, DEFAULT_MAPPED_IMAGE_BUDGET)
+            .map(|_| ())
+    }
+
+    pub(crate) fn image_base_field_address(&self, bytes: &[u8], base: u64) -> Result<u64, PeError> {
+        Ok(self
+            .mapping_plan(bytes, base, DEFAULT_MAPPED_IMAGE_BUDGET)?
+            .image_base_field)
+    }
+
+    /// Map this parsed image into an existing guest address space at `base`.
+    ///
+    /// Only the image headers and sections are mapped. Relocations, import
+    /// binding, exception-directory registration, TLS initialization and entry
+    /// execution remain separate steps. The mapping is transactional: if any
+    /// region cannot be mapped, `memory` is restored to its prior state.
+    ///
+    /// This insertion-only implementation snapshots the address space before
+    /// mapping, so its cost and peak host memory use scale with the existing
+    /// memory rather than only the new image. It is a batch-local mechanism,
+    /// not the ownership or rollback design for dynamic module loading.
+    ///
+    /// The result is the entry address for a nonzero entry RVA, or `None` for
+    /// a DLL whose entry RVA is zero.
+    pub fn map_into_memory(
+        &self,
+        bytes: &[u8],
+        memory: &mut GuestMemory,
+        base: u64,
+    ) -> Result<Option<u64>, PeError> {
+        let mapped = self.map_transactional(bytes, memory, base, DEFAULT_MAPPED_IMAGE_BUDGET)?;
+        Ok((self.entry_point_rva != 0).then_some(mapped.entry_point))
+    }
+
+    fn map_transactional(
+        &self,
+        bytes: &[u8],
+        memory: &mut GuestMemory,
+        base: u64,
+        budget: u64,
+    ) -> Result<MappingOutcome, PeError> {
+        let plan = self.mapping_plan(bytes, base, budget)?;
+        let before = memory.clone();
+        match map_plan(base, memory, plan) {
+            Ok(mapped) => Ok(mapped),
+            Err(error) => {
+                *memory = before;
+                Err(error)
+            }
+        }
+    }
+
     /// Load this parsed PE into a fresh `GuestMemory` instance, mapping the
     /// headers and all sections.
     pub fn load_into_memory(&self, bytes: &[u8]) -> Result<LoadedImage, PeError> {
-        let (memory, entry_point, image_base_field) = self.map_at_base(bytes, self.image_base)?;
+        let (memory, entry_point, image_base_field) =
+            self.map_at_base(bytes, self.image_base, DEFAULT_MAPPED_IMAGE_BUDGET)?;
         Ok(LoadedImage {
             pe: self.clone(),
             memory,
@@ -346,8 +671,13 @@ impl ParsedPe {
         })
     }
 
-    pub(crate) fn load_at_base(self, bytes: &[u8], base: u64) -> Result<LoadedImage, PeError> {
-        let (memory, entry_point, image_base_field) = self.map_at_base(bytes, base)?;
+    pub(crate) fn load_at_base(
+        self,
+        bytes: &[u8],
+        base: u64,
+        budget: u64,
+    ) -> Result<LoadedImage, PeError> {
+        let (memory, entry_point, image_base_field) = self.map_at_base(bytes, base, budget)?;
         Ok(LoadedImage {
             pe: self,
             memory,
@@ -356,71 +686,15 @@ impl ParsedPe {
         })
     }
 
-    fn map_at_base(&self, bytes: &[u8], base: u64) -> Result<(GuestMemory, u64, u64), PeError> {
-        let (headers_len, headers_mapped, image_base_field) = self.headers_for(bytes)?;
-
-        // The headers and each section become zero-filled host allocations, so bound
-        // the total before allocating anything. Sections may not overlap, so the sum
-        // is the mapped size.
-        let mapped = self
-            .sections
-            .iter()
-            .map(|sec| u64::from(sec.virtual_size.max(sec.raw_data_size)))
-            .sum::<u64>()
-            + headers_mapped;
-        if mapped > MAX_MAPPED_IMAGE_BYTES {
-            return Err(PeError::SectionMappingError(MemoryError::AllocationFailed));
-        }
-
+    fn map_at_base(
+        &self,
+        bytes: &[u8],
+        base: u64,
+        budget: u64,
+    ) -> Result<(GuestMemory, u64, u64), PeError> {
         let mut memory = GuestMemory::new();
-
-        // Windows maps the headers read-only at the image base, and programs read
-        // them: a C runtime finds its own sections this way before `main`. The
-        // budget above is checked first, and the file bytes are the initial data
-        // of the mapping, so nothing else is copied.
-        memory
-            .map_region_with_data(
-                base,
-                headers_mapped as usize,
-                MemoryPermissions::READ_ONLY,
-                &bytes[..headers_len],
-            )
-            .map_err(PeError::SectionMappingError)?;
-        let image_base_field = base
-            .checked_add(image_base_field as u64)
-            .ok_or(PeError::InvalidHeaderSize)?;
-
-        for sec in &self.sections {
-            let base_addr = base
-                .checked_add(u64::from(sec.virtual_address))
-                .ok_or(PeError::InvalidSectionHeaders)?;
-            let map_size = std::cmp::max(sec.virtual_size, sec.raw_data_size) as usize;
-            if map_size == 0 {
-                continue;
-            }
-
-            let initial_data = if sec.raw_data_size > 0 && sec.raw_data_ptr > 0 {
-                let start = sec.raw_data_ptr as usize;
-                let end = start
-                    .checked_add(sec.raw_data_size as usize)
-                    .ok_or(PeError::InvalidSectionHeaders)?;
-                bytes
-                    .get(start..end)
-                    .ok_or(PeError::InvalidSectionHeaders)?
-            } else {
-                &[]
-            };
-
-            memory
-                .map_region_with_data(base_addr, map_size, sec.permissions, initial_data)
-                .map_err(PeError::SectionMappingError)?;
-        }
-
-        let entry_point = base
-            .checked_add(u64::from(self.entry_point_rva))
-            .ok_or(PeError::InvalidEntryPoint)?;
-
-        Ok((memory, entry_point, image_base_field))
+        let mapped = self.map_transactional(bytes, &mut memory, base, budget)?;
+        Ok((memory, mapped.entry_point, mapped.image_base_field))
     }
 }
 
@@ -433,6 +707,156 @@ mod tests {
     fn section_table(bytes: &[u8]) -> usize {
         let coff = read_u32(bytes, 0x3c) as usize + 4;
         coff + 20 + usize::from(read_u16(bytes, coff + 16))
+    }
+
+    #[test]
+    fn mapped_image_budget_counts_headers_and_sections() {
+        let pe = ParsedPe::parse(FIXTURE).unwrap();
+        let required = u64::from(pe.size_of_headers).next_multiple_of(HEADER_PAGE)
+            + pe.sections
+                .iter()
+                .map(|section| u64::from(section.virtual_size.max(section.raw_data_size)))
+                .sum::<u64>();
+        assert!(matches!(
+            pe.mapping_plan(FIXTURE, pe.image_base, required - 1),
+            Err(PeError::SectionMappingError(MemoryError::AllocationFailed))
+        ));
+        assert!(pe.mapping_plan(FIXTURE, pe.image_base, required).is_ok());
+    }
+
+    #[test]
+    fn header_reads_skip_the_stub_optional_padding_and_raw_sections() {
+        const PE_AT: u64 = 0x8000_0000;
+        const OPTIONAL_SIZE: u16 = u16::MAX;
+        const RAW_AT: u32 = 0xffff_f000;
+        const RAW_SIZE: u32 = 0x2000;
+        let original = ParsedPe::parse(FIXTURE).unwrap();
+        let file_len = u64::from(RAW_AT) + u64::from(RAW_SIZE);
+        let old_pe_at = read_u32(FIXTURE, 0x3c) as usize;
+        let mut dos = FIXTURE[..64].to_vec();
+        dos[0x3c..0x40].copy_from_slice(&(PE_AT as u32).to_le_bytes());
+        let mut coff = FIXTURE[old_pe_at..old_pe_at + 24].to_vec();
+        coff[20..22].copy_from_slice(&OPTIONAL_SIZE.to_le_bytes());
+        let optional = &FIXTURE[old_pe_at + 24..old_pe_at + 24 + 112];
+        let table_len = usize::from(original.number_of_sections) * SECTION_HEADER_SIZE;
+        let table_at = section_table(FIXTURE);
+        let mut table = FIXTURE[table_at..table_at + table_len].to_vec();
+        let last = table_len - SECTION_HEADER_SIZE;
+        table[last + 16..last + 20].copy_from_slice(&RAW_SIZE.to_le_bytes());
+        table[last + 20..last + 24].copy_from_slice(&RAW_AT.to_le_bytes());
+        let ranges: [(u64, &[u8]); 4] = [
+            (0, &dos),
+            (PE_AT, &coff),
+            (PE_AT + 24, optional),
+            (PE_AT + 24 + u64::from(OPTIONAL_SIZE), &table),
+        ];
+
+        for physical_len in [file_len, file_len - 1] {
+            let mut expected = ranges.into_iter();
+            let result = ParsedPe::parse_headers(physical_len, |offset, size| {
+                let (expected_offset, data) = expected.next().expect("unexpected header read");
+                assert_eq!((offset, size), (expected_offset, data.len()));
+                Ok::<_, PeError>(std::borrow::Cow::Borrowed(data))
+            });
+            assert!(expected.next().is_none());
+            if physical_len == file_len {
+                let parsed = result.unwrap();
+                let mut sections = original.sections.clone();
+                sections.last_mut().unwrap().raw_data_ptr = RAW_AT;
+                sections.last_mut().unwrap().raw_data_size = RAW_SIZE;
+                assert_eq!(parsed.sections, sections);
+                assert_eq!(parsed.entry_point_rva, original.entry_point_rva);
+            } else {
+                assert_eq!(result.unwrap_err(), PeError::InvalidSectionHeaders);
+            }
+        }
+    }
+
+    #[test]
+    fn header_read_errors_keep_slice_parser_precedence() {
+        let pe_at = read_u32(FIXTURE, 0x3c) as usize;
+        let optional = pe_at + 24;
+        let coff_reads = [(0, 64), (pe_at as u64, 24)];
+        let magic_reads = [(0, 64), (pe_at as u64, 24), (optional as u64, 2)];
+        let mut bytes = FIXTURE.to_vec();
+        bytes[pe_at..pe_at + 4].fill(0);
+        for (len, error, reads) in [
+            (optional - 1, PeError::TooSmall, &coff_reads[..1]),
+            (optional, PeError::InvalidPeSignature, &coff_reads[..]),
+        ] {
+            check_header_error(&bytes[..len], error, reads);
+        }
+
+        bytes[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+        bytes[optional..optional + 2].copy_from_slice(&0x010bu16.to_le_bytes());
+        check_header_error(&bytes[..optional + 1], PeError::TooSmall, &coff_reads);
+        check_header_error(
+            &bytes[..optional + 2],
+            PeError::InvalidMagic(0x010b),
+            &magic_reads,
+        );
+        // The magic check also precedes a too-short *declared* optional header.
+        bytes[pe_at + 20..pe_at + 22].copy_from_slice(&1u16.to_le_bytes());
+        check_header_error(&bytes, PeError::InvalidMagic(0x010b), &magic_reads);
+        bytes[optional..optional + 2].copy_from_slice(&PE32_PLUS_MAGIC.to_le_bytes());
+        check_header_error(&bytes, PeError::TooSmall, &magic_reads);
+    }
+
+    fn check_header_error(bytes: &[u8], error: PeError, reads: &[(u64, usize)]) {
+        let mut expected = reads.iter().copied();
+        let positional = ParsedPe::parse_headers(bytes.len() as u64, |offset, size| {
+            assert_eq!(Some((offset, size)), expected.next());
+            let start = offset as usize;
+            Ok::<_, PeError>(std::borrow::Cow::Borrowed(&bytes[start..start + size]))
+        });
+        assert!(expected.next().is_none());
+        assert_eq!(positional.unwrap_err(), error);
+        assert_eq!(ParsedPe::parse(bytes).unwrap_err(), error);
+    }
+
+    #[test]
+    fn failed_existing_memory_mapping_restores_layout_and_metadata() {
+        const BASE: u64 = 0x1_6000_0000;
+        const BLOCKED_BYTE: u8 = 0xEE;
+        let pe = ParsedPe::parse(FIXTURE).unwrap();
+        let first = pe
+            .sections
+            .iter()
+            .find(|section| section.virtual_size.max(section.raw_data_size) != 0)
+            .expect("fixture has a nonempty section");
+        let blocker = BASE + u64::from(first.virtual_address);
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region_with_data(blocker, 1, MemoryPermissions::READ_WRITE, &[BLOCKED_BYTE])
+            .unwrap();
+        memory.main_image = Some(crate::memory::MainImage {
+            base: 0x1234_0000,
+            size: 0x5678,
+            entry_point: 0x1234_1000,
+        });
+        memory.write_fault = Some(0x2222_3333);
+        memory.unhandled_filter = 0x4444_5555;
+        let usage = memory.usage();
+
+        let error = pe
+            .map_into_memory(FIXTURE, &mut memory, BASE)
+            .expect_err("the blocker overlaps the first section");
+        assert!(matches!(
+            error,
+            PeError::SectionMappingError(MemoryError::OverlappingRegion { .. })
+        ));
+        assert_eq!(memory.usage(), usage);
+        assert_eq!(memory.read_u8(blocker), Ok(BLOCKED_BYTE));
+        assert_eq!(
+            memory.read_u8(BASE),
+            Err(MemoryError::UnmappedAddress(BASE))
+        );
+        let main = memory.main_image.expect("main image metadata survives");
+        assert_eq!(main.base, 0x1234_0000);
+        assert_eq!(main.size, 0x5678);
+        assert_eq!(main.entry_point, 0x1234_1000);
+        assert_eq!(memory.write_fault, Some(0x2222_3333));
+        assert_eq!(memory.unhandled_filter, 0x4444_5555);
     }
 
     #[test]

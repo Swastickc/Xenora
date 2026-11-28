@@ -15,6 +15,8 @@ use crate::memory::MemoryError;
 use std::sync::{Arc, Mutex};
 
 const SYNCH_API: &str = "api-ms-win-core-synch-l1-1-0.dll";
+const CREATE_EVENT_MANUAL_RESET: u32 = 0x0001;
+const CREATE_EVENT_INITIAL_SET: u32 = 0x0002;
 const EVENT_MODIFY_STATE: u32 = 0x0002;
 pub(super) const SYNCHRONIZE: u32 = 0x0010_0000;
 const EVENT_ALL_ACCESS: u32 = 0x001f_0003;
@@ -22,7 +24,7 @@ const WAIT_OBJECT_0: u64 = 0;
 pub(super) const INFINITE: u32 = u32::MAX;
 pub(super) const TICKS_PER_MILLI: u64 = 10_000;
 const WAIT_TIMEOUT: u64 = 258;
-const WAIT_FAILED: u64 = u32::MAX as u64;
+pub(super) const WAIT_FAILED: u64 = u32::MAX as u64;
 const WAIT_ABANDONED_0: u64 = 0x80;
 
 const SEMAPHORE_ALL_ACCESS: u32 = 0x001f_0003;
@@ -146,6 +148,31 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                     signaled,
                 },
                 EVENT_ALL_ACCESS,
+            )
+        });
+    }
+
+    for symbol in ["CreateEventExA", "CreateEventExW"] {
+        let state = Arc::clone(state);
+        registry.register(KERNEL32, symbol, move |args, cpu, mem| {
+            let attributes = args.get(0, mem).map_err(ExitReason::MemoryFault)?;
+            let name = args.get(1, mem).map_err(ExitReason::MemoryFault)?;
+            let flags = args.get(2, mem).map_err(ExitReason::MemoryFault)? as u32;
+            let access = args.get(3, mem).map_err(ExitReason::MemoryFault)? as u32;
+            if attributes != 0 || name != 0 || access & !EVENT_ALL_ACCESS != 0 {
+                return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
+            }
+            if flags & !(CREATE_EVENT_MANUAL_RESET | CREATE_EVENT_INITIAL_SET) != 0 {
+                return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            insert_waitable(
+                &state,
+                cpu.gs_base,
+                Waitable::Event {
+                    manual_reset: flags & CREATE_EVENT_MANUAL_RESET != 0,
+                    signaled: flags & CREATE_EVENT_INITIAL_SET != 0,
+                },
+                access,
             )
         });
     }
@@ -354,6 +381,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     for symbol in [
         "CreateEventA",
         "CreateEventW",
+        "CreateEventExA",
+        "CreateEventExW",
         "SetEvent",
         "ResetEvent",
         "CreateSemaphoreA",
@@ -371,6 +400,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     ] {
         registry.alias(SYNCH_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
+    }
+    for module in [
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "api-ms-win-core-synch-l1-2-1.dll",
+    ] {
+        for symbol in ["CreateEventExA", "CreateEventExW"] {
+            registry.alias(module, KERNEL32, symbol);
+        }
     }
     // Microsoft’s API-set catalog lists the ANSI entry separately and the
     // wide entry in three revisions of the core synchronization API set.
@@ -392,7 +429,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     }
 }
 
-fn wait_for_objects(
+pub(super) fn wait_for_objects(
     state: &ServicesState,
     teb: u64,
     handles: &[u64],
@@ -458,7 +495,7 @@ fn wait_for_objects(
 /// Continue the wait this thread is blocked in, if any. Waiters are retried
 /// directly after a signal, so an object found signaled once the deadline has
 /// passed was signaled too late and is left alone.
-fn resume_wait(state: &ServicesState, teb: u64) -> Option<Result<u64, ExitReason>> {
+pub(super) fn resume_wait(state: &ServicesState, teb: u64) -> Option<Result<u64, ExitReason>> {
     let mut table = state.threads.lock().expect("guest thread table");
     let Some(Pending::Objects(pending)) = table.waits.get(&teb) else {
         return None;

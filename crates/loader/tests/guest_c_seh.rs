@@ -6,8 +6,9 @@
 //! binary translation.
 //!
 //! `tests/compat_fixtures/build-guest-c-seh.sh` builds
-//! `tests/compat_fixtures/guest_c_seh.c` once per case at -O0, -O1 and -O2
-//! with clang `-fasync-exceptions`. Each case calls `xenora_note`, which this
+//! `tests/compat_fixtures/guest_c_seh.c` once per case at -O0, -O1, -O2 and
+//! -Os with clang `-fasync-exceptions`. #476 added the unhandled-exception
+//! filter, the default action and context-change cases. Each case calls `xenora_note`, which this
 //! test registers, to report what ran, and exits with its own status.
 //!
 //! The expected notes and statuses are literals written from the program's
@@ -25,7 +26,7 @@ use xenora_loader::startup::{StartupLayout, StartupResult, run_synthetic_startup
 
 const BUDGET: usize = 1_000_000;
 const IMAGE_BASE: u64 = 0x2_5000_0000;
-const LEVELS: [&str; 3] = ["O0", "O1", "O2"];
+const LEVELS: [&str; 4] = ["O0", "O1", "O2", "Os"];
 
 /// Stands for "the address of the faulting instruction", which the program
 /// notes and the test checks lies inside the image.
@@ -110,16 +111,18 @@ fn a_declining_filter_passes_the_fault_to_the_caller() {
     check("search", ExitReason::ProcessExit(43), &[2, 3, 4]);
 }
 
-/// Xenora's policy: a fault no filter accepts stops the guest with the
-/// original fault at the faulting instruction, after every filter ran.
+/// Xenora's default action (#476), a documented policy: a fault no filter
+/// accepts, with no unhandled-exception filter set, ends the process with the
+/// exception code as its status, the registers left at the faulting
+/// instruction, after every filter ran.
 #[test]
-fn a_fault_no_filter_accepts_stops_the_guest_at_the_fault() {
+fn a_fault_no_filter_accepts_ends_the_process_with_its_code() {
     for level in LEVELS {
         let name = format!("guest-c-seh-unhandled-{level}");
         let (result, notes) = run(&name);
         assert_eq!(
             result.execution.exit_reason,
-            ExitReason::DivideError,
+            ExitReason::ProcessExit(0xC000_0094),
             "{name}"
         );
         assert_eq!(notes, [5], "{name}");
@@ -173,4 +176,45 @@ fn a_termination_handler_runs_after_the_filter_and_before_the_handler() {
 #[test]
 fn a_filter_can_continue_execution_after_a_raise() {
     check("continue_execution", ExitReason::ProcessExit(50), &[41, 40]);
+}
+
+#[test]
+fn the_unhandled_exception_filter_can_continue_execution() {
+    check(
+        "filter_continue",
+        ExitReason::ProcessExit(51),
+        &[0xE000_5EA3, 61],
+    );
+}
+
+#[test]
+fn debug_break_dispatches_a_continuable_breakpoint() {
+    check(
+        "debug_break",
+        ExitReason::ProcessExit(0x8000_0003),
+        &[0x8000_0003, 67],
+    );
+}
+
+#[test]
+fn execute_handler_and_continue_search_take_the_default_action() {
+    check(
+        "filter_execute",
+        ExitReason::ProcessExit(0xC000_0094),
+        &[62, 0xC000_0094],
+    );
+    check("filter_search", ExitReason::ProcessExit(0xE000_5EA4), &[63]);
+}
+
+#[test]
+fn context_changes_apply_when_execution_continues() {
+    check("filter_context", ExitReason::ProcessExit(52), &[64]);
+    check("except_context", ExitReason::ProcessExit(53), &[64]);
+}
+
+/// Xenora's policy: an exception raised inside the unhandled-exception
+/// filter does not call the filter again and takes the default action.
+#[test]
+fn an_exception_inside_the_filter_takes_the_default_action() {
+    check("filter_nested", ExitReason::ProcessExit(0xE000_5EA7), &[66]);
 }

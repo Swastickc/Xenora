@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use xenora_loader::cpu::{CpuState, Register};
+use xenora_loader::import_table::ImportName;
 use xenora_loader::imports::{ImportRegistry, Win64Args};
 use xenora_loader::memory::{GuestMemory, MemoryPermissions};
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
@@ -37,11 +38,16 @@ pub const ARG_REUSE_RESULT: u8 = 8;
 pub const ARG_ZERO: u8 = 0;
 
 /// Services that wait on real time, run guest code or reach native Metal are
-/// left out, so each input runs quickly and deterministically.
+/// left out, so each input runs quickly and deterministically. `longjmp` is
+/// left out as well, and for a stronger reason than speed: it is a context
+/// service whose documented behaviour is to replace the callee-saved
+/// registers, so the nonvolatile invariant the driver asserts does not apply
+/// to it. The jump's real contract is covered end to end by the guest fixture
+/// of `guest_crt_jump.rs`.
 fn excluded(module: &str, symbol: &str) -> bool {
     module.eq_ignore_ascii_case("xenora_fixture.dll")
         || module.eq_ignore_ascii_case("xenora_graphics.dll")
-        || matches!(symbol, "WSAPoll" | "XTaskQueueDispatch")
+        || matches!(symbol, "WSAPoll" | "XTaskQueueDispatch" | "longjmp")
 }
 
 /// Outcome of one `Driver::run` against a single corpus input.
@@ -52,7 +58,7 @@ pub struct RunStats {
 }
 
 pub struct Driver {
-    services: Vec<(String, String)>,
+    services: Vec<(String, ImportName)>,
 }
 
 impl Default for Driver {
@@ -68,10 +74,10 @@ impl Driver {
             &mut registry,
             Arc::new(ServicesState::new(Arc::new(MockClock::new(0)))),
         );
-        let mut services: Vec<(String, String)> = registry
-            .iter_registered()
-            .filter(|(module, symbol, _)| !excluded(module, symbol))
-            .map(|(module, symbol, _)| (module.to_owned(), symbol.to_owned()))
+        let mut services: Vec<(String, ImportName)> = registry
+            .iter_service_descriptors()
+            .filter(|descriptor| !excluded(&descriptor.module, &descriptor.symbol))
+            .map(|descriptor| (descriptor.module.clone(), descriptor.import_name()))
             .collect();
         services.sort();
         Self { services }
@@ -88,7 +94,7 @@ impl Driver {
         self.services
             .iter()
             .position(|(entry_module, entry_symbol)| {
-                entry_module.eq_ignore_ascii_case(module) && entry_symbol == symbol
+                entry_module.eq_ignore_ascii_case(module) && entry_symbol.to_string() == symbol
             })
     }
 
@@ -178,7 +184,7 @@ impl Driver {
             let before = preserved.map(|register| cpu.get(register));
 
             let service = registry
-                .binding(module, symbol)
+                .binding_key(module, symbol)
                 .expect("registered service");
             let outcome = (service.handler)(&Win64Args::new(&cpu), &mut cpu, &mut memory);
 

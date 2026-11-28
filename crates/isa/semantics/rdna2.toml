@@ -26,7 +26,13 @@ include = [
   "rdna2/vopc.toml",
   "rdna2/vop3.toml",
   "rdna2/sopp.toml",
+  "rdna2/mimg.toml",
 ]
+
+# The MIMG family is added to an existing table. It is rendered after the
+# encoding-variant rows so every pre-existing generated form and variant keeps
+# its exact position; this is an additive schema key for #215.
+append_after_variants = ["MIMG"]
 
 # Named public documents that spec references point at.
 [documents.guide]
@@ -44,13 +50,14 @@ file = "amdgpu_isa_rdna2.xml"
 #   opcode        XML opcode; must match
 #   variant       Rust enum variant of the typed op
 #   operation     primitive (closed vocabulary in generate_semantics.py OPERATIONS)
-#   signedness    unsigned | signed | bitwise (bitwise iff a logical operation)
+#   signedness    unsigned | signed | bitwise (bitwise iff a logical operation) | float
+#                 (float iff a binary32 rounding operation: trunc, ceil, rndne, floor)
 #   carry_in      none | scc | vcc  (implicit scalar or per-lane condition or carry)
 #   width         operand and result width in bits
 #   scc           unchanged | carry_out | borrow | signed_overflow | nonzero | relation | selected_src0
 #   vcc, exec     unchanged (stated, not implied) | lane_mask (Wave32 VOPC compare or VOP2 carry output)
 #                 VOP3A compare variant rows derive sdst_lane_mask from their operand rule.
-#   wave          any | wave32 (wave32 for VOPC compares, VOP1 integer forms and VCC-reading VOP2 forms)
+#   wave          any | wave32 (wave32 for VOPC compares, VOP1 integer and rounding forms and VCC-reading VOP2 forms)
 #   operands      a key of [operand_rules]
 #   spec          references; at least one guide section with a page
 #   verify        evidence required before the form counts as verified

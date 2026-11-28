@@ -1,11 +1,16 @@
 //! `xenora shaders`: instruction inventory and stream inspection.
 
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read};
+use std::path::Path;
 use std::process::ExitCode;
 
 use xenora_decoder::{Architecture, SEMANTIC_FORMS, decode_at};
 use xenora_isa::meta::{self, EncodingFamily, FORMS, identify};
 
 const USAGE: &str = "usage: xenora shaders <coverage [--json] | inspect <gfx1030.bin>>";
+const MAX_SHADER_BYTES: usize = 1024 * 1024;
+const TOO_LARGE: &str = "shader file exceeds the 1 MiB inspection limit";
 
 pub fn command(args: &[String]) -> ExitCode {
     match args {
@@ -82,8 +87,51 @@ fn coverage_report(json: bool) -> String {
     out
 }
 
+fn require_regular(metadata: &fs::Metadata) -> io::Result<()> {
+    if metadata.is_file() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular shader file",
+        ))
+    }
+}
+
+fn read_shader(path: &Path) -> io::Result<Vec<u8>> {
+    require_regular(&fs::metadata(path)?)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Darwin sys/fcntl.h. The path could have become a FIFO since stat.
+        const O_NONBLOCK: i32 = 0x00000004;
+        options.custom_flags(O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    require_regular(&metadata)?;
+    if metadata.len() > MAX_SHADER_BYTES as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, TOO_LARGE));
+    }
+    read_shader_bytes(file)
+}
+
+fn read_shader_bytes(input: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    input
+        .take((MAX_SHADER_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SHADER_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, TOO_LARGE));
+    }
+    Ok(bytes)
+}
+
 fn inspect(path: &str) -> ExitCode {
-    let bytes = match std::fs::read(path) {
+    let bytes = match read_shader(Path::new(path)) {
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!("{path}: {error}");
@@ -179,9 +227,23 @@ fn listing(bytes: &[u8]) -> Listing {
 
 #[cfg(test)]
 mod tests {
-    use super::{coverage_report, listing};
+    use super::{MAX_SHADER_BYTES, TOO_LARGE, coverage_report, listing, read_shader_bytes};
+    use std::io::{self, Read};
     use xenora_decoder::SEMANTIC_FORMS;
     use xenora_isa::meta::{EncodingFamily, FORMS};
+
+    #[test]
+    fn bounded_read_accepts_the_limit_and_rejects_more_bytes() {
+        let exact = io::repeat(0x55).take(MAX_SHADER_BYTES as u64);
+        let bytes = read_shader_bytes(exact).unwrap();
+        assert_eq!(bytes.len(), MAX_SHADER_BYTES);
+        assert!(bytes.iter().all(|&byte| byte == 0x55));
+
+        let mut growing = io::repeat(0x55).take(MAX_SHADER_BYTES as u64 + 2);
+        let error = read_shader_bytes(&mut growing).unwrap_err();
+        assert_eq!(error.to_string(), TOO_LARGE);
+        assert_eq!(growing.limit(), 1, "the read passed the one-byte sentinel");
+    }
 
     #[test]
     fn coverage_totals_match_the_generated_table() {

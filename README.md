@@ -42,6 +42,13 @@ check the synthetic pixels on the GPU from a terminal, run:
 build/Xenora.app/Contents/MacOS/Xenora --smoke-frame
 ```
 
+In **Run executable (experimental)**, use **Choose input file…** under
+**Standard input** to select a regular file of at most 1 MiB. When you click
+**Run**, the app sends the file's bytes to the guest worker as standard
+input. Use **Clear input file** to remove the selection. Opening another
+executable also clears it. With no file selected, the guest sees end-of-file
+immediately.
+
 Closing the app and running `scripts/build-app.sh` again rebuilds the same
 bundle. Commercial Xbox game execution is unsupported.
 
@@ -65,6 +72,27 @@ RGBA bytes and the backend, followed by the guest exit status and journal.
 Each run accepts up to 32 directions and uses one instruction budget across
 the application. `--steps` changes that budget, and the supervising process
 stops a worker that exceeds the 15-second wall deadline.
+
+To replay a saved sequence, put the version on the first line of a text file,
+followed by one to 32 directions, one per line. Save the following example to
+`sequence.txt`.
+
+```text
+xenora-session-v1
+right
+left
+left
+right
+```
+
+```sh
+cargo run --locked -p xenora --bin xenora-session -- --backend reference --replay sequence.txt --frame-dir replay-frames
+```
+
+Use a regular file of at most 256 bytes, with LF or CRLF line endings and an
+optional final newline. Choose one source for directions per run, either
+`--replay` or positional arguments. The backend and instruction budget are
+selected on the command line.
 
 The command supports the embedded synthetic application. External PE
 admission and a macOS interface for this session are future work.
@@ -224,7 +252,7 @@ Implemented and tested functionality includes:
 
 - Validated mip levels and array layers.
 - Pitched texture uploads.
-- Block-compressed texture handling, including BC4/BC5 upload and readback and a CPU BC7 decoder for the eight modes.
+- Block-compressed texture handling, including native BC1–BC5, BC6H and BC7 upload and readback, a CPU BC7 decoder for the eight modes and a CPU BC6H decoder for the single-subset modes.
 - Native Metal texture readback.
 - Edge-block and transparency tests.
 - Invalid descriptor and bounds rejection.
@@ -325,7 +353,9 @@ Progress is measured by reproducible tests rather than estimated game compatibil
 - Rust toolchain with `aarch64-apple-darwin` support.
 - Xcode and Metal development tools.
 - Python 3.11 or newer.
-- LLVM with AMDGPU support for applicable shader-fixture assembly and verification.
+- Native mingw-w64 for hosted PE tests (`brew install mingw-w64`).
+- LLVM with AMDGPU support for shader-fixture assembly and optional verification.
+  The LLVM comparisons are [opt-in](CONTRIBUTING.md#development-and-verification).
 
 The recorded Apple M5 environment uses Rust 1.100.0 and Xcode 27.2.
 
@@ -344,6 +374,11 @@ cargo build --locked -p xenora
 ```
 
 ### Run core tests
+
+The hosted tests compile their Windows PE fixtures from source and fail
+if `x86_64-w64-mingw32-gcc` is missing. For the separate
+Gate A1 clang and LLD requirements and linker fallbacks, see
+[Gate A toolchain setup](docs/testing/gate-a.md#toolchain-setup).
 
 ```sh
 cargo fmt --all -- --check

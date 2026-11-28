@@ -460,6 +460,18 @@ pub(super) fn wait_for_objects(
                 }
                 waitables.push(event);
             }
+            // A spawned child is a process that already ended: its signal is
+            // set for good, so the wait treats it like any signaled object.
+            Some(GuestObject::ChildProcess { signal, .. }) => {
+                if all
+                    && waitables
+                        .iter()
+                        .any(|existing| Arc::ptr_eq(existing, signal))
+                {
+                    return state.fail(teb, ERROR_INVALID_PARAMETER, WAIT_FAILED);
+                }
+                waitables.push(signal);
+            }
             Some(_) => return state.fail(teb, ERROR_NOT_SUPPORTED, WAIT_FAILED),
             None if matches!(*handle, super::CURRENT_THREAD | super::CURRENT_PROCESS) => {
                 return state.fail(teb, ERROR_NOT_SUPPORTED, WAIT_FAILED);

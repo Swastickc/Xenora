@@ -458,6 +458,7 @@ remains unsupported.
   address computation.
 - Added Win64 TEB allocation and `gs_base` initialization to synthetic guest startup.
 - The scalar BMI1 and BMI2 bit-manipulation forms ANDN, BLSI, BLSMSK, BLSR, SHLX, SHRX, SARX and RORX execute in the interpreter and the dynamic binary translator, in both 32 and 64-bit operand widths, register and memory forms. Semantics follow the Intel SDM operation sections exactly: the variable shifts and RORX write no flags, BLSI sets CF from a nonzero source, BLSR and BLSMSK from a zero one, and the undefined flags keep their values. LLVM-assembled fixtures with edge counts compare an independent bit-level reference against both engines (#1098).
+- WinHTTP HTTP-date conversion utilities (#1109): `WinHttpTimeToSystemTime` parses the exact RFC 2616 RFC1123, RFC850 and asctime forms into bounded SYSTEMTIME values, including validated leap years, computed weekdays and a year-granularity rolling fifty-year RFC850 century window driven by the service clock. `WinHttpTimeFromSystemTime` validates input calendar fields and emits the RFC1123 generation form with a null terminator. The parser deliberately remains narrower than permissive legacy implementations: lowercase or whitespace-tolerant forms, leap seconds, non-GMT zone names and years above 9999 fail honestly. Direct service tests cover all three forms, round trips, malformed inputs and invalid guest memory on Apple Silicon; independent acceptance and real Xbox compatibility are not claimed.
 
 ### Fixed
 

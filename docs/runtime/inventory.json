@@ -17400,6 +17400,36 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "PeekMessageW"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "PostThreadMessageA"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "PostThreadMessageW"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "ShowWindow"
     },
     {
@@ -19176,15 +19206,15 @@
   "summary": {
     "aliases": 945,
     "api_set_aliases": 744,
-    "canonical_services": 916,
+    "canonical_services": 919,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 246,
     "implicit_status_services": 78,
     "libraries": 23,
-    "manual_services": 616,
+    "manual_services": 619,
     "ordinal_aliases": 35,
-    "partial": 670,
+    "partial": 673,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 300,

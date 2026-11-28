@@ -15,6 +15,9 @@ const VERSION: u16 = 0x0202;
 const WSADATA_SIZE: usize = 408;
 const MAX_DATAGRAM: usize = 65_507;
 const MAX_PENDING_DATAGRAMS: usize = 16;
+const STREAM_WINDOW: usize = 65_536;
+const MAX_WSABUF_COUNT: u32 = 64;
+const WSABUF_SIZE: u64 = 16;
 const MAX_SOCKETS: usize = 64;
 const SOCKET_ERROR: u64 = u32::MAX as u64;
 const INVALID_SOCKET: u64 = u64::MAX;
@@ -157,6 +160,82 @@ fn loopback_port(memory: &GuestMemory, address: u64, size: u32) -> Result<u16, u
     Ok(u16::from_be_bytes([data[2], data[3]]))
 }
 
+fn read_wsabufs(
+    memory: &GuestMemory,
+    address: u64,
+    count: u32,
+) -> Result<(Vec<(u64, u32)>, u64), u32> {
+    if address == 0 {
+        return Err(WSAEFAULT);
+    }
+    if count == 0 || count > MAX_WSABUF_COUNT {
+        return Err(WSAEINVAL);
+    }
+    let mut buffers = Vec::with_capacity(count as usize);
+    let mut total = 0_u64;
+    for index in 0..u64::from(count) {
+        let base = address.checked_add(index * WSABUF_SIZE).ok_or(WSAEFAULT)?;
+        let length = memory.read_u32(base).map_err(|_| WSAEFAULT)?;
+        let pointer = memory.read_u64(base + 8).map_err(|_| WSAEFAULT)?;
+        if length != 0 && pointer == 0 {
+            return Err(WSAEFAULT);
+        }
+        total = total.checked_add(u64::from(length)).ok_or(WSAEINVAL)?;
+        buffers.push((pointer, length));
+    }
+    Ok((buffers, total))
+}
+
+fn gather_wsabufs(
+    memory: &GuestMemory,
+    buffers: &[(u64, u32)],
+    limit: usize,
+) -> Result<Vec<u8>, u32> {
+    let mut gathered = Vec::with_capacity(limit);
+    for &(pointer, length) in buffers {
+        let remaining = limit - gathered.len();
+        if remaining == 0 {
+            break;
+        }
+        let count = (length as usize).min(remaining);
+        if count == 0 {
+            continue;
+        }
+        let start = gathered.len();
+        gathered.resize(start + count, 0);
+        memory
+            .read_bytes(pointer, &mut gathered[start..])
+            .map_err(|_| WSAEFAULT)?;
+    }
+    Ok(gathered)
+}
+
+fn scatter_wsabufs(
+    memory: &mut GuestMemory,
+    buffers: &[(u64, u32)],
+    data: &[u8],
+) -> Result<(), u32> {
+    let mut offset = 0;
+    for &(pointer, length) in buffers {
+        if offset == data.len() {
+            break;
+        }
+        let count = (length as usize).min(data.len() - offset);
+        if count == 0 {
+            continue;
+        }
+        memory
+            .write_bytes(pointer, &data[offset..offset + count])
+            .map_err(|_| WSAEFAULT)?;
+        offset += count;
+    }
+    if offset == data.len() {
+        Ok(())
+    } else {
+        Err(WSAEFAULT)
+    }
+}
+
 fn socket_result(
     state: &ServicesState,
     teb: u64,
@@ -264,6 +343,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
     register_address_conversion(registry, state);
     register_loopback(registry, state);
+    register_wsa_io(registry, state);
     register_socket_names(registry, state);
     register_service_lookup(registry, state);
     register_socket_options(registry, state);
@@ -539,12 +619,13 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
                     let Some(target) = net.sockets.get_mut(&peer_handle) else {
                         return Err(WSAECONNREFUSED);
                     };
-                    const STREAM_WINDOW: usize = 65_536;
                     let room = STREAM_WINDOW.saturating_sub(target.stream_read.len());
                     let accepted = room.min(length);
                     target.stream_read.extend(data[..accepted].iter().copied());
-                    fire_event(&send, &mut net, peer_handle, FD_READ);
-                    send.winsock_changed.notify_all();
+                    if accepted != 0 {
+                        fire_event(&send, &mut net, peer_handle, FD_READ);
+                        send.winsock_changed.notify_all();
+                    }
                     return Ok(accepted as u64);
                 }
                 let peer = socket.peer.ok_or(WSAENOTCONN)?;
@@ -632,6 +713,162 @@ fn register_loopback(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
                     return Err(WSAEMSGSIZE);
                 }
                 Ok(copied as u64)
+            })();
+            socket_result(&recv, cpu.gs_base, result)
+        },
+    );
+}
+
+fn register_wsa_io(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    // The synchronous non-overlapped gather form. The sockets of this
+    // machine are nonblocking by construction; stream sends therefore keep
+    // the existing partial-flow-control result in the byte-count output.
+    let send = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSASend",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let result = (|| {
+                let flags = args.get(4, memory).map_err(|_| WSAEFAULT)? as u32;
+                let overlapped = args.get(5, memory).map_err(|_| WSAEFAULT)?;
+                let completion = args.get(6, memory).map_err(|_| WSAEFAULT)?;
+                if flags != 0 || overlapped != 0 || completion != 0 {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                if args.r9 == 0 {
+                    return Err(WSAEFAULT);
+                }
+                memory.check_write(args.r9, 4).map_err(|_| WSAEFAULT)?;
+                let (buffers, total) = read_wsabufs(memory, args.rdx, args.r8 as u32)?;
+                let limit = (total as usize).min(STREAM_WINDOW);
+                let data = gather_wsabufs(memory, &buffers, limit)?;
+                let mut net = send.winsock.lock().expect("guest Winsock state");
+                let socket = net.socket(args.rcx)?;
+                if socket.shutdown_send {
+                    return Err(WSAESHUTDOWN);
+                }
+                if socket.stream {
+                    let peer_handle = socket.stream_peer.ok_or(WSAENOTCONN)?;
+                    let Some(target) = net.sockets.get_mut(&peer_handle) else {
+                        return Err(WSAECONNREFUSED);
+                    };
+                    let room = STREAM_WINDOW.saturating_sub(target.stream_read.len());
+                    let accepted = room.min(data.len());
+                    target.stream_read.extend(data[..accepted].iter().copied());
+                    if accepted != 0 {
+                        fire_event(&send, &mut net, peer_handle, FD_READ);
+                        send.winsock_changed.notify_all();
+                    }
+                    memory
+                        .write_u32(args.r9, accepted as u32)
+                        .map_err(|_| WSAEFAULT)?;
+                    return Ok(0);
+                }
+                if total > MAX_DATAGRAM as u64 {
+                    return Err(WSAEMSGSIZE);
+                }
+                let peer = socket.peer.ok_or(WSAENOTCONN)?;
+                let source = socket.port.expect("connected socket is bound");
+                let target_handle = net.sockets.iter().find_map(|(handle, socket)| {
+                    (socket.port == Some(peer) && socket.peer.is_none_or(|port| port == source))
+                        .then_some(*handle)
+                });
+                if let Some(handle) = target_handle {
+                    let target = net.sockets.get_mut(&handle).expect("target socket");
+                    if target.pending.len() == MAX_PENDING_DATAGRAMS {
+                        return Err(WSAENOBUFS);
+                    }
+                    target.pending.push_back((source, data));
+                    fire_event(&send, &mut net, handle, FD_READ);
+                    send.winsock_changed.notify_all();
+                }
+                memory
+                    .write_u32(args.r9, total as u32)
+                    .map_err(|_| WSAEFAULT)?;
+                Ok(0)
+            })();
+            socket_result(&send, cpu.gs_base, result)
+        },
+    );
+
+    // Scatter receive. Datagram truncation follows the documented unreliable
+    // protocol rule: the excess is discarded and WSAEMSGSIZE is reported.
+    let recv = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSARecv",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let result = (|| {
+                let flags_ptr = args.get(4, memory).map_err(|_| WSAEFAULT)?;
+                let overlapped = args.get(5, memory).map_err(|_| WSAEFAULT)?;
+                let completion = args.get(6, memory).map_err(|_| WSAEFAULT)?;
+                if overlapped != 0 || completion != 0 {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                if args.r9 == 0 || flags_ptr == 0 {
+                    return Err(WSAEFAULT);
+                }
+                memory.check_write(args.r9, 4).map_err(|_| WSAEFAULT)?;
+                memory.check_write(flags_ptr, 4).map_err(|_| WSAEFAULT)?;
+                let flags = memory.read_u32(flags_ptr).map_err(|_| WSAEFAULT)?;
+                if flags != 0 {
+                    return Err(WSAEOPNOTSUPP);
+                }
+                let (buffers, total) = read_wsabufs(memory, args.rdx, args.r8 as u32)?;
+                for &(pointer, length) in &buffers {
+                    if length != 0 {
+                        memory
+                            .check_write(pointer, length as usize)
+                            .map_err(|_| WSAEFAULT)?;
+                    }
+                }
+                let mut net = recv.winsock.lock().expect("guest Winsock state");
+                if net.socket(args.rcx)?.port.is_none() {
+                    return Err(WSAEINVAL);
+                }
+                if net.socket(args.rcx)?.shutdown_receive {
+                    return Err(WSAESHUTDOWN);
+                }
+                if net.socket(args.rcx)?.stream {
+                    let socket = net.sockets.get_mut(&args.rcx).expect("validated socket");
+                    if socket.stream_read.is_empty() {
+                        if socket.stream_eof {
+                            memory.write_u32(args.r9, 0).map_err(|_| WSAEFAULT)?;
+                            memory.write_u32(flags_ptr, 0).map_err(|_| WSAEFAULT)?;
+                            return Ok(0);
+                        }
+                        return Err(WSAEWOULDBLOCK);
+                    }
+                    let copied = (total as usize).min(socket.stream_read.len());
+                    let data: Vec<u8> = socket.stream_read.drain(..copied).collect();
+                    scatter_wsabufs(memory, &buffers, &data)?;
+                    memory
+                        .write_u32(args.r9, copied as u32)
+                        .map_err(|_| WSAEFAULT)?;
+                    memory.write_u32(flags_ptr, 0).map_err(|_| WSAEFAULT)?;
+                    recv.winsock_changed.notify_all();
+                    return Ok(0);
+                }
+                let socket = net.sockets.get_mut(&args.rcx).expect("validated socket");
+                let Some((_, data)) = socket.pending.front() else {
+                    return Err(WSAEWOULDBLOCK);
+                };
+                let copied = (total as usize).min(data.len());
+                let data = data.clone();
+                scatter_wsabufs(memory, &buffers, &data[..copied])?;
+                let truncated = copied < data.len();
+                socket.pending.pop_front();
+                recv.winsock_changed.notify_all();
+                if truncated {
+                    return Err(WSAEMSGSIZE);
+                }
+                memory
+                    .write_u32(args.r9, copied as u32)
+                    .map_err(|_| WSAEFAULT)?;
+                memory.write_u32(flags_ptr, 0).map_err(|_| WSAEFAULT)?;
+                Ok(0)
             })();
             socket_result(&recv, cpu.gs_base, result)
         },
@@ -2578,6 +2815,453 @@ fn loopback_streams_connect_accept_exchange_and_close() {
 
 #[cfg(test)]
 #[test]
+fn wsasend_and_wsarecv_gather_scatter_stream_bytes() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    let wsabuf = |memory: &mut GuestMemory, base: u64, entries: &[(u64, u32)]| {
+        for (index, &(pointer, length)) in entries.iter().enumerate() {
+            let entry = base + index as u64 * 16;
+            memory.write_u32(entry, length).unwrap();
+            memory.write_u64(entry + 8, pointer).unwrap();
+        }
+    };
+
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    let listener = call(&mut memory, "socket", &[2, 1, 6]);
+    let client = call(&mut memory, "socket", &[2, 1, 6]);
+    let mut address = [0; 16];
+    address[..8].copy_from_slice(&[2, 0, 0x1F, 0x92, 127, 0, 0, 1]); // port 8082
+    memory.write_bytes(0x1200, &address).unwrap();
+    assert_eq!(call(&mut memory, "bind", &[listener, 0x1200, 16]), 0);
+    assert_eq!(call(&mut memory, "listen", &[listener, 4]), 0);
+    assert_eq!(call(&mut memory, "connect", &[client, 0x1200, 16]), 0);
+    memory.write_u32(0x1300, 16).unwrap();
+    let server = call(&mut memory, "accept", &[listener, 0, 0x1300]);
+
+    memory.write_bytes(0x1500, b"hel").unwrap();
+    memory.write_bytes(0x1520, b"lo stream").unwrap();
+    wsabuf(&mut memory, 0x1700, &[(0x1500, 3), (0, 0), (0x1520, 9)]);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 3, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 12);
+
+    wsabuf(&mut memory, 0x1780, &[(0x1900, 5), (0x1910, 7)]);
+    memory.write_u32(0x1840, 0).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1780, 2, 0x1800, 0x1840, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 12);
+    assert_eq!(memory.read_u32(0x1840).unwrap(), 0);
+    let mut first = [0; 5];
+    let mut second = [0; 7];
+    memory.read_bytes(0x1900, &mut first).unwrap();
+    memory.read_bytes(0x1910, &mut second).unwrap();
+    assert_eq!(&first, b"hello");
+    assert_eq!(&second, b" stream");
+
+    // Zero-length gathers complete without making the peer readable.
+    wsabuf(&mut memory, 0x1700, &[(0, 0)]);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 1, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 0);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1780, 2, 0x1800, 0x1840, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEWOULDBLOCK)
+    );
+
+    // A full flow-control window accepts only the room that remains.
+    memory.write_bytes(0x1500, &[0x5a; 1024]).unwrap();
+    assert_eq!(call(&mut memory, "send", &[client, 0x1500, 10, 0]), 10);
+    for index in 0..64_u64 {
+        let entry = 0x1700 + index * 16;
+        memory.write_u32(entry, 1024).unwrap();
+        memory.write_u64(entry + 8, 0x1500).unwrap();
+    }
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 64, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), STREAM_WINDOW as u32 - 10);
+}
+
+#[cfg(test)]
+#[test]
+fn wsasend_and_wsarecv_preserve_datagram_boundaries() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    let wsabuf = |memory: &mut GuestMemory, base: u64, entries: &[(u64, u32)]| {
+        for (index, &(pointer, length)) in entries.iter().enumerate() {
+            let entry = base + index as u64 * 16;
+            memory.write_u32(entry, length).unwrap();
+            memory.write_u64(entry + 8, pointer).unwrap();
+        }
+    };
+
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    let server = call(&mut memory, "socket", &[2, 2, 17]);
+    let client = call(&mut memory, "socket", &[2, 2, 17]);
+    let mut address = [0; 16];
+    address[..8].copy_from_slice(&[2, 0, 0x13, 0x88, 127, 0, 0, 1]);
+    memory.write_bytes(0x1200, &address).unwrap();
+    assert_eq!(call(&mut memory, "bind", &[server, 0x1200, 16]), 0);
+    assert_eq!(call(&mut memory, "connect", &[client, 0x1200, 16]), 0);
+
+    memory.write_bytes(0x1500, b"pi").unwrap();
+    memory.write_bytes(0x1510, b"ng").unwrap();
+    memory.write_bytes(0x1520, b"!").unwrap();
+    wsabuf(
+        &mut memory,
+        0x1700,
+        &[(0x1500, 2), (0, 0), (0x1510, 2), (0x1520, 1)],
+    );
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 4, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 5);
+    wsabuf(
+        &mut memory,
+        0x1780,
+        &[(0x1900, 2), (0x1910, 2), (0x1920, 2)],
+    );
+    memory.write_u32(0x1840, 0).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1780, 3, 0x1800, 0x1840, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 5);
+    assert_eq!(memory.read_u32(0x1840).unwrap(), 0);
+    let mut first = [0; 2];
+    let mut middle = [0; 2];
+    let mut last = [0; 1];
+    memory.read_bytes(0x1900, &mut first).unwrap();
+    memory.read_bytes(0x1910, &mut middle).unwrap();
+    memory.read_bytes(0x1920, &mut last).unwrap();
+    assert_eq!(&first, b"pi");
+    assert_eq!(&middle, b"ng");
+    assert_eq!(&last, b"!");
+
+    // Truncation copies the prefix, discards the datagram remainder and
+    // reports WSAEMSGSIZE rather than blending bytes into the next datagram.
+    memory.write_bytes(0x1500, b"abcdef").unwrap();
+    wsabuf(&mut memory, 0x1700, &[(0x1500, 6)]);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 1, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    wsabuf(&mut memory, 0x1780, &[(0x1900, 2), (0x1910, 1)]);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1780, 2, 0x1800, 0x1840, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEMSGSIZE)
+    );
+    memory.read_bytes(0x1900, &mut first).unwrap();
+    memory.read_bytes(0x1910, &mut last[..1]).unwrap();
+    assert_eq!(&first, b"ab");
+    assert_eq!(&last[..1], b"c");
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1780, 2, 0x1800, 0x1840, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEWOULDBLOCK)
+    );
+
+    // A zero-length datagram remains a boundary and completes with zero bytes.
+    wsabuf(&mut memory, 0x1700, &[(0, 0)]);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 1, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 0);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1780, 2, 0x1800, 0x1840, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 0);
+}
+
+#[cfg(test)]
+#[test]
+fn wsasend_and_wsarecv_reject_unsupported_forms_and_bad_inputs() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    let server = call(&mut memory, "socket", &[2, 2, 17]);
+    let client = call(&mut memory, "socket", &[2, 2, 17]);
+    let mut address = [0; 16];
+    address[..8].copy_from_slice(&[2, 0, 0x13, 0x88, 127, 0, 0, 1]);
+    memory.write_bytes(0x1200, &address).unwrap();
+    assert_eq!(call(&mut memory, "bind", &[server, 0x1200, 16]), 0);
+    assert_eq!(call(&mut memory, "connect", &[client, 0x1200, 16]), 0);
+    memory.write_bytes(0x1500, b"x").unwrap();
+    memory.write_u32(0x1700, 1).unwrap();
+    memory.write_u64(0x1708, 0x1500).unwrap();
+    memory.write_u32(0x1840, 0).unwrap();
+
+    for (symbol, args, error) in [
+        (
+            "WSASend",
+            [client, 0x1700, 1, 0x1800, 1, 0, 0],
+            WSAEOPNOTSUPP,
+        ),
+        (
+            "WSASend",
+            [client, 0x1700, 1, 0x1800, 0, 1, 0],
+            WSAEOPNOTSUPP,
+        ),
+        (
+            "WSASend",
+            [client, 0x1700, 1, 0x1800, 0, 0, 1],
+            WSAEOPNOTSUPP,
+        ),
+        ("WSASend", [client, 0x1700, 0, 0x1800, 0, 0, 0], WSAEINVAL),
+        ("WSASend", [client, 0x1700, 65, 0x1800, 0, 0, 0], WSAEINVAL),
+        ("WSASend", [client, 0, 1, 0x1800, 0, 0, 0], WSAEFAULT),
+        ("WSASend", [client, 0x1700, 1, 0, 0, 0, 0], WSAEFAULT),
+        ("WSARecv", [server, 0x1700, 1, 0x1800, 0, 0, 0], WSAEFAULT),
+    ] {
+        assert_eq!(
+            call(&mut memory, symbol, &args),
+            SOCKET_ERROR,
+            "{symbol} {args:?}"
+        );
+        assert_eq!(call(&mut memory, "WSAGetLastError", &[]), u64::from(error));
+    }
+
+    memory.write_u32(0x1840, 1).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1700, 1, 0x1800, 0x1840, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEOPNOTSUPP)
+    );
+    memory.write_u32(0x1840, 0).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[server, 0x1700, 1, 0x1800, 0x1840, 1, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEOPNOTSUPP)
+    );
+
+    memory.write_u32(0x1700, 1).unwrap();
+    memory.write_u64(0x1708, 0).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 1, 0x1800, 0, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
+    );
+    memory.write_u64(0x1708, 0x1500).unwrap();
+    assert_eq!(
+        call(&mut memory, "WSASend", &[9999, 0x1700, 1, 0x1800, 0, 0, 0]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAENOTSOCK)
+    );
+
+    assert_eq!(call(&mut memory, "shutdown", &[client, 1]), 0);
+    memory.write_u64(0x1708, 0x1500).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSASend",
+            &[client, 0x1700, 1, 0x1800, 0, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAESHUTDOWN)
+    );
+    assert_eq!(call(&mut memory, "shutdown", &[client, 0]), 0);
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSARecv",
+            &[client, 0x1700, 1, 0x1800, 0x1840, 0, 0]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAESHUTDOWN)
+    );
+}
+
+#[cfg(test)]
+#[test]
 fn wsioctl_fionread_and_reverse_lookup() {
     use crate::cpu::{CpuState, Register};
     use crate::import_table::ImportName;
@@ -2845,6 +3529,44 @@ fn event_select_posts_and_enumeration_drains() {
         0,
         "bytes posted read"
     );
+    // Zero-length stream sends are no-ops: neither the legacy form nor the
+    // gather form manufactures a read edge on the peer.
+    assert_eq!(
+        call(&mut memory, MODULE, "send", &[client, 0x1500, 0, 0]),
+        0
+    );
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSAEnumNetworkEvents",
+            &[server, event, 0x1300]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1300).unwrap() & FD_READ, 0);
+    memory.write_u32(0x1700, 0).unwrap();
+    memory.write_u64(0x1708, 0).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSASend",
+            &[client, 0x1700, 1, 0x1800, 0, 0, 0]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1800).unwrap(), 0);
+    assert_eq!(
+        call(
+            &mut memory,
+            MODULE,
+            "WSAEnumNetworkEvents",
+            &[server, event, 0x1300]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1300).unwrap() & FD_READ, 0);
     // Closing the client posts FD_CLOSE on the server.
     assert_eq!(call(&mut memory, MODULE, "closesocket", &[client]), 0);
     assert_eq!(

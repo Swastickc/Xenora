@@ -494,6 +494,36 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "kernel32.dll",
+      "canonical_symbol": "IsDebuggerPresent",
+      "kind": "name",
+      "library": "api-ms-win-core-debug-l1-1-0.dll",
+      "status": "implemented",
+      "symbol": "IsDebuggerPresent"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "kernel32.dll",
+      "canonical_symbol": "OutputDebugStringA",
+      "kind": "name",
+      "library": "api-ms-win-core-debug-l1-1-0.dll",
+      "status": "implemented",
+      "symbol": "OutputDebugStringA"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "kernel32.dll",
+      "canonical_symbol": "OutputDebugStringW",
+      "kind": "name",
+      "library": "api-ms-win-core-debug-l1-1-0.dll",
+      "status": "implemented",
+      "symbol": "OutputDebugStringW"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "kernel32.dll",
       "canonical_symbol": "DebugBreak",
       "kind": "name",
       "library": "api-ms-win-core-debug-l1-1-2.dll",
@@ -19344,8 +19374,8 @@
     }
   ],
   "summary": {
-    "aliases": 951,
-    "api_set_aliases": 750,
+    "aliases": 954,
+    "api_set_aliases": 753,
     "canonical_services": 927,
     "data_import_services": 7,
     "duplicate_registrations": 0,

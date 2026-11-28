@@ -17926,6 +17926,16 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "XNetworkingQueryConfigurationSetting"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "XNetworkingQueryStatistics"
     },
     {
@@ -18312,13 +18322,13 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 870,
+    "canonical_services": 871,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 238,
+    "implemented": 239,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 574,
+    "manual_services": 575,
     "ordinal_aliases": 0,
     "partial": 632,
     "structural_consistency_findings": 0,

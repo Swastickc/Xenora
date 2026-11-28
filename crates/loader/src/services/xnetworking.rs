@@ -20,6 +20,7 @@ const LEVEL_NONE: u32 = 1;
 const COST_UNKNOWN: u32 = 0;
 const IANA_SOFTWARE_LOOPBACK: u32 = 24;
 const MAX_STATISTICS_TYPE: u32 = 2;
+const MAX_CONFIGURATION_SETTING: u32 = 2;
 const TCP_QUEUED_RECEIVE_STATISTICS_SIZE: usize = 40;
 
 /// Register the implemented query. Registration and change-notification
@@ -70,6 +71,26 @@ pub(super) fn register(registry: &mut ImportRegistry) {
             Ok(HResult::OK.guest_return())
         },
     );
+
+    // The documented configuration query is read-only here. Zero is not a
+    // claimed Xbox default: it is the exact limit of this machine, which has
+    // no configurable kernel-mode TCP queued-receive-buffer allocator.
+    registry.register_with_status(
+        MODULE,
+        "XNetworkingQueryConfigurationSetting",
+        ServiceStatus::Implemented,
+        |args, _, memory| {
+            let setting = args.rcx as u32;
+            let output = args.rdx;
+            if setting > MAX_CONFIGURATION_SETTING || output == 0 {
+                return Ok(HResult::from_win32(ERROR_INVALID_PARAMETER).guest_return());
+            }
+            if memory.write_u64(output, 0).is_err() {
+                return Ok(HResult::from_win32(ERROR_INVALID_PARAMETER).guest_return());
+            }
+            Ok(HResult::OK.guest_return())
+        },
+    );
 }
 
 #[cfg(test)]
@@ -104,6 +125,21 @@ mod tests {
             .resolve(
                 MODULE,
                 &ImportName::Name("XNetworkingQueryStatistics".to_owned()),
+            )
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    }
+
+    fn call_configuration(memory: &mut GuestMemory, setting: u64, output: u64) -> u64 {
+        let mut registry = ImportRegistry::new();
+        register(&mut registry);
+        let mut cpu = CpuState::default();
+        cpu.set(crate::cpu::Register::Rcx, setting);
+        cpu.set(crate::cpu::Register::Rdx, output);
+        let descriptor = registry
+            .resolve(
+                MODULE,
+                &ImportName::Name("XNetworkingQueryConfigurationSetting".to_owned()),
             )
             .unwrap();
         (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
@@ -201,6 +237,45 @@ mod tests {
                 assert_eq!(last_counter, 0);
             }
         }
+    }
+
+    #[test]
+    fn configuration_queries_report_zero_and_preserve_neighbor_bytes() {
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region(0x1000, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+
+        for setting in 0..=2_u64 {
+            memory.write_bytes(0x1200, &[0xaa; 24]).unwrap();
+            assert_eq!(call_configuration(&mut memory, setting, 0x1200), 0);
+            assert_eq!(memory.read_u64(0x1200).unwrap(), 0);
+            assert_eq!(memory.read_u64(0x1208).unwrap(), 0xaaaa_aaaa_aaaa_aaaa);
+            assert_eq!(memory.read_u64(0x1210).unwrap(), 0xaaaa_aaaa_aaaa_aaaa);
+        }
+
+        for _ in 0..8 {
+            assert_eq!(call_configuration(&mut memory, 0, 0x1200), 0);
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_unknown_settings_and_invalid_output() {
+        let mut memory = GuestMemory::new();
+        memory
+            .map_region(0x1000, 0x1000, MemoryPermissions::READ_WRITE)
+            .unwrap();
+        memory.write_u64(0x1200, u64::MAX).unwrap();
+
+        assert_eq!(call_configuration(&mut memory, 3, 0x1200), 0x8007_0057);
+        assert_eq!(
+            call_configuration(&mut memory, u64::MAX, 0x1200),
+            0x8007_0057
+        );
+        assert_eq!(memory.read_u64(0x1200).unwrap(), u64::MAX);
+        assert_eq!(call_configuration(&mut memory, 0, 0), 0x8007_0057);
+        assert_eq!(call_configuration(&mut memory, 0, 0x5000), 0x8007_0057);
+        assert_eq!(call_configuration(&mut memory, 0, 0x1ffc), 0x8007_0057);
     }
 
     #[test]

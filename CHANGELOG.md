@@ -7,6 +7,7 @@ exact revision and known limitations.
 ## [Unreleased]
 
 ### Added
+- Implemented `XNetworkingQueryConfigurationSetting` for the three documented maximum TCP queued-receive-buffer settings (#1123). The query returns zero as Xenora's exact limit rather than claiming the Xbox default, because the machine has no configurable kernel-mode TCP queued-buffer allocator; unknown settings and invalid output fail explicitly, and configuration mutation remains absent. Local controlled evidence only; no external networking or Xbox hardware behavior is claimed.
 - Implemented `XNetworkingQueryStatistics` for the three documented TCP queued-receive-buffer statistic types (#1121). Because Xenora has no kernel-mode TCP queued-buffer allocator, the five counters are honestly zero; bytes beyond the exact 40-byte output substructure remain unchanged, and unknown types or invalid output fail explicitly. This is local controlled evidence only and does not describe external networking, endpoint reachability or Xbox hardware behavior.
 - `xenora-session --workload reopen` runs the second bundled program under the same worker, frame and journal checks. That guest reopens its file each frame and checks an auto-reset event (#958).
 - `xenora-session --workload threaded` runs the bundled scheduled guest with one persistent Win32 worker (#961). Positional and replay inputs drive checked frames, journal columns and cleanup through the same launcher and PPM export path.

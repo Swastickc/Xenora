@@ -1064,6 +1064,11 @@ only one the emulator has, and its multibyte encoding is documented as
 the answer: every byte is the wide character of the same value,
 zero-extended, and a wide character above 255 fails the conversion with
 `EILSEQ`. The restartable forms have no shift state to keep and say so.
+They check output capacity before reading the next source unit: exact
+capacity leaves the next unit unconsumed, copying the terminator clears the
+source pointer, sizing queries make no source progress, and an
+unrepresentable wide unit is left as the next input unit. These progress
+rules follow [WG14 N2310 section 7.29.6.4](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n2310.pdf).
 The classification is the ASCII table, through `iswctype`'s bits — the
 form mingw-w64 actually imports, as the `isw*` macros inline to it. All
 `implemented`. The wide stream operations and the wide printf forms are
@@ -1788,6 +1793,20 @@ is emitted by the compiler. Those error paths are noreturn functions: Xenora
 implements no C++ exception machinery, so they stop the guest with the
 runtime-limit fault instead of returning.
 
+The scalar and array C++17 aligned allocation operators are also registered:
+`_ZnwySt11align_val_t`, `_ZnaySt11align_val_t`, `_ZdlPvSt11align_val_t` and
+`_ZdaPvSt11align_val_t`. The alignment must be a nonzero power of two. The
+shared guest heap places the block at that alignment when it is representable,
+including alignments above Xenora's 64 KiB allocation granularity, and release
+uses exact block ownership: null deletion is harmless, while an interior or
+foreign pointer faults instead of releasing memory. An invalid alignment makes
+allocation return null with `EINVAL`; invalid aligned deletion stops the guest
+without releasing the block. Sized aligned deletion, exception propagation and
+`std::bad_alloc` remain unimplemented. An original no-CRT C++ fixture exercises
+compiler-emitted scalar and array forms at O0/O1/O2/Os, distinct live blocks,
+zero-size blocks, null deletion and an invalid-interior control. Local
+verification only; no Windows comparison or independent acceptance is claimed.
+
 `libgcc_s_seh-1.dll!__emutls_get_address` provides GCC's emulated
 thread-local storage. The compiler emits a descriptor holding one variable's
 size and alignment and passes the descriptor's address; the runtime returns the
@@ -1965,13 +1984,17 @@ process information structure, because the guest is the only process.
 This is implemented behaviour verified through the unit tests. Nothing
 here was compared with Windows or with an Xbox console.
 
-## XNetworking connectivity hint
+## XNetworking connectivity, statistics and configuration queries
 
 `xgameruntime.dll!XNetworkingGetConnectivityHint` writes the documented 16-byte `XNetworkingConnectivityHint`: three little-endian 32-bit fields followed by four one-byte boolean fields. Xenora reports `networkInitialized` as true because its bounded networking facility exists, `connectivityLevel` as `None` (1), `connectivityCost` as `Unknown` (0), and `ianaInterfaceType` as IANA `softwareLoopback` (24). The data-limit and roaming booleans are false. This is the honest state of the current machine: it has process-local loopback sockets but no external network route, DNS, proxy, TLS or Internet connectivity truth. The query must not be read as evidence that a title endpoint is reachable.
 
-A null, unmapped or partially unwritable output pointer returns `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)` and writes no success result. Registration, change callbacks, security-information queries and configuration settings are not implemented. This is locally verified behavior only; it has not been compared with Windows or Xbox hardware.
+`xgameruntime.dll!XNetworkingQueryStatistics` accepts the three documented TCP queued-receive-buffer statistic type values 0, 1 and 2. Each writes exactly the documented 40-byte `XNetworkingTcpQueuedReceivedBufferUsageStatistics` structure: current, peak, total, configured-maximum-drop and any-failure-drop byte counters. Xenora has no kernel-mode TCP queued-receive-buffer allocator, so all five counters are honestly zero. These counters do not describe the process-local loopback stream FIFOs in Xenora's Winsock model and do not imply external network capability. Bytes beyond the exact 40-byte substructure are preserved, as the public union contract requires.
 
-Sources: [XNetworkingGetConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkinggetconnectivityhint), [XNetworkingConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingconnectivityhint), [XNetworkingConnectivityLevelHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconnectivitylevelhint), and [network initialization and connectivity](https://docs.xbox.com/build/console-features/networking/initialization-connectivity-networking).
+`xgameruntime.dll!XNetworkingQueryConfigurationSetting` accepts the three documented maximum TCP queued-receive-buffer setting values 0, 1 and 2 and writes one little-endian `uint64_t`. Zero is the exact limit of this machine rather than the documented Xbox default, because Xenora has no configurable kernel-mode TCP queued-receive-buffer allocator. `XNetworkingSetConfigurationSetting` is absent rather than pretending that a write can reshape the network implementation.
+
+A null, unmapped or partially unwritable output pointer returns `HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)` and writes no success result. Unknown statistic or configuration values return the same invalid-argument `HRESULT` without modifying the output. Registration, change callbacks, security-information queries and configuration mutation are not implemented. This is locally verified behavior only; it has not been compared with Windows or Xbox hardware.
+
+Sources: [XNetworkingGetConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkinggetconnectivityhint), [XNetworkingConnectivityHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingconnectivityhint), [XNetworkingConnectivityLevelHint](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconnectivitylevelhint), [XNetworkingQueryStatistics](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkingquerystatistics), [XNetworkingStatisticsType](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingstatisticstype), [XNetworkingTcpQueuedReceivedBufferUsageStatistics](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/structs/xnetworkingtcpqueuedreceivedbufferusagestatistics), [XNetworkingQueryConfigurationSetting](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/functions/xnetworkingqueryconfigurationsetting), [XNetworkingConfigurationSetting](https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/networking/xnetworking/enums/xnetworkingconfigurationsetting), and [network initialization and connectivity](https://docs.xbox.com/build/console-features/networking/initialization-connectivity-networking).
 
 ## Opt-in synthetic Gaming Runtime lifecycle
 

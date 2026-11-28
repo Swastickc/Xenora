@@ -17,6 +17,36 @@ import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct ProgramGuestFileExport: Equatable, Sendable {
+    let guestPath: String
+    let destination: URL
+
+    static func validationError(guestPath: String, destination: URL?) -> String? {
+        let prefix = guestPath.prefix(3).uppercased()
+        guard (prefix == "C:\\" || prefix == "C:/"), guestPath.count > 3,
+              !guestPath.utf8.contains(0), !guestPath.hasSuffix("\\"), !guestPath.hasSuffix("/") else {
+            return "Enter an absolute guest file path on the C: drive."
+        }
+        guard let destination, destination.isFileURL, !destination.path.utf8.contains(0) else {
+            return "Choose a local export destination."
+        }
+        return nil
+    }
+}
+
+@MainActor
+final class GuestFileExportSaveDelegate: NSObject, NSOpenSavePanelDelegate {
+    static let shared = GuestFileExportSaveDelegate()
+
+    func panel(_ sender: Any, validate url: URL) throws {
+        if (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil {
+            throw CocoaError(.fileWriteFileExists, userInfo: [
+                NSLocalizedDescriptionKey: "Choose a new filename for the exported file."
+            ])
+        }
+    }
+}
+
 /// What one run of the worker produced.
 struct ProgramRunResult: Equatable, Sendable {
     /// The worker's exit status: the program's own, 124 for the wall
@@ -152,10 +182,14 @@ enum ProgramRunner {
     /// The worker's command line for one run. Tracing is on when the HUD is,
     /// because a program run has no Metal HUD in the runner yet (#440) and
     /// its startup stages are the statistics it has.
-    static func arguments(for file: URL, trace: Bool, programArguments: [String]) -> [String] {
+    static func arguments(for file: URL, trace: Bool, programArguments: [String],
+                          guestFileExport: ProgramGuestFileExport? = nil) -> [String] {
         var arguments = ["run", "--experimental"]
         if trace { arguments.append("--trace") }
         arguments += ["--pe", file.path]
+        if let guestFileExport {
+            arguments += ["--export-guest-file", guestFileExport.guestPath, guestFileExport.destination.path]
+        }
         if !programArguments.isEmpty {
             arguments.append("--")
             arguments += programArguments
@@ -174,6 +208,7 @@ enum ProgramRunner {
     /// Run the worker and wait for it. Blocking: call it off the main thread.
     static func run(_ file: URL, trace: Bool, programArguments: [String] = [],
                     standardInput: URL? = nil,
+                    guestFileExport: ProgramGuestFileExport? = nil,
                     worker: URL? = workerURL()) -> ProgramRunResult {
         let started = Date()
         func failed(_ reason: String) -> ProgramRunResult {
@@ -184,10 +219,18 @@ enum ProgramRunner {
         guard let worker else {
             return failed("the bundled xenora runner was not found next to the app")
         }
+        if let guestFileExport, let error = ProgramGuestFileExport.validationError(
+            guestPath: guestFileExport.guestPath, destination: guestFileExport.destination
+        ) {
+            return failed(error)
+        }
         let scoped = file.startAccessingSecurityScopedResource()
         defer { if scoped { file.stopAccessingSecurityScopedResource() } }
         let inputScoped = standardInput?.startAccessingSecurityScopedResource() ?? false
         defer { if inputScoped { standardInput?.stopAccessingSecurityScopedResource() } }
+        let destination = guestFileExport?.destination
+        let destinationScoped = destination?.startAccessingSecurityScopedResource() ?? false
+        defer { if destinationScoped { destination?.stopAccessingSecurityScopedResource() } }
         let input: FileHandle?
         if let standardInput {
             do {
@@ -202,7 +245,8 @@ enum ProgramRunner {
 
         let process = Process()
         process.executableURL = worker
-        process.arguments = arguments(for: file, trace: trace, programArguments: programArguments)
+        process.arguments = arguments(for: file, trace: trace, programArguments: programArguments,
+                                      guestFileExport: guestFileExport)
         process.standardInput = input ?? FileHandle.nullDevice
         let out = Pipe()
         let err = Pipe()
@@ -271,7 +315,7 @@ struct ProgramArgument: Identifiable {
 /// Owns one worker slot and publishes results for the current selection.
 @MainActor
 final class ProgramRunModel: ObservableObject {
-    typealias Worker = @Sendable (URL, Bool, [String], URL?) async -> ProgramRunResult
+    typealias Worker = @Sendable (URL, Bool, [String], URL?, ProgramGuestFileExport?) async -> ProgramRunResult
 
     static let shared = ProgramRunModel()
     @Published private(set) var running = false
@@ -279,18 +323,31 @@ final class ProgramRunModel: ObservableObject {
     @Published private(set) var fileName: String?
     @Published var arguments: [ProgramArgument] = []
     @Published var standardInput: URL?
+    @Published var guestFilePath = ""
+    @Published var guestFileDestination: URL?
     private let worker: Worker
-    private var latestRequest: UInt64 = 0
+    private(set) var latestRequest: UInt64 = 0
 
-    init(worker: @escaping Worker = { url, trace, arguments, standardInput in
+    init(worker: @escaping Worker = { url, trace, arguments, standardInput, guestFileExport in
         await Task.detached {
-            ProgramRunner.run(url, trace: trace, programArguments: arguments, standardInput: standardInput)
+            ProgramRunner.run(url, trace: trace, programArguments: arguments, standardInput: standardInput,
+                              guestFileExport: guestFileExport)
         }.value
     }) {
         self.worker = worker
     }
 
     var workerArguments: [String] { arguments.map(\.value) }
+
+    var guestFileExportError: String? {
+        guard !guestFilePath.isEmpty || guestFileDestination != nil else { return nil }
+        return ProgramGuestFileExport.validationError(guestPath: guestFilePath, destination: guestFileDestination)
+    }
+
+    func clearGuestFileExport() {
+        guestFilePath = ""
+        guestFileDestination = nil
+    }
 
     func addArgument() -> UUID {
         let argument = ProgramArgument()
@@ -307,7 +364,7 @@ final class ProgramRunModel: ObservableObject {
 
     @discardableResult
     func run(_ url: URL, trace: Bool) -> Task<Void, Never>? {
-        guard !running else { return nil }
+        guard !running, guestFileExportError == nil else { return nil }
         latestRequest &+= 1
         let request = latestRequest
         fileName = url.lastPathComponent
@@ -315,8 +372,11 @@ final class ProgramRunModel: ObservableObject {
         running = true
         let arguments = workerArguments
         let standardInput = self.standardInput
+        let guestFileExport = guestFileDestination.map {
+            ProgramGuestFileExport(guestPath: guestFilePath, destination: $0)
+        }
         return Task {
-            let outcome = await worker(url, trace, arguments, standardInput)
+            let outcome = await worker(url, trace, arguments, standardInput, guestFileExport)
             if request == latestRequest {
                 result = outcome
             }
@@ -330,6 +390,7 @@ final class ProgramRunModel: ObservableObject {
         result = nil
         fileName = nil
         standardInput = nil
+        clearGuestFileExport()
     }
 }
 
@@ -403,10 +464,11 @@ struct ProgramRunView: View {
         Section("Run executable (experimental)") {
             argumentEditor
             standardInputEditor
+            guestFileExportEditor
             Button(runButtonTitle) {
                 if let url { model.run(url, trace: hud.enabled) }
             }
-            .disabled(url == nil || model.running)
+            .disabled(url == nil || model.running || model.guestFileExportError != nil)
             .keyboardShortcut("r")
             if url == nil {
                 Text("Open an executable above to run it.").foregroundStyle(.secondary)
@@ -467,6 +529,42 @@ struct ProgramRunView: View {
             guard response == .OK, let file = panel.url else { return }
             model.standardInput = file
             standardInputImportError = nil
+        }
+    }
+
+    private var guestFileExportEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Guest file to export (optional)", text: $model.guestFilePath,
+                      prompt: Text("C:\\output.bin"))
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("program-export-guest-path")
+            LabeledContent("Export destination", value: model.guestFileDestination?.lastPathComponent ?? "No destination")
+                .accessibilityIdentifier("program-export-destination")
+            HStack {
+                Button("Choose export destination…") { chooseGuestFileDestination() }
+                    .accessibilityIdentifier("program-export-choose")
+                if !model.guestFilePath.isEmpty || model.guestFileDestination != nil {
+                    Button("Clear export") { model.clearGuestFileExport() }
+                        .accessibilityIdentifier("program-export-clear")
+                }
+            }
+            if let error = model.guestFileExportError {
+                Text(error).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .disabled(url == nil || model.running)
+    }
+
+    private func chooseGuestFileDestination() {
+        let request = model.latestRequest
+        let panel = NSSavePanel()
+        panel.title = "Choose Guest File Export Destination"
+        panel.message = "Choose a new filename for the exported file."
+        panel.delegate = GuestFileExportSaveDelegate.shared
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url,
+                  request == model.latestRequest else { return }
+            model.guestFileDestination = destination
         }
     }
 

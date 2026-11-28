@@ -1986,49 +1986,71 @@ fn register_adapters(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
         },
     );
 
-    // WSAAddressToStringA formats the loopback sockaddr_in in dotted
-    // decimal with its port - the one family the machine serves.
-    let addrtostr = Arc::clone(state);
-    registry.register_with_status(
-        MODULE,
-        "WSAAddressToStringA",
-        ServiceStatus::Partial,
-        move |args, cpu, memory| {
-            let result = (|| {
-                let mut data = [0; 16];
-                memory
-                    .read_bytes(args.rcx, &mut data)
-                    .map_err(|_| WSAEFAULT)?;
-                if u16::from_le_bytes([data[0], data[1]]) != 2 {
-                    return Err(WSAEAFNOSUPPORT);
-                }
-                let port = u16::from_be_bytes([data[2], data[3]]);
-                let text = format!("{}.{}.{}.{}:{}", data[4], data[5], data[6], data[7], port);
-                let length = args.get(4, memory).map_err(|_| WSAEFAULT)?;
-                if length == 0 {
-                    return Err(WSAEFAULT);
-                }
-                let capacity = memory.read_u32(length).map_err(|_| WSAEFAULT)? as usize;
-                if capacity < text.len() + 1 {
+    // WSAAddressToString formats the loopback sockaddr_in in dotted
+    // decimal with its port - the one family the machine serves. ANSI uses
+    // byte units and Unicode uses WCHAR units for the length parameter.
+    for (symbol, unicode) in [
+        ("WSAAddressToStringA", false),
+        ("WSAAddressToStringW", true),
+    ] {
+        let addrtostr = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                let result = (|| {
+                    if args.rdx != 16 || args.r8 != 0 {
+                        return Err(WSAEINVAL);
+                    }
+                    let mut data = [0; 16];
                     memory
-                        .write_u32(length, text.len() as u32 + 1)
+                        .read_bytes(args.rcx, &mut data)
                         .map_err(|_| WSAEFAULT)?;
-                    return Err(WSAEFAULT);
-                }
-                memory
-                    .write_bytes(args.r9, text.as_bytes())
-                    .map_err(|_| WSAEFAULT)?;
-                memory
-                    .write_u8(args.r9 + text.len() as u64, 0)
-                    .map_err(|_| WSAEFAULT)?;
-                memory
-                    .write_u32(length, text.len() as u32 + 1)
-                    .map_err(|_| WSAEFAULT)?;
-                Ok(0)
-            })();
-            socket_result(&addrtostr, cpu.gs_base, result)
-        },
-    );
+                    if u16::from_le_bytes([data[0], data[1]]) != 2 {
+                        return Err(WSAEAFNOSUPPORT);
+                    }
+                    let port = u16::from_be_bytes([data[2], data[3]]);
+                    let text = format!("{}.{}.{}.{}:{}", data[4], data[5], data[6], data[7], port);
+                    let length = args.get(4, memory).map_err(|_| WSAEFAULT)?;
+                    if length == 0 {
+                        return Err(WSAEFAULT);
+                    }
+                    let capacity = memory.read_u32(length).map_err(|_| WSAEFAULT)? as usize;
+                    let required = text.len() + 1;
+                    memory.check_write(length, 4).map_err(|_| WSAEFAULT)?;
+                    memory
+                        .write_u32(length, required as u32)
+                        .map_err(|_| WSAEFAULT)?;
+                    if capacity < required {
+                        return Err(WSAEFAULT);
+                    }
+                    if unicode {
+                        memory
+                            .check_write(args.r9, required * 2)
+                            .map_err(|_| WSAEFAULT)?;
+                        for (index, unit) in text.encode_utf16().chain([0]).enumerate() {
+                            memory
+                                .write_u16(args.r9 + index as u64 * 2, unit)
+                                .map_err(|_| WSAEFAULT)?;
+                        }
+                    } else {
+                        memory
+                            .check_write(args.r9, required)
+                            .map_err(|_| WSAEFAULT)?;
+                        memory
+                            .write_bytes(args.r9, text.as_bytes())
+                            .map_err(|_| WSAEFAULT)?;
+                        memory
+                            .write_u8(args.r9 + text.len() as u64, 0)
+                            .map_err(|_| WSAEFAULT)?;
+                    }
+                    Ok(0)
+                })();
+                socket_result(&addrtostr, cpu.gs_base, result)
+            },
+        );
+    }
 }
 
 fn read_socket_cstr(memory: &GuestMemory, address: u64) -> Result<String, u32> {
@@ -2954,6 +2976,51 @@ fn wsasocket_adapter_fdisset_and_address_formatting() {
     let mut text = [0; 14];
     memory.read_bytes(0x1b00, &mut text).unwrap();
     assert_eq!(&text, b"127.0.0.1:5000");
+    assert_eq!(memory.read_u32(0x1a00).unwrap(), 15);
+
+    // The Unicode form uses WCHAR units, not bytes, and reports the required
+    // count even when the capacity is insufficient.
+    memory.write_u32(0x1a00, 15).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSAAddressToStringW",
+            &[0x1200, 16, 0, 0x1c00, 0x1a00]
+        ),
+        0
+    );
+    assert_eq!(memory.read_u32(0x1a00).unwrap(), 15);
+    for (index, unit) in "127.0.0.1:5000".encode_utf16().chain([0]).enumerate() {
+        assert_eq!(memory.read_u16(0x1c00 + index as u64 * 2).unwrap(), unit);
+    }
+    memory.write_u32(0x1a00, 14).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSAAddressToStringW",
+            &[0x1200, 16, 0, 0x1c00, 0x1a00]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
+    );
+    assert_eq!(memory.read_u32(0x1a00).unwrap(), 15);
+    for args in [
+        [0x1200, 15, 0, 0x1c00, 0x1a00],
+        [0x1200, 16, 1, 0x1c00, 0x1a00],
+    ] {
+        memory.write_u32(0x1a00, 15).unwrap();
+        assert_eq!(
+            call(&mut memory, "WSAAddressToStringW", &args),
+            SOCKET_ERROR
+        );
+        assert_eq!(
+            call(&mut memory, "WSAGetLastError", &[]),
+            u64::from(WSAEINVAL)
+        );
+    }
 }
 
 #[cfg(test)]

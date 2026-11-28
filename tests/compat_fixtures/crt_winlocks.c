@@ -99,8 +99,12 @@ int main(void) {
     HeapFree(heap, 0, block);
 
     HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 4096, NULL);
+    void *oversized = mapping ? MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 4097) : NULL;
+    if (oversized)
+        UnmapViewOfFile(oversized);
     char *view = mapping ? MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0) : NULL;
-    CHECK("flush a mapped view", view && FlushViewOfFile(view, 0));
+    CHECK("reject an oversized view and flush a whole view",
+          !oversized && view && FlushViewOfFile(view, 0));
     CHECK("flush an unknown base fails", !FlushViewOfFile((void *)0x10, 0));
     if (view)
         UnmapViewOfFile(view);

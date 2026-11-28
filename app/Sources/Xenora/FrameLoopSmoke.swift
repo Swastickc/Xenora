@@ -15,7 +15,8 @@ private final class StopGate: Sendable {
 /// Scripted failure paths. This never opens a Metal device.
 private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     enum Operation: String {
-        case create, destroy, standard, interactive, sendInput, sendXInput, pollXInputVibration, pause, resume, stop, status, journalSize
+        case create, destroy, standard, interactive, sendInput, sendXInput
+        case pollXInputVibration, pause, resume, stop, status, journalSize, journalRecords
     }
 
     // Deinitialization can call the API from outside the main actor.
@@ -32,10 +33,15 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
     private var vibrationPolls: [UInt32] = []
     private var invalidCalls = 0
     private var nextStopGate: StopGate?
+    private var journal: [UInt8] = []
     private var snapshot = (state: UInt32(XENORA_LOOP_FINISHED), completed: UInt32(1), frame: UInt32(0), pixel: UInt8(0))
 
     func report(_ state: Int, completed: UInt32, frame: UInt32, pixel: UInt8) {
         lock.withLock { snapshot = (UInt32(state), completed, frame, pixel) }
+    }
+
+    func reportJournal(_ records: [UInt8]) {
+        lock.withLock { journal = records }
     }
 
     func fail(_ operation: Operation, _ code: Int32) {
@@ -188,6 +194,23 @@ private final class ScriptedFrameLoop: FrameLoopAPI, @unchecked Sendable {
             }
             required = UInt64(snapshot.completed)
             return required == 0 ? Int32(XENORA_OK) : Int32(XENORA_BUFFER_TOO_SMALL)
+        }
+    }
+
+    func journalRecords(
+        _ handle: xenora_session, _ records: UnsafeMutableBufferPointer<UInt8>, required: inout UInt64
+    ) -> Int32 {
+        lock.withLock {
+            let code = call(.journalRecords, handle)
+            guard code == XENORA_OK else { return code }
+            guard snapshot.state == XENORA_LOOP_FINISHED || snapshot.state == XENORA_LOOP_STOPPED else {
+                required = 0
+                return Int32(XENORA_INVALID_STATE)
+            }
+            required = UInt64(journal.count)
+            guard records.count >= journal.count else { return Int32(XENORA_BUFFER_TOO_SMALL) }
+            for index in journal.indices { records[index] = journal[index] }
+            return Int32(XENORA_OK)
         }
     }
 
@@ -599,16 +622,39 @@ private func checkFramePolling() async -> [String] {
            "paused interactive loop did not report the controller disconnect")
     expect(model.journalRecordCount == nil && api.count(.journalSize) == 0,
            "active frame loop queried a guest journal")
+    expect(!model.canExportJournal && model.captureJournalForExport() == nil
+           && api.count(.journalRecords) == 0,
+           "active frame loop offered an export")
 
     api.report(XENORA_LOOP_STOPPED, completed: 3, frame: 1, pixel: 0x77)
+    api.reportJournal([0x20, 0x27, 0x29])
     await model.stop()?.value
     expect(model.state == XENORA_LOOP_STOPPED && model.canStart && model.image === second
            && api.count(.status) == 4 && api.count(.journalSize) == 1
            && model.stateDescription == "Stopped • 3 verified journal entries",
            "joined stop did not publish terminal status and retain the last frame")
+    let expectedCSV = Data("frame,column,mode,input\n1,0,interactive,neutral\n2,3,interactive,right\n3,1,interactive,left\n".utf8)
+    let captured = model.captureJournalForExport()
+    expect(model.canExportJournal && captured?.data == expectedCSV && model.journalExportError == nil,
+           "stop did not offer the captured and verified journal")
+    api.fail(.journalRecords, Int32(XENORA_INVALID_STATE))
+    expect(model.captureJournalForExport() == nil && model.journalExportError != nil,
+           "export accepted a rejected native journal read")
+    api.reportJournal([0x20, 0x27])
+    expect(model.captureJournalForExport() == nil && model.journalExportError != nil,
+           "export accepted a journal size that changed after verification")
+    api.reportJournal([0x20, 0xff, 0x29])
+    expect(model.captureJournalForExport() == nil && model.journalExportError != nil,
+           "export accepted an unknown journal record")
+    api.reportJournal([0x20, 0x27, 0x29])
+    expect(model.captureJournalForExport()?.data == expectedCSV && model.journalExportError == nil,
+           "a successful export retry retained the old read error")
+
     model.startInteractive()
-    expect(model.journalRecordCount == nil && model.stateDescription == "Running",
-           "replacement retained a stale guest journal count")
+    expect(model.journalRecordCount == nil && model.stateDescription == "Running"
+           && !model.canExportJournal && model.captureJournalForExport() == nil
+           && captured?.data == expectedCSV,
+           "replacement exposed the previous journal or changed its export snapshot")
     return failures
 }
 
@@ -953,6 +999,10 @@ func checkNativeFrameLoop() async -> [String] {
         || model.frameId != 3 || pixels() != expectedPixels(redColumn: 3) || model.errorMessage != nil
         || model.stateDescription != "Finished • 4 verified journal entries" {
         failures.append("standard fixture restart did not finish with frame 3")
+    }
+    let expectedJournal = Data("frame,column,mode,input\n1,0,standard,none\n2,1,standard,none\n3,2,standard,none\n4,3,standard,none\n".utf8)
+    if !model.canExportJournal || model.captureJournalForExport()?.data != expectedJournal {
+        failures.append("standard fixture did not offer the exact native journal CSV")
     }
 
     model.startInteractive(frameCount: 10_000)

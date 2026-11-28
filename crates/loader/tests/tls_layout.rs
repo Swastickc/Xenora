@@ -17,11 +17,12 @@
 
 use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
 use xenora_loader::{
-    ExitReason, GuestMemory, ImportRegistry, MemoryError, MemoryPermissions as P, Register,
-    TlsDirectory, setup_tls,
+    ExitReason, GuestMemory, ImportRegistry, MemoryError, MemoryPermissions as P, ParsedPe,
+    Register, TlsDirectory, TlsError, parse_tls_directory, setup_tls,
 };
 
 const IMAGE: u64 = 0x1_4000_0000;
+const ALIGN_8192: u32 = 14 << 20;
 const TEMPLATE: u64 = IMAGE + 0x3000;
 const INDEX: u64 = IMAGE + 0x4000;
 const THREAD_TLS: u64 = 0x3_0000_0000;
@@ -134,47 +135,98 @@ fn an_inverted_template_range_is_rejected_before_anything_is_mapped() {
 }
 
 #[test]
-fn main_thread_can_read_static_tls_on_both_sides_of_the_teb_boundary() {
-    const TEMPLATE_RVA: u64 = 0x3020;
-    const BLOCKS: [(u32, u64); 2] = [(60 * 1024, 0x1000), (60 * 1024 + 1, 0x12000)];
+fn invalid_tls_alignment_leaves_the_index_and_thread_array_untouched() {
+    let mut memory = image(IMAGE);
+    let tls = TlsDirectory {
+        characteristics: 15 << 20,
+        ..directory(20, 12)
+    };
 
-    for (size, block_offset) in BLOCKS {
-        // Extend the repository's original TLS fixture at its preferred base,
-        // so the two new template pointers need no relocations.
-        let mut pe = include_bytes!("../../../fixtures/pe/trusted-runner.exe").to_vec();
-        pe[0x6a0..0x6a8].copy_from_slice(&(IMAGE + TEMPLATE_RVA).to_le_bytes());
-        pe[0x6a8..0x6b0].copy_from_slice(&(IMAGE + TEMPLATE_RVA + 2).to_le_bytes());
-        pe[0x6c0..0x6c4].copy_from_slice(&(size - 2).to_le_bytes());
-        pe[0x820..0x822].copy_from_slice(&[0xa5, 0x5a]);
-        let mut entry = vec![
-            0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0, 0, 0, // mov rax, gs:[0x58]
-            0x48, 0x8b, 0x00, // mov rax, [rax] (module index zero)
-            0x0f, 0xb7, 0x08, // movzx ecx, word ptr [rax]
-            0x0f, 0xb6, 0x90, // movzx edx, byte ptr [rax+size-1]
-        ];
-        entry.extend_from_slice(&(size - 1).to_le_bytes());
-        entry.push(0xf4); // hlt
-        pe[0x400..0x400 + entry.len()].copy_from_slice(&entry);
-
-        let mut imports = ImportRegistry::new();
-        imports.register("xenora.dll", "fixture_draw", |_, _, _| Ok(0));
-        let result = run_synthetic_startup(
-            &pe,
-            StartupLayout {
-                image_base: IMAGE,
-                stack_top: 0x2_0001_0000,
-                tls_base: THREAD_TLS,
-            },
-            imports,
-            100,
-        )
-        .unwrap_or_else(|error| panic!("start guest with {size} bytes of static TLS: {error}"));
-        assert_eq!(result.execution.exit_reason, ExitReason::Halt);
-        let cpu = result.execution.final_state;
-        assert_eq!(cpu.gs_base, THREAD_TLS + 0x10000);
-        assert_eq!(cpu.get(Register::Rax), THREAD_TLS + block_offset);
-        assert_eq!(cpu.get(Register::Rcx), 0x5aa5);
-        assert_eq!(cpu.get(Register::Rdx), 0);
-        assert_eq!(result.tls_callbacks, 1);
+    assert_eq!(
+        setup_tls(&tls, IMAGE, IMAGE, &mut memory, THREAD_TLS),
+        Err(TlsError::InvalidAlignmentEncoding(15))
+    );
+    assert_eq!(memory.read_u64(INDEX), Ok(u64::MAX));
+    for address in [THREAD_TLS, THREAD_TLS + 0x1000] {
+        assert_eq!(
+            memory.read_u64(address),
+            Err(MemoryError::UnmappedAddress(address))
+        );
     }
+}
+
+fn static_tls_fixture(size: u32, characteristics: u32) -> Vec<u8> {
+    const TEMPLATE_RVA: u64 = 0x3020;
+
+    // Extend the repository's original TLS fixture at its preferred base,
+    // so the two new template pointers need no relocations.
+    let mut pe = include_bytes!("../../../fixtures/pe/trusted-runner.exe").to_vec();
+    pe[0x6a0..0x6a8].copy_from_slice(&(IMAGE + TEMPLATE_RVA).to_le_bytes());
+    pe[0x6a8..0x6b0].copy_from_slice(&(IMAGE + TEMPLATE_RVA + 2).to_le_bytes());
+    pe[0x6c0..0x6c4].copy_from_slice(&(size - 2).to_le_bytes());
+    pe[0x6c4..0x6c8].copy_from_slice(&characteristics.to_le_bytes());
+    pe[0x820..0x822].copy_from_slice(&[0xa5, 0x5a]);
+    let mut entry = vec![
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0, 0, 0, // mov rax, gs:[0x58]
+        0x48, 0x8b, 0x00, // mov rax, [rax] (module index zero)
+        0x0f, 0xb7, 0x08, // movzx ecx, word ptr [rax]
+        0x0f, 0xb6, 0x90, // movzx edx, byte ptr [rax+size-1]
+    ];
+    entry.extend_from_slice(&(size - 1).to_le_bytes());
+    entry.push(0xf4); // hlt
+    pe[0x400..0x400 + entry.len()].copy_from_slice(&entry);
+    pe
+}
+
+fn assert_guest_static_tls(size: u32, characteristics: u32, tls_base: u64, block_offset: u64) {
+    let pe = static_tls_fixture(size, characteristics);
+    let mut imports = ImportRegistry::new();
+    imports.register("xenora.dll", "fixture_draw", |_, _, _| Ok(0));
+    let result = run_synthetic_startup(
+        &pe,
+        StartupLayout {
+            image_base: IMAGE,
+            stack_top: 0x2_0001_0000,
+            tls_base,
+        },
+        imports,
+        100,
+    )
+    .unwrap_or_else(|error| panic!("start guest with {size} bytes of static TLS: {error}"));
+    assert_eq!(result.execution.exit_reason, ExitReason::Halt);
+    let cpu = result.execution.final_state;
+    assert_eq!(cpu.gs_base, tls_base + 0x10000);
+    assert_eq!(cpu.get(Register::Rax), tls_base + block_offset);
+    assert_eq!(cpu.get(Register::Rcx), 0x5aa5);
+    assert_eq!(cpu.get(Register::Rdx), 0);
+    assert_eq!(result.tls_callbacks, 1);
+}
+
+#[test]
+fn main_thread_can_read_static_tls_on_both_sides_of_the_teb_boundary() {
+    assert_guest_static_tls(60 * 1024, 0, THREAD_TLS, 0x1000);
+    assert_guest_static_tls(60 * 1024 + 1, 0, THREAD_TLS, 0x12000);
+}
+
+#[test]
+fn main_thread_receives_8_kib_aligned_static_tls_after_the_pointer_array() {
+    assert_guest_static_tls(32, ALIGN_8192, THREAD_TLS, 0x2000);
+}
+
+#[test]
+fn main_thread_receives_8_kib_aligned_static_tls_after_the_reserved_teb() {
+    // Shift the TLS layout by one page so the end of the reserved TEB
+    // range is itself misaligned to 8 KiB.
+    assert_guest_static_tls(60 * 1024 + 1, ALIGN_8192, THREAD_TLS + 0x1000, 0x13000);
+}
+
+#[test]
+fn tls_directory_rejects_reserved_alignment_encoding() {
+    let bytes = static_tls_fixture(32, 15 << 20);
+    let pe = ParsedPe::parse(&bytes).unwrap();
+
+    assert_eq!(
+        parse_tls_directory(&bytes, &pe).unwrap_err().to_string(),
+        "invalid PE TLS alignment encoding 15"
+    );
 }

@@ -1967,14 +1967,12 @@ tests. Nothing here was compared with Windows or with an Xbox console.
 
 ### The registry is honestly empty
 
-The advapi32 registry services - `RegOpenKeyExA/W`, `RegQueryValueExA/W`
-and `RegCloseKey` - model the machine's registry as empty. The predefined
-roots open because they always exist; every subkey and every value is
-absent with ERROR_FILE_NOT_FOUND, which is what a fresh Windows answers
-for the keys a program would probe. Programs that need registry values to
-exist are not supported. This is implemented behaviour verified through
-the unit tests. Nothing here was compared with Windows or with an Xbox
-console.
+Advapi32 provides `RegOpenKeyW`, `RegOpenKeyExA/W`, `RegQueryValueExA/W`
+and `RegCloseKey` against the synthetic guest registry. A null or empty
+subkey name reopens a predefined root and returns the same handle.
+Every named subkey and value is absent and reports `ERROR_FILE_NOT_FOUND`.
+The registry is independent of the host. A guest PE test verifies the
+three-argument `RegOpenKeyW` entry point alongside the extended forms.
 
 ### Memory mappings and process creation
 

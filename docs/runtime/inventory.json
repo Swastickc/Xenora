@@ -10160,6 +10160,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "RegOpenKeyW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "advapi32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "RegQueryValueExA"
     },
     {
@@ -19206,15 +19216,15 @@
   "summary": {
     "aliases": 945,
     "api_set_aliases": 744,
-    "canonical_services": 919,
+    "canonical_services": 920,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 246,
     "implicit_status_services": 78,
     "libraries": 23,
-    "manual_services": 619,
+    "manual_services": 620,
     "ordinal_aliases": 35,
-    "partial": 673,
+    "partial": 674,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 300,

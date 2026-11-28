@@ -5214,6 +5214,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "lroundf",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "lroundf"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "modf",
       "kind": "name",
       "library": "api-ms-win-crt-math-l1-1-0.dll",
@@ -5224,11 +5234,31 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "modff",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "implemented",
+      "symbol": "modff"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "nearbyint",
       "kind": "name",
       "library": "api-ms-win-crt-math-l1-1-0.dll",
       "status": "partial",
       "symbol": "nearbyint"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "nextafterf",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "nextafterf"
     },
     {
       "api_set": true,
@@ -5259,6 +5289,16 @@
       "library": "api-ms-win-crt-math-l1-1-0.dll",
       "status": "partial",
       "symbol": "remainder"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "remainderf",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "remainderf"
     },
     {
       "api_set": true,
@@ -9059,6 +9099,316 @@
       "library": "ole32.dll",
       "status": "partial",
       "symbol": "StringFromGUID2"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "accept",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#1"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "ioctlsocket",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#10"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "inet_addr",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#11"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "WSAGetLastError",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#111"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "WSASetLastError",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#112"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "WSAStartup",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#115"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "WSACleanup",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#116"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "inet_ntoa",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#12"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "listen",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#13"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "ntohl",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#14"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "ntohs",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#15"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "__WSAFDIsSet",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#151"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "recv",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#16"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "recvfrom",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#17"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "select",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#18"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "send",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#19"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "bind",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#2"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "sendto",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#20"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "setsockopt",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#21"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "shutdown",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#22"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "socket",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#23"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "closesocket",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#3"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "connect",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#4"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getpeername",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#5"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "gethostbyaddr",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#51"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "gethostbyname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#52"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "gethostname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#57"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getsockname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#6"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getsockopt",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#7"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "htonl",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#8"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "htons",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#9"
     }
   ],
   "findings": {
@@ -9851,6 +10201,36 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_wspawnve"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptCloseAlgorithmProvider"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptGenRandom"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptOpenAlgorithmProvider"
     },
     {
       "data_import": false,
@@ -13270,6 +13650,26 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "_ZdaPvSt11align_val_t"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "_ZdlPvSt11align_val_t"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "_ZdlPvy"
     },
     {
@@ -13290,7 +13690,27 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "_ZnaySt11align_val_t"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "_Znwy"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "_ZnwySt11align_val_t"
     },
     {
       "data_import": false,
@@ -15867,6 +16287,16 @@
       "family": "c-runtime",
       "kind": "name",
       "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "lroundf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
@@ -16018,9 +16448,29 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "typed",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "modff"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
       "status": "partial",
       "status_explicit": true,
       "symbol": "nearbyint"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "nextafterf"
     },
     {
       "data_import": false,
@@ -16141,6 +16591,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "remainder"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "remainderf"
     },
     {
       "data_import": false,
@@ -16880,6 +17340,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpCrackUrl"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpOpen"
     },
     {
@@ -16980,6 +17450,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAAccept"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAAddressToStringA"
     },
     {
@@ -16990,7 +17470,27 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAAddressToStringW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSACleanup"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAConnect"
     },
     {
       "data_import": false,
@@ -17030,6 +17530,26 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAHtonl"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAHtons"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAIoctl"
     },
     {
@@ -17040,7 +17560,67 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSANtohl"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSANtohs"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAPoll"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSARecv"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSARecvFrom"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSASend"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSASendTo"
     },
     {
       "data_import": false,
@@ -17070,7 +17650,37 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSASocketW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAStartup"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAStringToAddressA"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAStringToAddressW"
     },
     {
       "data_import": false,
@@ -17151,6 +17761,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "gethostbyaddr"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "gethostbyname"
     },
     {
       "data_import": false,
@@ -17271,6 +17891,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "inet_pton"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "ioctlsocket"
     },
     {
       "data_import": false,
@@ -18334,21 +18964,34 @@
     }
   ],
   "summary": {
-    "aliases": 906,
+    "aliases": 937,
     "api_set_aliases": 740,
-    "canonical_services": 871,
+    "canonical_services": 885,
+    "aliases": 910,
+    "api_set_aliases": 744,
+    "canonical_services": 877,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 239,
-    "implicit_status_services": 78,
+    "implemented": 238,
+    "aliases": 906,
+    "api_set_aliases": 740,
+    "canonical_services": 877,
+    "data_import_services": 7,
+    "duplicate_registrations": 0,
+    "implemented": 241,
+    "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 575,
+    "manual_services": 589,
+    "ordinal_aliases": 31,
+    "partial": 648,
+    "libraries": 22,
+    "manual_services": 581,
     "ordinal_aliases": 0,
-    "partial": 632,
+    "partial": 639,
     "structural_consistency_findings": 0,
     "stub": 0,
-    "typed_registry_entries": 296,
-    "typed_services": 296,
+    "typed_registry_entries": 300,
+    "typed_services": 300,
     "wanted_imports": null,
     "wanted_missing": null
   },

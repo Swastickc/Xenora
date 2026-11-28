@@ -12,16 +12,32 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 871 |
+| Canonical services | 885 |
 | Typed registry services | 296 |
-| Manual code registrations | 575 |
+| Manual code registrations | 589 |
 | Canonical libraries | 21 |
-| Implemented | 239 |
-| Partial | 632 |
+| Implemented | 237 |
+| Partial | 648 |
 | Stub | 0 |
 | Data-import services | 7 |
-| Aliases of every kind | 906 |
+| Aliases of every kind | 937 |
 | API-set aliases | 740 |
+| Ordinal aliases | 31 |
+| Canonical services | 877 |
+| Typed registry services | 300 |
+| Manual code registrations | 577 |
+| Canonical libraries | 22 |
+| Implemented | 238 |
+| Partial | 639 |
+| Typed registry services | 296 |
+| Manual code registrations | 581 |
+| Canonical libraries | 22 |
+| Implemented | 241 |
+| Partial | 636 |
+| Stub | 0 |
+| Data-import services | 7 |
+| Aliases of every kind | 910 |
+| API-set aliases | 744 |
 | Ordinal aliases | 0 |
 | Statuses never explicitly set | 78 |
 | Duplicate canonical registrations | 0 |
@@ -33,16 +49,19 @@ independent acceptance or compatibility claims.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 2 | 0 | 2 | 0 | 0 | 2 | 0 | 0 |
+| <code>bcrypt.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 318 | 59 | 259 | 0 | 42 | 276 | 0 | 28 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
-| <code>libstdc++-6.dll</code> | <code>c++-support</code> | 14 | 3 | 11 | 0 | 11 | 3 | 0 | 0 |
+| <code>libstdc++-6.dll</code> | <code>c++-support</code> | 18 | 3 | 15 | 0 | 15 | 3 | 0 | 0 |
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
 | <code>msvcrt.dll</code> | <code>c-runtime</code> | 39 | 13 | 26 | 7 | 14 | 25 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 297 | 207 | 90 | 0 | 103 | 194 | 0 | 10 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 301 | 211 | 90 | 0 | 104 | 197 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
+| <code>ws2_32.dll</code> | <code>windows-networking</code> | 57 | 0 | 57 | 0 | 6 | 51 | 0 | 6 |
+| <code>winhttp.dll</code> | <code>other</code> | 14 | 0 | 14 | 0 | 0 | 14 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
@@ -61,6 +80,8 @@ metadata, are in `inventory.json`.
 | Alias kind | Count |
 | --- | --- |
 | API-set | 740 |
+| Ordinal | 31 |
+| API-set | 744 |
 | Ordinal | 0 |
 | Other module | 166 |
 

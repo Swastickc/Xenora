@@ -17276,7 +17276,47 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAHtonl"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAHtons"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAIoctl"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSANtohl"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSANtohs"
     },
     {
       "data_import": false,
@@ -18642,15 +18682,15 @@
   "summary": {
     "aliases": 934,
     "api_set_aliases": 740,
-    "canonical_services": 875,
+    "canonical_services": 879,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 579,
+    "manual_services": 583,
     "ordinal_aliases": 28,
-    "partial": 638,
+    "partial": 642,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

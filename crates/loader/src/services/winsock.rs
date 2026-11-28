@@ -462,6 +462,45 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     }
 }
 
+fn register_wsa_byteorder(
+    registry: &mut ImportRegistry,
+    state: &Arc<ServicesState>,
+    symbol: &'static str,
+    wide: bool,
+) {
+    let state = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        symbol,
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let result = (|| {
+                state
+                    .winsock
+                    .lock()
+                    .expect("guest Winsock state")
+                    .socket(args.rcx)?;
+                if args.r8 == 0 {
+                    return Err(WSAEFAULT);
+                }
+                if wide {
+                    memory.check_write(args.r8, 4).map_err(|_| WSAEFAULT)?;
+                    memory
+                        .write_u32(args.r8, (args.rdx as u32).swap_bytes())
+                        .map_err(|_| WSAEFAULT)?;
+                } else {
+                    memory.check_write(args.r8, 2).map_err(|_| WSAEFAULT)?;
+                    memory
+                        .write_u16(args.r8, (args.rdx as u16).swap_bytes())
+                        .map_err(|_| WSAEFAULT)?;
+                }
+                Ok(0)
+            })();
+            socket_result(&state, cpu.gs_base, result)
+        },
+    );
+}
+
 fn register_address_conversion(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     for symbol in ["htons", "ntohs"] {
         registry.register(MODULE, symbol, |args, _, _| {
@@ -472,6 +511,14 @@ fn register_address_conversion(registry: &mut ImportRegistry, state: &Arc<Servic
         registry.register(MODULE, symbol, |args, _, _| {
             Ok(u64::from((args.rcx as u32).swap_bytes()))
         });
+    }
+    for (symbol, wide) in [
+        ("WSAHtonl", true),
+        ("WSAHtons", false),
+        ("WSANtohl", true),
+        ("WSANtohs", false),
+    ] {
+        register_wsa_byteorder(registry, state, symbol, wide);
     }
     let format_state = Arc::clone(state);
     registry.register_with_status(
@@ -3876,6 +3923,73 @@ fn wsasendto_and_wsarecvfrom_reject_bad_forms_without_losing_datagrams() {
     assert_eq!(
         call(&mut memory, "WSAGetLastError", &[]),
         u64::from(WSAESHUTDOWN)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn wsa_byteorder_conversions_validate_socket_and_output() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 4096, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    let socket = call(&mut memory, "socket", &[2, 2, 17]);
+    for (symbol, input, output, bytes) in [
+        ("WSAHtonl", 0x1234_5678_u64, 0x7856_3412_u64, 4_u64),
+        ("WSANtohl", 0x7856_3412, 0x1234_5678, 4),
+        ("WSAHtons", 0x1234, 0x3412, 2),
+        ("WSANtohs", 0x3412, 0x1234, 2),
+    ] {
+        memory.write_u64(0x1800, 0).unwrap();
+        assert_eq!(call(&mut memory, symbol, &[socket, input, 0x1800]), 0);
+        assert_eq!(
+            memory.read_u64(0x1800).unwrap() & (u64::MAX >> (64 - bytes * 8)),
+            output
+        );
+    }
+    assert_eq!(
+        call(&mut memory, "WSAHtonl", &[INVALID_SOCKET, 1, 0x1800]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAENOTSOCK)
+    );
+    assert_eq!(call(&mut memory, "WSAHtons", &[socket, 1, 0]), SOCKET_ERROR);
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
+    );
+    assert_eq!(
+        call(&mut memory, "WSANtohl", &[socket, 1, 0x6000]),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
     );
 }
 

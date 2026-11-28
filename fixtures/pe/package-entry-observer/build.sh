@@ -9,6 +9,10 @@ mkdir -p "$out"
 out=$(CDPATH= cd -- "$out" && pwd)
 clang=${CLANG:-$(xcrun --find clang)}
 linker=${LLD_LINK:-$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/rust-lld}
+if [ ! -x "$linker" ] && [ -z "${LLD_LINK:-}" ]; then
+    linker=$(command -v lld-link || true)
+fi
+[ -n "$linker" ] && [ -x "$linker" ] || { echo "Native lld-link not found" >&2; exit 1; }
 for tool in "$clang" "$linker"; do
     lipo "$tool" -verify_arch arm64
 done

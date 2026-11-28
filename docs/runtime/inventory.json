@@ -5754,6 +5754,26 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_invalid_parameter_noinfo",
+      "kind": "name",
+      "library": "api-ms-win-crt-runtime-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_invalid_parameter_noinfo"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "_invalid_parameter_noinfo_noreturn",
+      "kind": "name",
+      "library": "api-ms-win-crt-runtime-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "_invalid_parameter_noinfo_noreturn"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "_onexit",
       "kind": "name",
       "library": "api-ms-win-crt-runtime-l1-1-0.dll",
@@ -9374,6 +9394,46 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getprotobyname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#53"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getprotobynumber",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#54"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getservbyname",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#55"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getservbyport",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#56"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
       "canonical_symbol": "gethostname",
       "kind": "ordinal",
       "library": "ws2_32.dll",
@@ -10130,6 +10190,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "RegOpenKeyW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "advapi32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "RegQueryValueExA"
     },
     {
@@ -10191,6 +10261,46 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "SystemFunction036"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "api-ms-win-core-synch-l1-2-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WaitOnAddress"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "api-ms-win-core-synch-l1-2-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WakeByAddressAll"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "api-ms-win-core-synch-l1-2-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WakeByAddressSingle"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "api-ms-win-crt-process-l1-1-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
     },
     {
       "data_import": false,
@@ -13943,6 +14053,16 @@
       "symbol": "_commode"
     },
     {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
       "data_import": true,
       "family": "c-runtime",
       "kind": "name",
@@ -14221,6 +14341,16 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "vfprintf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "waitpid"
     },
     {
       "data_import": false,
@@ -14527,6 +14657,16 @@
       "family": "c-runtime",
       "kind": "name",
       "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
       "source": "typed",
       "status": "implemented",
       "status_explicit": true,
@@ -14811,6 +14951,26 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_initterm_e"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_invalid_parameter_noinfo"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_invalid_parameter_noinfo_noreturn"
     },
     {
       "data_import": false,
@@ -17310,6 +17470,36 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "PeekMessageW"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "PostThreadMessageA"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "PostThreadMessageW"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "user32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "ShowWindow"
     },
     {
@@ -17510,7 +17700,27 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSACloseEvent"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAConnect"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSACreateEvent"
     },
     {
       "data_import": false,
@@ -17630,6 +17840,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAResetEvent"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSASend"
     },
     {
@@ -17641,6 +17861,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WSASendTo"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSASetEvent"
     },
     {
       "data_import": false,
@@ -17701,6 +17931,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WSAStringToAddressW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WSAWaitForMultipleEvents"
     },
     {
       "data_import": false,
@@ -17830,7 +18070,37 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "getprotobyname"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "getprotobynumber"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "getservbyname"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "getservbyport"
     },
     {
       "data_import": false,
@@ -18608,6 +18878,26 @@
       "kind": "name",
       "library": "xgameruntime.dll",
       "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingQueryConfigurationSetting"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingQueryStatistics"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XTaskQueueCloseHandle"
@@ -18984,17 +19274,17 @@
     }
   ],
   "summary": {
-    "aliases": 942,
-    "api_set_aliases": 745,
-    "canonical_services": 900,
+    "aliases": 948,
+    "api_set_aliases": 747,
+    "canonical_services": 923,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 244,
+    "implemented": 246,
     "implicit_status_services": 78,
-    "libraries": 22,
-    "manual_services": 600,
-    "ordinal_aliases": 31,
-    "partial": 656,
+    "libraries": 23,
+    "manual_services": 623,
+    "ordinal_aliases": 35,
+    "partial": 677,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 300,

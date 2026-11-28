@@ -1656,8 +1656,8 @@ initialization use `api-ms-win-core-synch-l1-2-0`; SLists use
 
 A C program's startup code configures the C runtime before `main`. Nine
 services record what it sets and return what their public documentation says.
-They are declared in the typed registry (`docs/runtime/services.md`), all
-`partial`, because nothing acts on a recorded value:
+The startup settings are declared in the typed registry
+(`docs/runtime/services.md`). Each has the scope shown below.
 
 | Service | Returns | Not provided |
 | --- | --- | --- |
@@ -1665,10 +1665,20 @@ They are declared in the typed registry (`docs/runtime/services.md`), all
 | `_set_new_mode(mode)` | the previous mode; -1 and `errno` `EINVAL` unless the mode is 0 or 1 | `malloc` never calls a new handler |
 | `_configthreadlocale(request)` | the setting before the call (1 enabled, 2 disabled; a program starts disabled); -1 and `errno` `EINVAL` unless the request is 0, 1 or 2 | There is no locale |
 | `__setusermatherr(handler)` | nothing | The handler is never called |
-| `_set_invalid_parameter_handler(handler)` | the previous handler, null at first | No service calls it for an invalid argument |
+| `_set_invalid_parameter_handler(handler)` | the previous global handler, null at first | The two explicit invalid-parameter entry points use the global handler. Thread-local overrides are unavailable |
 | `__p__fmode()`, `__p__commode()` | the address of the guest `int` `_fmode` (initially `_O_TEXT`, `0x4000`, as documented) or `_commode` (initially 0; its documentation gives no initial value) | Nothing reads either until stdio exists |
 | `signal(sig, handler)` | the previous handler, `SIG_DFL` at first; `SIG_ERR` and `errno` `EINVAL` for a signal other than `SIGINT`, `SIGILL`, `SIGFPE`, `SIGSEGV`, `SIGTERM` and `SIGABRT` | No signal is ever raised. One table serves the process |
 | `SetUnhandledExceptionFilter(filter)` | the previous filter, null at first | Called at the end of an unhandled search (see "Structured exceptions and CPU faults"); no debugger or error-mode handling |
+
+The UCRT and `api-ms-win-crt-runtime-l1-1-0.dll` provide
+`_invalid_parameter_noinfo` and `_invalid_parameter_noinfo_noreturn`. They
+call the installed global handler with five zero arguments. A returning
+handler lets the ordinary call return. The nonreturning entry point
+terminates even if its handler returns. Both terminate when no handler is
+installed. Xenora models termination with `STATUS_INVALID_CRUNTIME_PARAMETER`
+(`0xC0000417`). Existing CRT validations keep their service-specific error
+paths. Fast-fail exceptions, debugger dispatch and Watson reporting are
+outside this model.
 
 `_fmode` and `_commode` share one 8-byte block allocated from the process heap
 on the first call to either. `ServicesState::crt_app_type` and

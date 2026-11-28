@@ -2,11 +2,8 @@
 
 //! What a C program's startup code configures in the C runtime before `main`.
 //!
-//! Each value is recorded and returned as its public documentation says, and
-//! nothing acts on any of them yet. No invalid-parameter handler, signal
-//! handler, exception filter, math-error handler or new handler is ever called,
-//! there is no locale, and nothing reads `_fmode` or `_commode` until stdio
-//! exists. The registry therefore declares every service here `partial`.
+//! The explicit invalid-parameter entry points consult the recorded handler.
+//! Most other startup settings only record values and remain partial.
 
 use crate::cpu::ExitReason;
 use crate::memory::{GuestMemory, PROCESS_HEAP};
@@ -78,6 +75,10 @@ impl CrtStartup {
 
     pub(super) fn set_invalid_parameter_handler(&mut self, handler: u64) -> u64 {
         std::mem::replace(&mut self.invalid_parameter_handler, handler)
+    }
+
+    pub(super) fn invalid_parameter_handler(&self) -> u64 {
+        self.invalid_parameter_handler
     }
 
     /// The previous handler, or `None` for a signal the documentation does not

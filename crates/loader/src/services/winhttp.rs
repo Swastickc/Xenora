@@ -19,6 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 mod request_headers;
+mod url;
 
 const MODULE: &str = "winhttp.dll";
 const MAX_HANDLES: usize = 256;
@@ -1140,6 +1141,8 @@ fn write_http_date_string(
 /// transport-related flag combinations are intentionally refused rather than
 /// silently accepted.
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    url::register(registry, state);
+
     let open = Arc::clone(state);
     registry.register_with_status(
         MODULE,

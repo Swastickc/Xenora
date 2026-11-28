@@ -201,6 +201,7 @@ enum GuestObject {
     },
     FileMapping {
         size: u64,
+        backing: Arc<Mutex<Vec<u8>>>,
     },
     Pipe {
         state: Arc<Mutex<files::PipeState>>,
@@ -212,7 +213,19 @@ enum GuestObject {
     ConsoleBuffer(Arc<Mutex<console::ScreenBuffer>>),
     /// A handle to the machine's one process, opened through OpenProcess.
     Process,
+    /// A spawned child, already exited in the synchronous spawn world: its
+    /// status is final, and its signal is set for good, as a terminated
+    /// process handle is on Windows. The handle value doubles as the
+    /// process id - both are unique machine-wide integers here.
+    ChildProcess {
+        status: u32,
+        signal: Arc<Mutex<events::Waitable>>,
+    },
 }
+
+/// The live views of file mappings machine-wide: guest base address to
+/// view length and the object's backing store.
+type MappingViews = BTreeMap<u64, (u64, Arc<Mutex<Vec<u8>>>)>;
 
 #[derive(Default)]
 struct ObjectState {
@@ -221,16 +234,50 @@ struct ObjectState {
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
+    /// Per-file times as Windows FILETIMEs: creation, access, write. An
+    /// entry appears when the file does and moves with it; a file without
+    /// one reports the fixed Unix epoch, the answer of a drive that does
+    /// not know.
+    file_times: BTreeMap<String, [u64; 3]>,
     directories: BTreeSet<String>,
     /// Locked byte ranges per file path, as (owning handle, offset, length, exclusive).
     locks: BTreeMap<String, Vec<(u64, u64, u64, bool)>>,
     /// Files the CRT `_wchmod` made read-only. Writes, truncation and
     /// deletion of one fail; `_wstat` and `_access` report the mode.
     readonly: BTreeSet<String>,
+    /// Live views of file mappings: guest base address to (length, backing
+    /// store). Machine-wide because only one process executes at a time,
+    /// so the running process owns every live view.
+    mapping_views: MappingViews,
     next_temp: u32,
+    /// Machine-wide pipe end references by handle value, standing in for
+    /// the per-process handle tables the machine-wide object table is not.
+    pipe_refs: BTreeMap<u64, u32>,
 }
 
 impl ObjectState {
+    /// Machine-wide pipe end references, by handle value. The handle tables
+    /// of Windows are per-process, which the machine-wide object table is
+    /// not: the count stands in for them, so the object lives exactly as
+    /// long as some process's descriptor or handle names it.
+    pub(crate) fn pipe_ref_add(&mut self, handle: u64) {
+        *self.pipe_refs.entry(handle).or_insert(0) += 1;
+    }
+
+    /// One reference less: true when the last one went, as the object dies
+    /// when nothing anywhere names it.
+    pub(crate) fn pipe_ref_release(&mut self, handle: u64) -> bool {
+        let Some(count) = self.pipe_refs.get_mut(&handle) else {
+            return true;
+        };
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.pipe_refs.remove(&handle);
+            return true;
+        }
+        false
+    }
+
     fn next_handle(&self) -> Option<u64> {
         self.last_handle
             .checked_add(4)
@@ -264,7 +311,10 @@ pub struct ServicesState {
     /// Characteristics the guest is told it runs on. These are simulated and
     /// independent of the host; see [`sysinfo::HostCapabilities`] for the host.
     pub guest_profile: sysinfo::GuestSystemProfile,
-    objects: Mutex<ObjectState>,
+    /// Kernel objects and the synthetic drive. Behind an Arc so a spawned
+    /// child process shares the one machine-wide filesystem with its parent
+    /// while every other piece of process state is its own.
+    objects: Arc<Mutex<ObjectState>>,
     last_errors: Mutex<BTreeMap<u64, u32>>,
     error_mode: Mutex<u32>,
     /// The mode reported by AreFileApisANSI. The synthetic drive keeps its
@@ -296,6 +346,14 @@ pub struct ServicesState {
     /// reads it. Each entry is the variable's original name casing and the
     /// guest address of the CRT-owned `NAME=VALUE` string copy.
     pub(crate) crt_environment: Mutex<Vec<(String, u64)>>,
+    /// The entry executable's image bytes, kept so a `_spawnve` of the
+    /// program itself can load the child without the host file. Set once by
+    /// the runner before the run; empty in tests that never spawn.
+    spawn_image: Mutex<Option<(String, Arc<Vec<u8>>)>>,
+    /// Finished `_P_NOWAIT` children by synthetic process handle: the child
+    /// ran to completion inside the spawn, so the handle only ever waits on
+    /// a status already known.
+    spawn_children: Mutex<BTreeMap<u64, u32>>,
     /// Emulated thread-local storage: the block each guest thread owns for
     /// each thread-local variable, keyed by the guest thread and then by the
     /// address of the variable's descriptor.
@@ -304,6 +362,10 @@ pub struct ServicesState {
     pub(crate) cxx_guards: Mutex<cxx_abi::GuardTable>,
     /// The status the guest process exited with. Set once.
     exit_status: Mutex<Option<u32>>,
+    // A spawned child shares the machine-wide object table: its exit must
+    // not wipe objects the parent and siblings still reference. The root
+    // process owns the table and closes everything when it ends.
+    shares_object_table: bool,
     crt_startup: Mutex<crt_startup::CrtStartup>,
     winhttp: Mutex<winhttp::WinHttpHandles>,
     xinput: Mutex<xinput::Slots>,
@@ -367,7 +429,7 @@ impl ServicesState {
             process_id: 0x4100, // Synthetic process ID
             thread_id: 0x4104,  // Synthetic main thread ID
             guest_profile: sysinfo::GuestSystemProfile::default(),
-            objects: Mutex::new(ObjectState::default()),
+            objects: Arc::new(Mutex::new(ObjectState::default())),
             last_errors: Mutex::default(),
             error_mode: Mutex::new(0),
             file_apis_ansi: AtomicBool::new(true),
@@ -385,9 +447,12 @@ impl ServicesState {
             atexit: Mutex::default(),
             environment: Mutex::default(),
             crt_environment: Mutex::default(),
+            spawn_image: Mutex::new(None),
+            spawn_children: Mutex::default(),
             emutls: Mutex::default(),
             cxx_guards: Mutex::default(),
             exit_status: Mutex::default(),
+            shares_object_table: false,
             crt_startup: Mutex::default(),
             winhttp: Mutex::default(),
             xinput: Mutex::default(),
@@ -424,6 +489,109 @@ impl ServicesState {
 
     fn crt_arguments(&self) -> std::sync::MutexGuard<'_, crt_arguments::CrtArguments> {
         self.crt_arguments.lock().expect("program arguments")
+    }
+
+    /// Keep the entry executable's image bytes for a later `_spawnve` of the
+    /// program itself. The runner calls this once before the run.
+    pub fn set_spawn_image(&self, name: &str, bytes: &[u8]) {
+        *self.spawn_image.lock().expect("spawn image") =
+            Some((name.to_owned(), Arc::new(bytes.to_vec())));
+    }
+
+    /// The kept entry image, when the runner stored one.
+    pub(crate) fn spawn_image(&self) -> Option<Arc<Vec<u8>>> {
+        self.spawn_image
+            .lock()
+            .expect("spawn image")
+            .as_ref()
+            .map(|(_, bytes)| Arc::clone(bytes))
+    }
+
+    /// Register a finished `_P_NOWAIT` child, returning its synthetic
+    /// process handle.
+    pub(crate) fn finish_spawn_child(&self, status: u32) -> u64 {
+        // The child becomes a real object-table handle: waitable, closeable
+        // and re-openable through OpenProcess like any Windows process.
+        let signal = Arc::new(Mutex::new(events::Waitable::Event {
+            manual_reset: true,
+            signaled: true,
+        }));
+        let mut objects = self.objects.lock().expect("guest object state");
+        // At the object-table cap the fallback number keeps the CRT wait
+        // working, one machine-limit over the documented count.
+        let handle = objects.next_handle().unwrap_or(0x5100);
+        objects.insert_handle(handle, GuestObject::ChildProcess { status, signal });
+        self.spawn_children
+            .lock()
+            .expect("spawn children")
+            .insert(handle, status);
+        handle
+    }
+
+    /// Collect a finished child, as `waitpid`/`_cwait` do: the status, once,
+    /// or nothing when the handle is not a child of this process.
+    pub(crate) fn collect_spawn_child(&self, handle: u64) -> Option<u32> {
+        self.spawn_children
+            .lock()
+            .expect("spawn children")
+            .remove(&handle)
+    }
+
+    /// The file name the kept image was loaded as, for the spawn match.
+    pub(crate) fn spawn_image_name(&self) -> String {
+        self.spawn_image
+            .lock()
+            .expect("spawn image")
+            .as_ref()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Append a finished child's captured output to this process's own
+    /// capture, as inherited standard handles would have produced it. The
+    /// parent was suspended for the whole `_P_WAIT`, so nothing interleaves;
+    /// stderr follows stdout here only because the two captures are separate.
+    pub(crate) fn forward_child_output(&self, stdout: &[u8], stderr: &[u8]) {
+        let mut streams = self.crt_streams();
+        streams.console_write(false, stdout);
+        streams.console_write(true, stderr);
+    }
+
+    /// The process state of a spawned child: everything a process owns is
+    /// fresh, except the machine-wide filesystem and kernel object table,
+    /// which the child shares with its parent, and the clock, which is the
+    /// one machine clock. The environment and the current directory copy at
+    /// spawn time, as they do on Windows; either process changing its own
+    /// afterwards does not move the other's.
+    pub(crate) fn child_for_spawn(self: &Arc<Self>) -> Arc<Self> {
+        // The machine-wide filesystem and object table is the parent's own:
+        // files the parent wrote are visible to the child and vice versa.
+        Arc::new(ServicesState {
+            objects: Arc::clone(&self.objects),
+            crt_directory: Mutex::new(
+                self.crt_directory
+                    .lock()
+                    .expect("current directory")
+                    .clone(),
+            ),
+            environment: Mutex::new(
+                self.environment
+                    .lock()
+                    .expect("process environment")
+                    .clone(),
+            ),
+            // The CRT descriptor wiring inherits, as a `_spawnve` child's
+            // does on Windows: the pipes the parent created are the child's
+            // own descriptors, which the shell redirection needs.
+            crt_streams: Mutex::new(self.crt_streams().inherit_for_spawn()),
+            // The image travels too: a spawn child is itself able to spawn,
+            // as any Windows process is. Without it a shell re-executed as a
+            // child could not run another command of its own multi-call
+            // binary, which is exactly the nested `sh` case.
+            spawn_image: Mutex::new(self.spawn_image.lock().expect("spawn image").clone()),
+            shares_object_table: true,
+            ..ServicesState::new(Arc::clone(&self.clock))
+        })
     }
 
     pub(crate) fn xinput_input_enabled(&self) -> bool {
@@ -522,8 +690,12 @@ impl ServicesState {
             return first;
         }
         *exited = Some(status);
-        // The three table locks are taken one at a time, never nested.
-        {
+        // The three table locks are taken one at a time, never nested. A
+        // spawned child shares the machine-wide table: its objects close
+        // with the machine, not with the child - the pipe a sibling reads
+        // survives this exit, as it does on Windows where handle tables are
+        // per-process and the pipe object outlives one process's copies.
+        if !self.shares_object_table {
             let mut objects = self.objects.lock().expect("guest object state");
             objects.handles.clear();
             objects.locks.clear();
@@ -803,6 +975,13 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
                         write: *write,
                     },
                 ),
+                Some(GuestObject::ChildProcess { status, signal }) => (
+                    0,
+                    GuestObject::ChildProcess {
+                        status: *status,
+                        signal: Arc::clone(signal),
+                    },
+                ),
                 Some(
                     GuestObject::Search(_)
                     | GuestObject::FileMapping { .. }
@@ -833,8 +1012,10 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
             }
             GuestObject::File(file) => file.access = access,
             // A pipe end's rights are positional: its read or write end decides
-            // what the handle can do, not the duplication rights.
-            GuestObject::Pipe { .. } => {}
+            // what the handle can do, not the duplication rights. An exited
+            // child's rights are as fixed: terminated processes stay waitable
+            // and readable however the handle is duplicated.
+            GuestObject::Pipe { .. } | GuestObject::ChildProcess { .. } => {}
             GuestObject::Search(_)
             | GuestObject::FileMapping { .. }
             | GuestObject::Snapshot
@@ -858,7 +1039,8 @@ pub fn register_standard_services(registry: &mut ImportRegistry, state: Arc<Serv
     crt::register_errno(registry);
     crt::register_conversions(registry);
     crt::register_conio(registry);
-    crt::register_spawn_refusal(registry);
+    crt::register_spawn(registry, &state);
+    crt::register_spawn_wait(registry, &state);
     crt::register_utilities(registry);
     crt::register_directories(registry, &state);
     crt_callbacks::register(registry, &state);
@@ -1174,11 +1356,20 @@ pub(crate) mod handlers {
     }
 
     pub fn get_process_id(context: &mut ServiceContext<'_>, process: u64) -> Outcome<u32> {
-        Ok(if context.state.is_current_process(context.teb, process) {
-            context.state.process_id
-        } else {
-            0
-        })
+        if context.state.is_current_process(context.teb, process) {
+            return Ok(context.state.process_id);
+        }
+        // A spawned child's process id is the value its process handle was
+        // created with: both namespaces are machine-wide integers here.
+        let is_child = context
+            .state
+            .objects
+            .lock()
+            .expect("guest object state")
+            .handles
+            .get(&process)
+            .is_some_and(|object| matches!(object, GuestObject::ChildProcess { .. }));
+        Ok(if is_child { process as u32 } else { 0 })
     }
 
     pub fn get_current_thread(_: &mut ServiceContext<'_>) -> Outcome<u64> {
@@ -1322,6 +1513,8 @@ pub(crate) mod handlers {
                 write: true,
             },
         );
+        objects.pipe_ref_add(read_value);
+        objects.pipe_ref_add(write_value);
         drop(objects);
         context
             .memory
@@ -1339,14 +1532,21 @@ pub(crate) mod handlers {
         if matches!(objects.handles.get(&handle), Some(GuestObject::Search(_))) {
             return context.state.fail(context.teb, ERROR_INVALID_HANDLE, false);
         }
-        if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
-            && *write
-        {
-            // The end-of-stream marker of an anonymous pipe is its write end
-            // closing: reads then drain what remains and answer empty.
-            state.lock().expect("pipe state").write_open = false;
-        }
-        let removed = objects.handles.remove(&handle);
+        // A pipe end dies when its last reference anywhere closes: the
+        // machine-wide count stands in for the per-process handle tables.
+        // The end-of-stream marker of an anonymous pipe is its write end
+        // closing for good: reads then drain what remains and answer empty.
+        let is_pipe = matches!(objects.handles.get(&handle), Some(GuestObject::Pipe { .. }));
+        let removed = if is_pipe && !objects.pipe_ref_release(handle) {
+            None
+        } else {
+            if let Some(GuestObject::Pipe { state, write }) = objects.handles.get(&handle)
+                && *write
+            {
+                state.lock().expect("pipe state").write_open = false;
+            }
+            objects.handles.remove(&handle)
+        };
         if let Some(GuestObject::File(file)) = &removed
             && let Some(ranges) = objects.locks.get_mut(&file.path)
         {
@@ -2091,7 +2291,8 @@ pub(crate) mod handlers {
         let _ = (size, mode);
         let outcome = {
             let mut streams = context.state.crt_streams();
-            streams.pipe_create(context.memory, fds)
+            let mut drive = context.state.objects.lock().expect("guest object state");
+            streams.pipe_create(context.memory, &mut drive, fds)
         };
         or_errno(context, outcome)
     }

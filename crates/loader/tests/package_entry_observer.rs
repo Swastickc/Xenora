@@ -145,10 +145,20 @@ fn the_entry_observer_brackets_real_guest_entry_without_including_dll_callbacks(
             .iter()
             .find(|record| record.phase == InitializationPhase::ProcessEntry)
             .expect("process entry diagnostics");
-        assert_ne!(entry.address, 0);
+        let pe_offset = u32::from_le_bytes(fixtures().app[0x3c..0x40].try_into().unwrap()) as usize;
+        let entry_rva = u32::from_le_bytes(
+            fixtures().app[pe_offset + 40..pe_offset + 44]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(entry.address, APP_BASE + u64::from(entry_rva));
         assert_eq!(
             *seen.lock().unwrap(),
             [
+                Observation::Guest {
+                    marker: 4,
+                    teb: MAIN_TEB
+                },
                 Observation::Guest {
                     marker: 1,
                     teb: MAIN_TEB
@@ -195,10 +205,16 @@ fn a_rejected_dll_attach_never_enters_the_process_observer() {
     );
     assert_eq!(
         *seen.lock().unwrap(),
-        [Observation::Guest {
-            marker: 1,
-            teb: MAIN_TEB
-        }]
+        [
+            Observation::Guest {
+                marker: 4,
+                teb: MAIN_TEB
+            },
+            Observation::Guest {
+                marker: 1,
+                teb: MAIN_TEB
+            },
+        ]
     );
 }
 
@@ -259,6 +275,10 @@ fn a_refused_scheduler_attachment_leaves_the_entry_observer() {
     assert!(matches!(
         seen.lock().unwrap().as_slice(),
         [
+            Observation::Guest {
+                marker: 4,
+                teb: MAIN_TEB
+            },
             Observation::Guest {
                 marker: 1,
                 teb: MAIN_TEB

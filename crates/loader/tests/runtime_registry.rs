@@ -5,6 +5,7 @@
 mod support;
 
 use support::*;
+use xenora_loader::cpu::ExitReason;
 
 const ADVAPI32: &str = "advapi32.dll";
 const REGISTRY_API: &str = "api-ms-win-core-registry-l1-1-0.dll";
@@ -15,6 +16,8 @@ const WIN64_HKCU: u64 = 0xffff_ffff_8000_0001;
 const KEY_READ: u64 = 0x0002_0019;
 const NAME: u64 = SCRATCH + 0x100;
 const UNWRITTEN: u64 = 0x1122_3344_5566_7788;
+const LEGACY_OPEN: &str = "RegOpenKeyW";
+const LEGACY_IMPORTS: &[(&str, &str)] = &[(ADVAPI32, LEGACY_OPEN), (KERNEL32, "GetLastError")];
 
 const fn imports(module: &'static str) -> [(&'static str, &'static str); 6] {
     [
@@ -107,4 +110,57 @@ fn registry_failures_return_the_selected_windows_status() {
             assert_eq!(guest.call("RegCloseKey", &[foreign]), 6);
         }
     }
+}
+
+#[test]
+fn reg_open_key_w_returns_the_predefined_handle_through_its_third_argument() {
+    let mut guest = Guest::new(LEGACY_IMPORTS, &[]);
+    let output = SCRATCH + 8;
+    guest.memory.write_u64(SCRATCH, UNWRITTEN).unwrap();
+    guest.memory.write_u64(output + 8, UNWRITTEN).unwrap();
+    wide(&mut guest, "");
+
+    for root in [HKCU, WIN64_HKCU] {
+        for subkey in [0, NAME] {
+            guest.memory.write_u64(output, UNWRITTEN).unwrap();
+            assert_eq!(guest.call(LEGACY_OPEN, &[root, subkey, output]), 0);
+            assert_eq!(guest.u64_at(output), root);
+            assert_eq!(guest.u64_at(SCRATCH), UNWRITTEN);
+            assert_eq!(guest.u64_at(output + 8), UNWRITTEN);
+        }
+    }
+}
+
+#[test]
+fn reg_open_key_w_reports_synthetic_failures_without_writing_a_handle() {
+    let mut guest = Guest::new(LEGACY_IMPORTS, &[]);
+    guest.memory.write_u64(SCRATCH, UNWRITTEN).unwrap();
+    // The first UTF-16 code unit has a zero low byte, so an ANSI read would
+    // mistake this named key for an empty string.
+    wide(&mut guest, "\u{0100}\\Xenora");
+
+    let foreign = 0x1234_5678_8000_0001;
+    for (args, status) in [
+        ([WIN64_HKCU, NAME, SCRATCH], 2),
+        ([foreign, 0, SCRATCH], 6),
+        ([WIN64_HKCU, 0, 0], 87),
+    ] {
+        assert_eq!(guest.call(LEGACY_OPEN, &args), status);
+        assert_eq!(guest.error(), status);
+        assert_eq!(guest.u64_at(SCRATCH), UNWRITTEN);
+    }
+
+    let unmapped = 0x1000;
+    let fault = guest.memory.read_u16(unmapped).unwrap_err();
+    assert_eq!(
+        guest.fails(LEGACY_OPEN, &[WIN64_HKCU, unmapped, SCRATCH]),
+        ExitReason::MemoryFault(fault)
+    );
+    assert_eq!(guest.u64_at(SCRATCH), UNWRITTEN);
+
+    let fault = guest.memory.write_u64(unmapped, HKCU).unwrap_err();
+    assert_eq!(
+        guest.fails(LEGACY_OPEN, &[HKCU, 0, unmapped]),
+        ExitReason::MemoryFault(fault)
+    );
 }

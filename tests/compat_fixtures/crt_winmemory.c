@@ -24,6 +24,24 @@ static unsigned failures;
         }                                                                \
     } while (0)
 
+static BOOL private_heap_without_serialization(void) {
+    HANDLE heap = HeapCreate(HEAP_NO_SERIALIZE, 0, 0);
+    if (!heap)
+        return FALSE;
+    unsigned char *block = HeapAlloc(heap, HEAP_ZERO_MEMORY, 8);
+    BOOL valid = FALSE;
+    if (block) {
+        block[0] = 0x5a;
+        unsigned char *grown = HeapReAlloc(heap, HEAP_NO_SERIALIZE | HEAP_ZERO_MEMORY, block, 16);
+        if (grown) {
+            valid = grown[0] == 0x5a && grown[15] == 0
+                    && HeapSize(heap, HEAP_NO_SERIALIZE, grown) == 16;
+            valid = HeapFree(heap, HEAP_NO_SERIALIZE, grown) && valid;
+        }
+    }
+    return HeapDestroy(heap) && valid;
+}
+
 int main(void) {
     // 1. A fixed allocation is a writable pointer into zeroed memory.
     HGLOBAL fixed = GlobalAlloc(GMEM_FIXED, 64);
@@ -69,7 +87,9 @@ int main(void) {
     HANDLE heap = GetProcessHeap();
     void *direct = HeapAlloc(heap, 0, 24);
     HGLOBAL legacy = GlobalAlloc(GPTR, 24);
-    CHECK("heap shared", direct != NULL && legacy != NULL && direct != (void *)legacy);
+    CHECK("legacy memory shares the process heap and a private heap supports HEAP_NO_SERIALIZE",
+          direct != NULL && legacy != NULL && direct != (void *)legacy
+              && private_heap_without_serialization());
     HeapFree(heap, 0, direct);
     GlobalFree(legacy);
 

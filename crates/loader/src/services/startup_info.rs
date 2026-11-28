@@ -49,6 +49,8 @@ const COMMAND_LINE_APIS: [&str; 3] = [
     "api-ms-win-core-processenvironment-l1-2-0.dll",
     "api-ms-win-downlevel-kernel32-l1-1-0.dll",
 ];
+const UCRT: &str = "ucrtbase.dll";
+const UCRT_RUNTIME: &str = "api-ms-win-crt-runtime-l1-1-0.dll";
 
 /// Size of `STARTUPINFOA` and `STARTUPINFOW` on x64, by the field order and
 /// types in processthreadsapi.h and natural alignment.
@@ -207,13 +209,19 @@ impl Encoding {
     }
 }
 
+#[derive(Clone, Copy)]
+struct StoredCommandLine {
+    start: u64,
+    argument_tail: u64,
+}
+
 /// Guest addresses of the strings already handed out, per [`Encoding`].
 #[derive(Default)]
 pub(super) struct StartupState {
     info: ProcessStartupInfo,
     /// Desktop and title. Null for a string that was not given.
     strings: [Option<(u64, u64)>; 2],
-    command_line: [Option<u64>; 2],
+    command_line: [Option<StoredCommandLine>; 2],
 }
 
 fn store(memory: &mut GuestMemory, bytes: &[u8]) -> Result<u64, MemoryError> {
@@ -224,15 +232,17 @@ fn store(memory: &mut GuestMemory, bytes: &[u8]) -> Result<u64, MemoryError> {
 
 /// Check the string the guest would receive, including escaping and its NUL.
 pub(super) fn command_line_fits(arguments: &[&str]) -> bool {
-    command_line(arguments).encode_utf16().count() < MAX_STRING_UNITS
+    let (line, _) = command_line(arguments);
+    line.encode_utf16().count() < MAX_STRING_UNITS
 }
 
 /// The command line whose documented C parse is `arguments`. The program name
 /// takes no backslash or quote rules, so a quote in it cannot be represented
-/// and is left out; a file name cannot hold one.
-fn command_line(arguments: &[impl AsRef<str>]) -> String {
+/// and is left out; a file name cannot hold one. The returned byte offset
+/// marks the WinMain argument tail, or the end of the line when it is empty.
+fn command_line(arguments: &[impl AsRef<str>]) -> (String, usize) {
     let Some((program, rest)) = arguments.split_first() else {
-        return String::new();
+        return (String::new(), 0);
     };
     let blank = |text: &str| text.is_empty() || text.contains([' ', '\t']);
     let mut line: String = program
@@ -243,6 +253,7 @@ fn command_line(arguments: &[impl AsRef<str>]) -> String {
     if blank(&line) {
         line = format!("\"{line}\"");
     }
+    let arguments_offset = line.len() + usize::from(!rest.is_empty());
     for argument in rest {
         let argument = argument.as_ref();
         line.push(' ');
@@ -264,7 +275,7 @@ fn command_line(arguments: &[impl AsRef<str>]) -> String {
         line.extend(std::iter::repeat_n('\\', backslashes));
         line.push('"');
     }
-    line
+    (line, arguments_offset)
 }
 
 impl ServicesState {
@@ -322,15 +333,23 @@ impl ServicesState {
         &self,
         memory: &mut GuestMemory,
         encoding: Encoding,
-    ) -> Result<u64, MemoryError> {
+    ) -> Result<StoredCommandLine, MemoryError> {
         let mut startup = self.startup();
-        if let Some(address) = startup.command_line[encoding as usize] {
-            return Ok(address);
+        if let Some(cached) = startup.command_line[encoding as usize] {
+            return Ok(cached);
         }
-        let line = command_line(&self.crt_arguments().for_command_line());
+        let (line, arguments_offset) = command_line(&self.crt_arguments().for_command_line());
+        let offset = match encoding {
+            Encoding::Narrow => arguments_offset,
+            Encoding::Wide => line[..arguments_offset].encode_utf16().count() * 2,
+        };
         let address = store(memory, &encoding.bytes(&line))?;
-        startup.command_line[encoding as usize] = Some(address);
-        Ok(address)
+        let stored = StoredCommandLine {
+            start: address,
+            argument_tail: address + offset as u64,
+        };
+        startup.command_line[encoding as usize] = Some(stored);
+        Ok(stored)
     }
 }
 
@@ -360,6 +379,7 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         let s = Arc::clone(state);
         registry.register(KERNEL32, symbol, move |_, _, memory| {
             s.get_command_line(memory, encoding)
+                .map(|line| line.start)
                 .map_err(ExitReason::MemoryFault)
         });
         for api_set in COMMAND_LINE_APIS {
@@ -368,6 +388,14 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         // Partial: the process code page is always UTF-8.
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
+    let symbol = "_get_narrow_winmain_command_line";
+    let s = Arc::clone(state);
+    registry.register_with_status(UCRT, symbol, ServiceStatus::Partial, move |_, _, memory| {
+        s.get_command_line(memory, Encoding::Narrow)
+            .map(|line| line.argument_tail)
+            .map_err(ExitReason::MemoryFault)
+    });
+    registry.alias(UCRT_RUNTIME, UCRT, symbol);
 }
 
 #[cfg(test)]

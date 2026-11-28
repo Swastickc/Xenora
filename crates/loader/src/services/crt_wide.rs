@@ -86,13 +86,10 @@ pub(super) fn multibyte_to_wide(
         return Ok(u64::MAX);
     }
     let byte = memory.read_u8(text).map_err(fault)?;
-    if byte == 0 {
-        return Ok(0);
-    }
     if wide != 0 {
         memory.write_u16(wide, u16::from(byte)).map_err(fault)?;
     }
-    Ok(1)
+    Ok(u64::from(byte != 0))
 }
 
 /// `wctomb`: the multibyte form of `wide` at `text`, returning its length.
@@ -206,12 +203,15 @@ pub(super) fn wide_string_to_multibyte(
     Ok(written)
 }
 
-/// `mbsrtowcs`/`wcsrtombs`: the restartable forms. The encoding has no
-/// shift state, so they are the plain forms with a state argument the
-/// service leaves alone.
+/// `mbsrtowcs`: the restartable multibyte-to-wide conversion. The encoding
+/// has no shift state, so the state argument is unused. Progress still
+/// follows the standard restartable rule: capacity is checked before the
+/// next source byte is read, a terminator copied into the destination clears
+/// the source pointer, and a terminator not reached because the output is
+/// full is left for the next call.
 pub(super) fn mbsrtowcs(
     memory: &mut GuestMemory,
-    teb: u64,
+    _teb: u64,
     wide: u64,
     source: u64,
     count: u64,
@@ -222,20 +222,32 @@ pub(super) fn mbsrtowcs(
     if text == 0 {
         return Ok(0);
     }
-    let converted = multibyte_string_to_wide(memory, teb, wide, text, count)?;
-    if wide != 0 {
-        let advanced = if converted == u64::MAX {
-            0
-        } else {
-            converted.min(count)
-        };
-        let byte_at_end = memory.read_u8(text + advanced).map_err(fault)?;
-        let next = if byte_at_end == 0 { 0 } else { text + advanced };
-        memory.write_u64(source, next).map_err(fault)?;
+    let mut converted = 0u64;
+    loop {
+        if wide != 0 && converted == count {
+            memory.write_u64(source, text + converted).map_err(fault)?;
+            return Ok(converted);
+        }
+        let byte = memory.read_u8(text + converted).map_err(fault)?;
+        if byte == 0 {
+            if wide != 0 {
+                memory.write_u16(wide + 2 * converted, 0).map_err(fault)?;
+                memory.write_u64(source, 0).map_err(fault)?;
+            }
+            return Ok(converted);
+        }
+        if wide != 0 {
+            memory
+                .write_u16(wide + 2 * converted, u16::from(byte))
+                .map_err(fault)?;
+        }
+        converted += 1;
     }
-    Ok(converted)
 }
 
+/// `wcsrtombs`: the inverse restartable conversion. An unrepresentable wide
+/// unit is not consumed; the source remains at that unit after any earlier
+/// units that were converted.
 pub(super) fn wcsrtombs(
     memory: &mut GuestMemory,
     teb: u64,
@@ -247,13 +259,38 @@ pub(super) fn wcsrtombs(
     if wide == 0 {
         return Ok(0);
     }
-    let converted = wide_string_to_multibyte(memory, teb, text, wide, count)?;
-    if text != 0 && converted != u64::MAX {
-        memory
-            .write_u64(source, wide + 2 * converted.min(count))
-            .map_err(fault)?;
+    let mut converted = 0u64;
+    loop {
+        if text != 0 && converted == count {
+            memory
+                .write_u64(source, wide + 2 * converted)
+                .map_err(fault)?;
+            return Ok(converted);
+        }
+        let unit = read_wide(memory, wide + 2 * converted).map_err(fault)?;
+        if unit > 0xFF {
+            if text != 0 {
+                memory
+                    .write_u64(source, wide + 2 * converted)
+                    .map_err(fault)?;
+            }
+            let _ = set_errno(memory, teb, EILSEQ);
+            return Ok(u64::MAX);
+        }
+        if unit == 0 {
+            if text != 0 {
+                memory.write_u8(text + converted, 0).map_err(fault)?;
+                memory.write_u64(source, 0).map_err(fault)?;
+            }
+            return Ok(converted);
+        }
+        if text != 0 {
+            memory
+                .write_u8(text + converted, unit as u8)
+                .map_err(fault)?;
+        }
+        converted += 1;
     }
-    Ok(converted)
 }
 
 /// ASCII classification of the C locale, exact. Characters at or above 128

@@ -2,7 +2,7 @@
 
 //! The synthetic guest registry exposes predefined roots only.
 //!
-//! Documented (Microsoft Learn, "RegOpenKeyExA", "RegQueryValueExA",
+//! Documented (Microsoft Learn, "RegOpenKeyW", "RegOpenKeyExA", "RegQueryValueExA",
 //! "RegCloseKey", "Predefined Keys"): the registry is a hierarchical store
 //! whose predefined roots - HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_USERS,
 //! HKEY_LOCAL_MACHINE and HKEY_CURRENT_CONFIG - always exist. Opening a
@@ -69,49 +69,75 @@ fn read_string(memory: &GuestMemory, address: u64, wide: bool) -> Result<Vec<u8>
     Ok(bytes)
 }
 
+fn open_predefined_key(
+    state: &ServicesState,
+    teb: u64,
+    memory: &mut GuestMemory,
+    key: u64,
+    subkey: u64,
+    output: u64,
+    wide: bool,
+) -> Result<u64, ExitReason> {
+    if output == 0 {
+        return state.fail(
+            teb,
+            ERROR_INVALID_PARAMETER,
+            u64::from(ERROR_INVALID_PARAMETER),
+        );
+    }
+    if !is_predefined_root(key) {
+        return state.fail(teb, ERROR_INVALID_HANDLE, u64::from(ERROR_INVALID_HANDLE));
+    }
+    // A null or empty subkey reopens the predefined root. The synthetic
+    // registry contains no named subkeys.
+    if subkey != 0 && !read_string(memory, subkey, wide)?.is_empty() {
+        return state.fail(teb, ERROR_FILE_NOT_FOUND, u64::from(ERROR_FILE_NOT_FOUND));
+    }
+    memory
+        .write_u64(output, key)
+        .map_err(ExitReason::MemoryFault)?;
+    Ok(0)
+}
+
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let legacy_open = Arc::clone(state);
+    registry.register(ADVAPI32, "RegOpenKeyW", move |args, cpu, memory| {
+        open_predefined_key(
+            &legacy_open,
+            cpu.gs_base,
+            memory,
+            args.rcx,
+            args.rdx,
+            args.r8,
+            true,
+        )
+    });
+    registry.set_status(
+        ADVAPI32,
+        "RegOpenKeyW",
+        crate::imports::ServiceStatus::Partial,
+    );
+
     for (symbol, wide) in [("RegOpenKeyExA", false), ("RegOpenKeyExW", true)] {
         let state = Arc::clone(state);
         registry.register(ADVAPI32, symbol, move |args, cpu, memory| {
-            let (key, subkey, options, _sam, output) = (
-                args.rcx,
-                args.rdx,
-                args.r8 as u32,
-                args.r9,
-                args.get(4, memory).map_err(ExitReason::MemoryFault)?,
-            );
-            if output == 0 || options != 0 {
+            let output = args.get(4, memory).map_err(ExitReason::MemoryFault)?;
+            if args.r8 as u32 != 0 {
                 return state.fail(
                     cpu.gs_base,
                     ERROR_INVALID_PARAMETER,
                     u64::from(ERROR_INVALID_PARAMETER),
                 );
             }
-            if !is_predefined_root(key) {
-                return state.fail(
-                    cpu.gs_base,
-                    ERROR_INVALID_HANDLE,
-                    u64::from(ERROR_INVALID_HANDLE),
-                );
-            }
-            // The empty registry has no subkeys: any named path is absent,
-            // while a null or empty subkey opens the key itself again.
-            let path = if subkey == 0 {
-                Vec::new()
-            } else {
-                read_string(memory, subkey, wide)?
-            };
-            if !path.is_empty() {
-                return state.fail(
-                    cpu.gs_base,
-                    ERROR_FILE_NOT_FOUND,
-                    u64::from(ERROR_FILE_NOT_FOUND),
-                );
-            }
-            memory
-                .write_u64(output, key)
-                .map_err(ExitReason::MemoryFault)?;
-            Ok(0)
+            open_predefined_key(
+                &state,
+                cpu.gs_base,
+                memory,
+                args.rcx,
+                args.rdx,
+                output,
+                wide,
+            )
         });
     }
 

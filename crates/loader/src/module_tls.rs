@@ -28,6 +28,10 @@ use crate::tls::{
 
 const TLS_COPY_CHUNK: usize = 4096;
 const TLS_INDEX_LIMIT: usize = TLS_ARRAY_SIZE / 8;
+/// Nonzero guest-invalid marker reserving an index whose TLS block is empty.
+/// Zero remains this layer's free-slot ownership marker; a zero-length block
+/// has no bytes a guest may dereference, so the marker must fault if misused.
+const EMPTY_TLS_RESERVATION: u64 = 1;
 
 /// Writable static TLS storage initialized for one module on the selected
 /// thread. `end` is exclusive and equals `base + template_bytes + zero_fill`.
@@ -608,7 +612,11 @@ fn prepare_one(
     prepared: &ValidatedTls,
 ) -> Result<Option<ModuleTlsStorage>, MemoryError> {
     memory.write_u32_bypass(prepared.index_address, tls_index)?;
+    let slot = thread_tls_base
+        .checked_add(u64::from(tls_index) * 8)
+        .ok_or(MemoryError::Overflow)?;
     if prepared.total_size == 0 {
+        memory.write_u64(slot, EMPTY_TLS_RESERVATION)?;
         return Ok(None);
     }
     let storage_base =
@@ -619,9 +627,6 @@ fn prepare_one(
         storage_base,
         prepared.template_len,
     )?;
-    let slot = thread_tls_base
-        .checked_add(u64::from(tls_index) * 8)
-        .ok_or(MemoryError::Overflow)?;
     memory.write_u64(slot, storage_base)?;
     let end = storage_base
         .checked_add(prepared.total_size as u64)
@@ -894,6 +899,36 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_tls_block_keeps_its_index_reserved_across_preparations() {
+        let empty = TlsSpec::valid(0, 0);
+        let nonempty = TlsSpec::valid(2, 0);
+        let (module_fixture, mut memory) = fixture(&[Some(empty), Some(nonempty)]);
+        let images = module_fixture.images();
+        let first_reservations = [reservation(0, module_fixture.bases[0])];
+        let first =
+            prepare_module_tls(&images[..1], &first_reservations, &mut memory, THREAD_TLS).unwrap();
+        let first = first[0].prepared.as_ref().unwrap();
+        assert_eq!(first.tls_index, 0);
+        assert_eq!(first.storage, None);
+        assert_eq!(memory.read_u64(THREAD_TLS).unwrap(), EMPTY_TLS_RESERVATION);
+
+        let second_reservations = [reservation(0, module_fixture.bases[1])];
+        let second =
+            prepare_module_tls(&images[1..], &second_reservations, &mut memory, THREAD_TLS)
+                .unwrap();
+        let second = second[0].prepared.as_ref().unwrap();
+        assert_eq!(second.tls_index, 1);
+        assert_ne!(
+            memory
+                .read_u32(module_fixture.bases[0] + u64::from(INDEX_RVA))
+                .unwrap(),
+            memory
+                .read_u32(module_fixture.bases[1] + u64::from(INDEX_RVA))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn nonzero_existing_tls_slots_are_owned_and_never_overwritten() {
         let spec = TlsSpec::valid(3, 0);
         let (fixture, mut memory) = fixture(&[Some(spec)]);
@@ -1006,7 +1041,7 @@ mod tests {
 
     #[test]
     fn allocation_failure_rolls_back_earlier_indexes_storage_and_array() {
-        let first = TlsSpec::valid(4, 0);
+        let first = TlsSpec::valid(0, 0);
         let mut huge = TlsSpec::valid(4, 0);
         huge.zero_fill = 64 * 1024 * 1024;
         let (fixture, mut memory) = fixture(&[Some(first), Some(huge)]);

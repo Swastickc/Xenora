@@ -672,6 +672,88 @@ pub fn execute(
             cpu.flags.cf = value == 0;
             cpu.flags.zf = count == 0;
         }
+        Op::Andn => {
+            // VEX.vvvv names the first source of every BMI form here.
+            let Some(vvvv) = insn.vex.and_then(|vex| vex.source) else {
+                return Err(ExitReason::IllegalInstruction(0));
+            };
+            let a = read_reg(
+                cpu,
+                RegOperand {
+                    index: vvvv,
+                    high: false,
+                },
+                size,
+            );
+            let b = read_rm(cpu, memory, insn)?;
+            let value = !a & b & mask(size);
+            write_reg(cpu, insn.reg, size, value);
+            cpu.flags.cf = false;
+            cpu.flags.of = false;
+            cpu.flags.zf = value == 0;
+            cpu.flags.sf = value & sign_bit(size) != 0;
+        }
+        Op::Blsi | Op::Blsmsk | Op::Blsr => {
+            let Some(vvvv) = insn.vex.and_then(|vex| vex.source) else {
+                return Err(ExitReason::IllegalInstruction(0));
+            };
+            let source = read_rm(cpu, memory, insn)? & mask(size);
+            let zero = source == 0;
+            let value = match insn.op {
+                Op::Blsi => source.isolate_lowest_one(),
+                Op::Blsmsk => source.wrapping_sub(1) ^ source,
+                _ => source.wrapping_sub(1) & source,
+            } & mask(size);
+            write_reg(
+                cpu,
+                RegOperand {
+                    index: vvvv,
+                    high: false,
+                },
+                size,
+                value,
+            );
+            cpu.flags.cf = if insn.op == Op::Blsi { !zero } else { zero };
+            cpu.flags.of = false;
+            // BLSMSK clears ZF; the other two write it from the result.
+            cpu.flags.zf = insn.op != Op::Blsmsk && value == 0;
+            cpu.flags.sf = value & sign_bit(size) != 0;
+        }
+        Op::Shlx | Op::Shrx | Op::Sarx => {
+            let Some(vvvv) = insn.vex.and_then(|vex| vex.source) else {
+                return Err(ExitReason::IllegalInstruction(0));
+            };
+            let value = read_rm(cpu, memory, insn)? & mask(size);
+            let count = read_reg(
+                cpu,
+                RegOperand {
+                    index: vvvv,
+                    high: false,
+                },
+                size,
+            ) & u64::from(8 * size - 1);
+            let bits = 8 * u32::from(size);
+            let result = match insn.op {
+                Op::Shlx => value.wrapping_shl(count as u32),
+                Op::Shrx => value.wrapping_shr(count as u32),
+                _ => {
+                    let signed = (value as i64) << (64 - bits) >> (64 - bits);
+                    (signed.wrapping_shr(count as u32) as u64) & mask(size)
+                }
+            } & mask(size);
+            write_reg(cpu, insn.reg, size, result);
+        }
+        Op::Rorx => {
+            let value = read_rm(cpu, memory, insn)? & mask(size);
+            let bits = 8 * u32::from(size);
+            let count = (insn.imm as u32) & (bits - 1);
+            let result = if count == 0 {
+                value
+            } else {
+                (value >> count) | (value << (bits - count))
+            } & mask(size);
+            write_reg(cpu, insn.reg, size, result);
+        }
         Op::Push => {
             let value = match insn.encoding {
                 Encoding::OpReg => read_reg(cpu, insn.reg, 8),
@@ -752,31 +834,75 @@ pub fn execute(
                 cpu.gpr[register] = u64::from(value);
             }
         }
-        Op::Movs | Op::Stos => {
-            // One element per execution. A REP form with elements left keeps
-            // RIP on itself, so every element is a step of its own: it counts
-            // against the step budget, and a fault keeps the elements already
-            // done, with RSI, RDI and RCX at the element that faulted.
+        Op::Movs | Op::Stos | Op::Lods | Op::Scas | Op::Cmps => {
+            // One element per execution. A repeated form with elements left
+            // keeps RIP on itself, so every element is a step of its own: it
+            // counts against the step budget, and a fault keeps the elements
+            // already done, with RSI, RDI and RCX at the element that faulted.
+            // A repeated CMPS or SCAS that faults gets back the flags it began
+            // with. A zero count touches nothing.
             if !(insn.rep && cpu.gpr[RCX] == 0) {
-                let value = if insn.op == Op::Movs {
-                    read_rm(cpu, memory, insn)?
-                } else {
-                    cpu.gpr[RAX] & mask(size)
+                // The source [RSI] may carry FS or GS; [RDI] takes no
+                // override. Every access precedes every register write.
+                let destination = cpu.gpr[RDI];
+                let began = match cpu.repeat_flags {
+                    Some((rip, flags)) if rip == insn.rip => flags,
+                    _ => cpu.flags,
                 };
-                write_mem(memory, cpu.gpr[RDI], size, value)?;
+                match insn.op {
+                    Op::Movs => {
+                        let value = read_rm(cpu, memory, insn)?;
+                        write_mem(memory, destination, size, value)?;
+                    }
+                    Op::Stos => write_mem(memory, destination, size, cpu.gpr[RAX] & mask(size))?,
+                    Op::Lods => {
+                        let value = read_rm(cpu, memory, insn)?;
+                        write_reg(cpu, accumulator(RAX), size, value);
+                    }
+                    // SCAS compares the accumulator with [RDI] and CMPS
+                    // compares [RSI] with [RDI], each as CMP would.
+                    _ => {
+                        let source = if insn.op == Op::Scas {
+                            Ok(cpu.gpr[RAX] & mask(size))
+                        } else {
+                            read_rm(cpu, memory, insn)
+                        };
+                        match source.and_then(|a| Ok((a, read_mem(memory, destination, size)?))) {
+                            Ok((a, b)) => cpu.flags = sub(a, b, false, size).1,
+                            // A fault restores the flags the repeat began with;
+                            // the elements already done stay done.
+                            Err(fault) => {
+                                if insn.rep {
+                                    cpu.flags = began;
+                                    cpu.repeat_flags = None;
+                                }
+                                return Err(fault);
+                            }
+                        }
+                    }
+                }
                 let step = if cpu.df {
                     u64::from(size).wrapping_neg()
                 } else {
                     u64::from(size)
                 };
-                if insn.op == Op::Movs {
+                if matches!(insn.op, Op::Movs | Op::Lods | Op::Cmps) {
                     cpu.gpr[RSI] = cpu.gpr[RSI].wrapping_add(step);
                 }
-                cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                if insn.op != Op::Lods {
+                    cpu.gpr[RDI] = cpu.gpr[RDI].wrapping_add(step);
+                }
                 if insn.rep {
                     cpu.gpr[RCX] -= 1;
-                    if cpu.gpr[RCX] != 0 {
+                    // REPE stops once an element clears ZF and REPNE once one
+                    // sets it (Intel SDM Vol. 2B, "REP/REPE/REPZ/REPNE/REPNZ").
+                    let stopped =
+                        matches!(insn.op, Op::Scas | Op::Cmps) && cpu.flags.zf == insn.repne;
+                    if cpu.gpr[RCX] != 0 && !stopped {
                         next = insn.rip;
+                    }
+                    if matches!(insn.op, Op::Scas | Op::Cmps) {
+                        cpu.repeat_flags = (next == insn.rip).then_some((insn.rip, began));
                     }
                 }
             }

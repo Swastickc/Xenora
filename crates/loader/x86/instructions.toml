@@ -12,6 +12,7 @@
 #
 # enc = "string" is a string instruction: its source is [RSI], which FS or GS
 # may override, its destination is [RDI], and it accepts the REP prefix (F3).
+# CMPS and SCAS also accept REPNE (F2); on them F3 is REPE.
 #
 # lock = true accepts the LOCK prefix (F0) when the ModRM operand is memory. A
 # group names the operations it accepts LOCK on, and the generator accepts it on
@@ -103,6 +104,17 @@ bsr = { writes = "zf", undefined = "cf sf of pf af", ref = "sdm BSR" }
 popcnt = { writes = "cf zf sf of pf af", ref = "sdm POPCNT" }
 tzcnt = { writes = "cf zf", undefined = "sf of pf af", ref = "sdm TZCNT" }
 lzcnt = { writes = "cf zf", undefined = "sf of pf af", ref = "sdm LZCNT" }
+# BMI1/BMI2: VEX-only scalar bit manipulation. CF and OF are cleared, PF and
+# AF architecturally undefined. BLSI sets CF when the source is nonzero, BLSR
+# and BLSMSK when it is zero; the variable shifts and RORX write no flags.
+andn = { writes = "cf zf sf of", undefined = "pf af", ref = "sdm ANDN" }
+blsi = { writes = "cf zf sf of", undefined = "pf af", ref = "sdm BLSI" }
+blsmsk = { writes = "cf zf sf of", undefined = "pf af", ref = "sdm BLSMSK" }
+blsr = { writes = "cf zf sf of", undefined = "pf af", ref = "sdm BLSR" }
+shlx = { ref = "sdm SHLX/SHRX/SARX" }
+shrx = { ref = "sdm SHLX/SHRX/SARX" }
+sarx = { ref = "sdm SHLX/SHRX/SARX" }
+rorx = { ref = "sdm RORX" }
 push = { ref = "sdm PUSH" }
 pop = { ref = "sdm POP" }
 leave = { ref = "sdm LEAVE" }
@@ -132,6 +144,11 @@ fninit = { ref = "sdm FINIT/FNINIT" }
 # A REP form repeats by leaving RIP on itself, so these end a translated block.
 movs = { terminator = true, ref = "sdm MOVS/MOVSB/MOVSW/MOVSD/MOVSQ" }
 stos = { terminator = true, ref = "sdm STOS/STOSB/STOSW/STOSD/STOSQ" }
+lods = { terminator = true, ref = "sdm LODS/LODSB/LODSW/LODSD/LODSQ" }
+# SCAS and CMPS set the flags as CMP would. A repeat with a zero count sets
+# none, and REPE or REPNE stops on the ZF the element itself produced.
+scas = { writes = "cf zf sf of pf af", conditional = true, terminator = true, ref = "sdm SCAS/SCASB/SCASW/SCASD" }
+cmps = { writes = "cf zf sf of pf af", conditional = true, terminator = true, ref = "sdm CMPS/CMPSB/CMPSW/CMPSD/CMPSQ" }
 
 # SSE and SSE2 moves and packed integer operations. None reads or writes RFLAGS.
 movaps = { ref = "sdm MOVAPS" }
@@ -840,6 +857,42 @@ size = "b"
 [[form]]
 op = "stos"
 opcode = 0xAB
+enc = "string"
+size = "v"
+
+[[form]]
+op = "lods"
+opcode = 0xAC
+enc = "string"
+size = "b"
+
+[[form]]
+op = "lods"
+opcode = 0xAD
+enc = "string"
+size = "v"
+
+[[form]]
+op = "scas"
+opcode = 0xAE
+enc = "string"
+size = "b"
+
+[[form]]
+op = "scas"
+opcode = 0xAF
+enc = "string"
+size = "v"
+
+[[form]]
+op = "cmps"
+opcode = 0xA6
+enc = "string"
+size = "b"
+
+[[form]]
+op = "cmps"
+opcode = 0xA7
 enc = "string"
 size = "v"
 
@@ -5958,3 +6011,75 @@ opcode = 0x2D
 enc = "reg_xmm"
 length = "any"
 src = "q"
+
+# The scalar BMI1 and BMI2 bit-manipulation forms (#1098). VEX-only, always
+# 32 or 64 general operands by VEX.W; L is clear in every encoding.
+[[vex]]
+op = "andn"
+map = "0f38"
+opcode = 0xF2
+enc = "reg_vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "blsi"
+map = "0f38"
+opcode = 0xF3
+digit = 3
+enc = "vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "blsmsk"
+map = "0f38"
+opcode = 0xF3
+digit = 2
+enc = "vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "blsr"
+map = "0f38"
+opcode = 0xF3
+digit = 1
+enc = "vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "shlx"
+map = "0f38"
+prefix = "66"
+opcode = 0xF7
+enc = "reg_vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "shrx"
+map = "0f38"
+prefix = "f2"
+opcode = 0xF7
+enc = "reg_vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "sarx"
+map = "0f38"
+prefix = "f3"
+opcode = 0xF7
+enc = "reg_vvvv_rm"
+length = "128"
+nds = true
+
+[[vex]]
+op = "rorx"
+map = "0f3a"
+prefix = "f2"
+opcode = 0xF0
+enc = "reg_rm_ub"
+length = "128"

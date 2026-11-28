@@ -573,6 +573,37 @@ pub(super) fn print_to_buffer_secure(
 }
 
 impl StandardStreams {
+    /// The streams a spawned child inherits: the descriptor wiring copies,
+    /// so the pipes the parent created are the child's own, while the
+    /// captured output starts empty for the parent to collect as the CRT
+    /// recombines a child's console writes. The input copies its unread
+    /// bytes: a console child's stdin is the same console's, and a pipe
+    /// rewired onto descriptor 0 already bypasses it either way.
+    /// The child's inherited pipe references count, as handle inheritance
+    /// adds to the kernel object's count.
+    pub(super) fn count_inherited_pipe_references(&self, drive: &mut super::ObjectState) {
+        self.opened.count_inherited_pipe_references(drive);
+    }
+
+    /// The dead child's pipe ends close, as process exit closes its table.
+    pub(super) fn close_pipe_ends_for_exit(&mut self, drive: &mut super::ObjectState) {
+        self.opened.close_pipe_ends_for_exit(drive);
+    }
+
+    pub(super) fn inherit_for_spawn(&self) -> StandardStreams {
+        StandardStreams {
+            opened: self.opened.inherit_for_spawn(),
+            input: Input {
+                bytes: self.input.bytes[self.input.position..].to_vec(),
+                position: 0,
+                orientation: self.input.orientation,
+                eof: self.input.eof,
+            },
+            closed: self.closed,
+            ..StandardStreams::default()
+        }
+    }
+
     pub(super) fn output(&self) -> &[u8] {
         &self.output
     }
@@ -877,6 +908,17 @@ impl StandardStreams {
     /// indicators separate the two, as the documentation asks. A null buffer
     /// or stream is `EINVAL` with a return of 0. More than this runtime
     /// transfers at once stops the guest, as for `fwrite`.
+    /// Bytes of the standard input, honoring a redirection: when fd 0 was
+    /// duplicated onto a pipe or file the stream reads what the descriptor
+    /// names, as the CRT's stdin is backed by its descriptor. The captured
+    /// input bytes answer only while fd 0 is the console's own.
+    fn input_bytes(&mut self, drive: &ObjectState, count: usize) -> Result<Vec<u8>, u32> {
+        if self.opened.has_descriptor(0) {
+            return self.opened.descriptor_read(drive, 0, count);
+        }
+        Ok(self.input.take(count))
+    }
+
     pub(super) fn read_items(
         &mut self,
         memory: &mut GuestMemory,
@@ -904,7 +946,10 @@ impl StandardStreams {
                 if self.closed[0] || !self.input.orient(false) {
                     return Ok(Err(Failed(0, EBADF)));
                 }
-                self.input.take(length as usize)
+                match self.input_bytes(drive, length as usize) {
+                    Ok(bytes) => bytes,
+                    Err(errno) => return Ok(Err(Failed(0, errno))),
+                }
             }
             Stream::File(file) => match self.opened.read_bytes(drive, file, length as usize) {
                 Ok(bytes) => {
@@ -940,6 +985,13 @@ impl StandardStreams {
             Stream::Input => {
                 if self.closed[0] {
                     return Ok(Err(Failed(-1, EBADF)));
+                }
+                if self.opened.has_descriptor(0) {
+                    return match self.opened.descriptor_read(drive, 0, 1) {
+                        Ok(bytes) if !bytes.is_empty() => Ok(Ok(i32::from(bytes[0]))),
+                        Ok(_) => Ok(Ok(-1)),
+                        Err(errno) => Ok(Err(Failed(-1, errno))),
+                    };
                 }
                 Ok(Ok(match self.input.character() {
                     Some(byte) => i32::from(byte),
@@ -1198,29 +1250,18 @@ impl StandardStreams {
             0 if !rewired && self.closed[0] => return Ok(Err(Failed(-1, EBADF))),
             0 if !rewired => self.input.take((count as usize).min(1 << 20)),
             1 | 2 if !rewired => return Ok(Err(Failed(-1, EBADF))),
-            _ => {
-                match self.opened.pipe_end(fd as u32) {
-                    Ok(Some((id, false))) => {
-                        // A pipe read that would block stops the guest: the
-                        // hosted runtime answers what is there or end of
-                        // file, honestly, rather than blocking forever.
-                        match self.opened.pipe_read(id, count as usize) {
-                            Ok(Some(bytes)) => bytes,
-                            Ok(None) => return Err(RUNTIME_LIMIT),
-                            Err(errno) => return Ok(Err(Failed(-1, errno))),
-                        }
-                    }
-                    Ok(Some((_, true))) => return Ok(Err(Failed(-1, EBADF))),
-                    Ok(None) => match self
-                        .opened
-                        .descriptor_read(drive, fd as u32, count as usize)
-                    {
-                        Ok(bytes) => bytes,
-                        Err(errno) => return Ok(Err(Failed(-1, errno))),
-                    },
-                    Err(errno) => return Ok(Err(Failed(-1, errno))),
-                }
-            }
+            // Pipe ends are wrapped kernel handles: the drain in
+            // `descriptor_read` answers what the pipe holds, empty once the
+            // write side is done - which in the synchronous process world is
+            // the end-of-file a blocked read would reach, since no suspended
+            // process can write while this one runs.
+            _ => match self
+                .opened
+                .descriptor_read(drive, fd as u32, count as usize)
+            {
+                Ok(bytes) => bytes,
+                Err(errno) => return Ok(Err(Failed(-1, errno))),
+            },
         };
         memory.write_bytes(buffer, &bytes).map_err(fault)?;
         Ok(Ok(bytes.len() as i32))
@@ -1270,16 +1311,8 @@ impl StandardStreams {
             2 if !rewired && self.closed[2] => Err(EBADF),
             1 if !rewired => self.write(drive, Stream::Output, &bytes)?,
             2 if !rewired => self.write(drive, Stream::Error, &bytes)?,
-            _ => match self.opened.pipe_end(fd as u32) {
-                Ok(Some((id, true))) => match self.opened.pipe_write(id, &bytes) {
-                    Ok(_) => Ok(()),
-                    Err(errno) => Err(errno),
-                },
-                Ok(Some((_, false))) => Err(EBADF),
-                Ok(None) => match self.opened.descriptor_write(drive, fd as u32, &bytes) {
-                    Ok(()) => Ok(()),
-                    Err(errno) => Err(errno),
-                },
+            _ => match self.opened.descriptor_write(drive, fd as u32, &bytes) {
+                Ok(()) => Ok(()),
                 Err(errno) => Err(errno),
             },
         };
@@ -1419,11 +1452,16 @@ impl StandardStreams {
     }
 
     /// `_pipe` answers the two descriptors through the caller's array.
-    pub(super) fn pipe_create(&mut self, memory: &mut GuestMemory, fds: u64) -> Outcome<i32> {
+    pub(super) fn pipe_create(
+        &mut self,
+        memory: &mut GuestMemory,
+        drive: &mut super::ObjectState,
+        fds: u64,
+    ) -> Outcome<i32> {
         if fds == 0 {
             return Ok(Err(Failed(-1, EINVAL)));
         }
-        match self.opened.pipe_create() {
+        match self.opened.pipe_create(drive) {
             Ok((read, write)) => {
                 memory
                     .write_u32(fds, read)
@@ -1598,6 +1636,15 @@ impl StandardStreams {
             Stream::Input => {
                 if self.closed[0] || !self.input.orient(false) {
                     return Ok(Err(Failed(-1, EBADF)));
+                }
+                if self.opened.has_descriptor(0) {
+                    return match self.opened.descriptor_read(drive, 0, 1) {
+                        std::result::Result::Ok(bytes) if !bytes.is_empty() => {
+                            Ok(Ok(i32::from(bytes[0])))
+                        }
+                        std::result::Result::Ok(_) => Ok(Ok(-1)),
+                        std::result::Result::Err(errno) => Ok(Err(Failed(-1, errno))),
+                    };
                 }
                 Ok(Ok(match self.input.character() {
                     Some(byte) => i32::from(byte),

@@ -549,15 +549,21 @@ fn the_extended_attributes_pack_attributes_times_and_size() {
     wide_at2(&mut guest, NAME7, "sized.bin");
     assert_eq!(guest.call("GetFileAttributesExW", &[NAME7, 0, DATA7]), 1);
     assert_eq!(guest.u32_at(DATA7), 0x80, "FILE_ATTRIBUTE_NORMAL");
+    // The drive tracks times now: creation records the machine's now, and
+    // the harness clock has not moved, so both slots answer its zero. A
+    // file the drive does not know - one the CRT created - still reports
+    // the fixed Unix epoch, the valid time every conversion accepts; the
+    // zero 1601 epoch in production never occurs because the injected clock
+    // there is the real one.
     assert_eq!(
         guest.u64_at(DATA7 + 4),
         0,
-        "the drive tracks no creation time"
+        "the creation time is the machine's now at creation"
     );
     assert_eq!(
         guest.u64_at(DATA7 + 20),
         0,
-        "the drive tracks no write time"
+        "the write time is the machine's now at creation"
     );
     assert_eq!(guest.u32_at(DATA7 + 32), 9, "size low word");
     assert_eq!(guest.u32_at(DATA7 + 28), 0, "size high word");
@@ -568,10 +574,11 @@ fn the_extended_attributes_pack_attributes_times_and_size() {
     assert_eq!(guest.call("UnlockFile", &[0xDEAD, 0, 0, 1, 0]), 0);
 }
 
-/// No served code page has DBCS lead bytes, and setting file times is
-/// honestly unsupported rather than a silent no-op.
+/// No served code page has DBCS lead bytes, and `SetFileTime` validates the
+/// handle before anything else: a bad handle is a bad handle, the ordering
+/// Windows applies now that writing times is implemented.
 #[test]
-fn dbcs_is_always_false_and_file_times_are_unsupported() {
+fn dbcs_is_always_false_and_set_file_time_validates_the_handle() {
     let mut guest = Guest::new(IMPORTS, &[]);
     for byte in [0u64, 0x41, 0x81, 0xFF] {
         assert_eq!(guest.call("IsDBCSLeadByteEx", &[65001, byte]), 0);
@@ -580,8 +587,46 @@ fn dbcs_is_always_false_and_file_times_are_unsupported() {
     assert_eq!(guest.call("SetFileTime", &[1, 0, 0, 0]), 0);
     assert_eq!(
         guest.call("GetLastError", &[]) & 0xFFFF_FFFF,
-        50,
-        "ERROR_NOT_SUPPORTED"
+        6,
+        "ERROR_INVALID_HANDLE"
+    );
+}
+
+/// `SetFileTime` writes the slots its non-null pointers name, and the
+/// attribute query reads them back: the round trip busybox's touch takes.
+#[test]
+fn set_file_time_writes_times_the_attributes_read_back() {
+    const STAMP: u64 = SCRATCH + 0x300;
+    let mut guest = Guest::new(IMPORTS, &[]);
+    let handle = create_file(&mut guest, "timed.bin", GENERIC_WRITE);
+    assert_ne!(handle, INVALID_HANDLE_VALUE);
+    const NAME8: u64 = SCRATCH + 0x400;
+    const DATA8: u64 = SCRATCH + 0x600;
+    // A fixed valid stamp: the 2020-01-02 Unix seconds in Windows form.
+    let stamp = 116_444_736_000_000_000 + 1_577_937_600u64 * 10_000_000;
+    guest
+        .memory
+        .write_bytes(STAMP, &stamp.to_le_bytes())
+        .unwrap();
+    // Only the write time is set; the others keep what creation recorded.
+    assert_eq!(guest.call("SetFileTime", &[handle, 0, 0, STAMP]), 1);
+    assert_eq!(guest.call("CloseHandle", &[handle]), 1);
+    wide_at2(&mut guest, NAME8, "timed.bin");
+    assert_eq!(guest.call("GetFileAttributesExW", &[NAME8, 0, DATA8]), 1);
+    assert_eq!(
+        guest.u64_at(DATA8 + 20),
+        stamp,
+        "the written write time reads back"
+    );
+    // A read-only handle cannot write times: the right is required, as
+    // Windows orders it.
+    let readonly = create_file_disposition(&mut guest, "timed.bin", GENERIC_READ, 3); // OPEN_EXISTING: the file creation above made it
+    assert_ne!(readonly, INVALID_HANDLE_VALUE);
+    assert_eq!(guest.call("SetFileTime", &[readonly, 0, 0, STAMP]), 0);
+    assert_eq!(
+        guest.call("GetLastError", &[]) & 0xFFFF_FFFF,
+        5,
+        "ERROR_ACCESS_DENIED"
     );
 }
 

@@ -1355,9 +1355,6 @@ pub(crate) mod handlers {
     // The Itanium C++ ABI guard protocol lives in `services/cxx_abi.rs`.
     pub(crate) use super::cxx_abi::{cxx_guard_abort, cxx_guard_acquire, cxx_guard_release};
 
-    /// The exit for a request the runtime does not model.
-    const RUNTIME_LIMIT: ExitReason = ExitReason::IllegalInstruction(0xFE);
-
     /// XAudio2Create: creates the engine a guest mixes through.
     pub fn xaudio2_create(
         context: &mut ServiceContext<'_>,

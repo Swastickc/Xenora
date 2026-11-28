@@ -9842,6 +9842,36 @@
       "data_import": false,
       "family": "other",
       "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptCloseAlgorithmProvider"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptGenRandom"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptOpenAlgorithmProvider"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
       "library": "combase.dll",
       "source": "typed",
       "status": "partial",
@@ -16886,6 +16916,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WinHttpCrackUrl"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WinHttpOpen"
     },
     {
@@ -18342,15 +18382,15 @@
   "summary": {
     "aliases": 906,
     "api_set_aliases": 740,
-    "canonical_services": 873,
+    "canonical_services": 877,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 241,
     "implicit_status_services": 76,
-    "libraries": 21,
-    "manual_services": 577,
+    "libraries": 22,
+    "manual_services": 581,
     "ordinal_aliases": 0,
-    "partial": 632,
+    "partial": 636,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

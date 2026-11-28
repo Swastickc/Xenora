@@ -1,33 +1,145 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The user32 surface of a process without windows.
-//!
-//! The machine is a console host: no window can ever be created, so the
-//! message queue is genuinely empty and every window handle is genuinely
-//! invalid. That makes the honest answers the correct answers rather than
-//! stubs: PeekMessage finds nothing because there is nothing to find,
-//! IsWindowVisible is false because the window does not exist. This is
-//! documented here rather than hidden, per the no-silent-no-op doctrine:
-//! the day windows exist, these handlers must grow real state.
+//! The USER32 surface of a windowless process. Guest threads can exchange
+//! posted messages, but there are no windows, window procedures or host input.
 
-use super::ServicesState;
+use super::{ERROR_INVALID_PARAMETER, ERROR_NOACCESS, ServicesState};
+use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
-use std::sync::Arc;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 const MODULE: &str = "user32.dll";
+const ERROR_INVALID_THREAD_ID: u32 = 1444;
+const ERROR_NOT_ENOUGH_QUOTA: u32 = 1816;
+const MAX_POSTED_MESSAGES: usize = 10_000;
+const MSG_SIZE: usize = 48;
+const WM_QUIT: u32 = 0x0012;
+const PM_REMOVE: u32 = 0x0001;
+const PM_NOYIELD: u32 = 0x0002;
+
+struct PostedMessage {
+    message: u32,
+    wparam: u64,
+    lparam: u64,
+    time: u32,
+}
+
+impl PostedMessage {
+    fn encode(&self) -> [u8; MSG_SIZE] {
+        // The x64 MSG has an eight-byte HWND, alignment padding after the
+        // message, two pointer-sized parameters, a timestamp and a POINT.
+        // Thread messages have no HWND; the windowless runtime has no cursor.
+        let mut bytes = [0; MSG_SIZE];
+        bytes[8..12].copy_from_slice(&self.message.to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.wparam.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.lparam.to_le_bytes());
+        bytes[32..36].copy_from_slice(&self.time.to_le_bytes());
+        bytes
+    }
+
+    fn matches(&self, minimum: u32, maximum: u32) -> bool {
+        self.message == WM_QUIT
+            || (minimum == 0 && maximum == 0)
+            || (minimum..=maximum).contains(&self.message)
+    }
+}
+
+type MessageQueues = BTreeMap<u32, VecDeque<PostedMessage>>;
+
+fn prune_message_queues(state: &ServicesState, queues: &mut MessageQueues) {
+    let threads = state.threads.lock().expect("guest thread table");
+    if state.hooks.is_attached() {
+        queues.retain(|id, _| threads.threads.contains_key(id));
+    } else {
+        queues.retain(|id, _| *id == state.thread_id);
+    }
+}
+
+fn register_message_queues(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    let queues = Arc::new(Mutex::new(MessageQueues::new()));
+    for symbol in ["PeekMessageA", "PeekMessageW"] {
+        let queues = Arc::clone(&queues);
+        let state = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                // NULL accepts messages from any window and the thread itself;
+                // HWND(-1) accepts thread messages only. There are no windows.
+                if !matches!(args.rdx, 0 | u64::MAX) {
+                    return Ok(0);
+                }
+                let minimum = args.r8 as u32;
+                let maximum = args.r9 as u32;
+                let flags = args.get(4, memory).map_err(ExitReason::MemoryFault)? as u32;
+                let teb = cpu.gs_base;
+                if minimum > u16::MAX as u32
+                    || maximum > u16::MAX as u32
+                    || flags & !(PM_REMOVE | PM_NOYIELD) != 0
+                {
+                    return state.fail(teb, ERROR_INVALID_PARAMETER, 0);
+                }
+
+                let id = state.thread_id_of(teb);
+                let mut queues = queues.lock().expect("guest message queues");
+                prune_message_queues(&state, &mut queues);
+                let queue = queues.entry(id).or_default();
+                let Some(index) = queue
+                    .iter()
+                    .position(|message| message.matches(minimum, maximum))
+                else {
+                    return Ok(0);
+                };
+                let output = args.rcx;
+                if output == 0
+                    || !memory.can_write(output, MSG_SIZE)
+                    || memory.write_bytes(output, &queue[index].encode()).is_err()
+                {
+                    return state.fail(teb, ERROR_NOACCESS, 0);
+                }
+                if flags & PM_REMOVE != 0 {
+                    queue.remove(index);
+                }
+                Ok(1)
+            },
+        );
+    }
+
+    for symbol in ["PostThreadMessageA", "PostThreadMessageW"] {
+        let queues = Arc::clone(&queues);
+        let state = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, _| {
+                let mut queues = queues.lock().expect("guest message queues");
+                prune_message_queues(&state, &mut queues);
+                let Some(queue) = queues.get_mut(&(args.rcx as u32)) else {
+                    return state.fail(cpu.gs_base, ERROR_INVALID_THREAD_ID, 0);
+                };
+                if queue.len() >= MAX_POSTED_MESSAGES {
+                    return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_QUOTA, 0);
+                }
+                queue.push_back(PostedMessage {
+                    message: args.rdx as u32,
+                    wparam: args.r8,
+                    lparam: args.r9,
+                    time: state.uptime_millis() as u32,
+                });
+                Ok(1)
+            },
+        );
+    }
+}
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
-    let _ = state;
-    // PeekMessage reports the empty queue honestly: zero is "no message",
-    // the correct answer for a process that cannot create windows.
-    registry.register_with_status(MODULE, "PeekMessageA", ServiceStatus::Partial, |_, _, _| {
-        Ok(0)
-    });
+    register_message_queues(registry, state);
 
-    // TranslateMessage and DispatchMessage operate on messages the caller
-    // fetched - impossible here - and their documented zero returns for a
-    // message needing no translation or having no window procedure are the
-    // honest answers.
+    // Posted thread messages have no window procedure. No keyboard input
+    // exists to translate into character messages.
     registry.register_with_status(
         MODULE,
         "TranslateMessage",
@@ -41,14 +153,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         |_, _, _| Ok(0),
     );
 
-    // MsgWaitForMultipleObjects waits on object handles and the message
-    // queue together. The queue half never fires here - no window can be
-    // created, so no message ever arrives - and the wait reduces exactly to
-    // the object wait the kernel already models, resume included. MWMO_WAITALL
-    // is honored as the wait-all form; MWMO_ALERTABLE is honestly refused,
-    // as the alertable kernel waits are. busybox binds the import for its
-    // event loops; the wake mask is validated but otherwise means nothing
-    // where no input exists.
+    // This subset of MsgWaitForMultipleObjects observes kernel objects only.
+    // It does not wake for posted thread messages; guests poll them with PeekMessage.
     let wait_state = Arc::clone(state);
     registry.register_with_status(
         MODULE,
@@ -114,8 +220,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
 
 #[cfg(test)]
 #[test]
-fn the_windowless_message_queue_is_honestly_empty() {
-    use crate::cpu::CpuState;
+fn a_new_thread_message_queue_is_empty() {
+    use crate::cpu::{CpuState, Register};
     use crate::import_table::ImportName;
     use crate::imports::Win64Args;
     use crate::memory::{GuestMemory, MemoryPermissions};
@@ -137,6 +243,11 @@ fn the_windowless_message_queue_is_honestly_empty() {
         ("ShowWindow", 0),
     ] {
         let mut cpu = CpuState::default();
+        if symbol == "PeekMessageA" {
+            cpu.set(Register::Rcx, 0x1300);
+            cpu.set(Register::Rsp, 0x2000);
+            memory.write_u64(0x2028, 0).unwrap();
+        }
         let descriptor = registry
             .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
             .unwrap();
@@ -150,7 +261,6 @@ fn the_windowless_message_queue_is_honestly_empty() {
     // MsgWaitForMultipleObjects: invalid counts and handles fail honestly,
     // and the wait machinery serves the object half of the contract.
     {
-        use crate::cpu::Register;
         let wait = registry
             .resolve(
                 MODULE,

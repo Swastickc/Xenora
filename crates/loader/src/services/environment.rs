@@ -8,11 +8,12 @@
 //! `_environ` copy does not follow these writes, which is what Windows
 //! programs observe: only the CRT's own `_putenv` would update that copy.
 
-use super::{ERROR_INVALID_PARAMETER, KERNEL32, ServicesState};
+use super::codepages::{self, CodePage};
+use super::{ERROR_INVALID_PARAMETER, ERROR_NOT_ENOUGH_MEMORY, KERNEL32, ServicesState};
 use crate::cpu::ExitReason;
 use crate::imports::{ImportRegistry, ServiceStatus};
-use crate::memory::PROCESS_HEAP;
-use std::sync::Arc;
+use crate::memory::{GuestMemory, PROCESS_HEAP};
+use std::sync::{Arc, Mutex};
 
 const PROCESSENV_API: &str = "api-ms-win-core-processenvironment-l1-1-0.dll";
 
@@ -106,20 +107,10 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     // FreeEnvironmentStringsW. An empty environment is the two terminators.
     let service_state = Arc::clone(state);
     registry.register(KERNEL32, "GetEnvironmentStringsW", move |_, _, memory| {
-        let entries = service_state.environment_block_entries();
-        let mut bytes: Vec<u8> = Vec::new();
-        for (name, value) in &entries {
-            for unit in format!("{name}={value}").encode_utf16() {
-                bytes.extend_from_slice(&unit.to_le_bytes());
-            }
-            bytes.extend_from_slice(&[0, 0]);
-        }
-        bytes.extend_from_slice(&[0, 0]);
-        if entries.is_empty() {
-            // An empty environment is one empty string and the block
-            // terminator: two null units.
-            bytes.extend_from_slice(&[0, 0]);
-        }
+        let bytes: Vec<u8> = environment_units(&service_state)
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let length = bytes.len();
         let target = memory
             .map_heap_allocation(PROCESS_HEAP, length)
@@ -132,6 +123,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
         Ok(target)
     });
+
+    register_narrow_environment_block(registry, state);
 
     // Set and delete variables. The name must be non-empty and free of '=';
     // a null value deletes the variable. The C runtime's own copy does not
@@ -193,6 +186,85 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         registry.alias(PROCESSENV_API, KERNEL32, symbol);
         registry.set_status(KERNEL32, symbol, ServiceStatus::Partial);
     }
+}
+
+fn register_narrow_environment_block(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    // Give narrow copies their own allocation owner, so neither the wide
+    // release nor a process-heap free can release them.
+    let heap = Arc::new(Mutex::new(None));
+    for symbol in ["GetEnvironmentStrings", "GetEnvironmentStringsA"] {
+        let service_state = Arc::clone(state);
+        let heap = Arc::clone(&heap);
+        registry.register_with_status(
+            KERNEL32,
+            symbol,
+            ServiceStatus::Partial,
+            move |_, cpu, memory| {
+                let units = environment_units(&service_state);
+                let (bytes, _) = codepages::encode(CodePage::Cp437, &units, b'?');
+
+                let Some(heap) = narrow_heap(&heap, memory) else {
+                    return service_state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+                };
+                let Ok(target) = memory.map_heap_allocation(heap, bytes.len()) else {
+                    return service_state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
+                };
+                if let Err(error) = memory.write_bytes(target, &bytes) {
+                    memory.release_heap_allocation(heap, target);
+                    return Err(ExitReason::MemoryFault(error));
+                }
+                Ok(target)
+            },
+        );
+    }
+
+    let service_state = Arc::clone(state);
+    registry.register_with_status(
+        KERNEL32,
+        "FreeEnvironmentStringsA",
+        ServiceStatus::Partial,
+        move |args, cpu, memory| {
+            let heap = *heap.lock().expect("narrow environment heap");
+            if args.rcx != 0
+                && heap.is_some_and(|heap| memory.release_heap_allocation(heap, args.rcx))
+            {
+                Ok(1)
+            } else {
+                service_state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0)
+            }
+        },
+    );
+    for symbol in ["GetEnvironmentStrings", "FreeEnvironmentStringsA"] {
+        registry.alias(PROCESSENV_API, KERNEL32, symbol);
+    }
+}
+
+fn environment_units(state: &ServicesState) -> Vec<u16> {
+    let entries = state.environment_block_entries();
+    let mut units = Vec::new();
+    for (name, value) in &entries {
+        units.extend(name.encode_utf16());
+        units.push(u16::from(b'='));
+        units.extend(value.encode_utf16());
+        units.push(0);
+    }
+    units.push(0);
+    if entries.is_empty() {
+        units.push(0);
+    }
+    units
+}
+
+fn narrow_heap(stored: &Mutex<Option<u64>>, memory: &mut GuestMemory) -> Option<u64> {
+    let mut stored = stored.lock().expect("narrow environment heap");
+    if let Some(heap) = *stored
+        && memory.has_heap(heap)
+    {
+        return Some(heap);
+    }
+    let heap = memory.create_private_heap(0)?;
+    *stored = Some(heap);
+    Some(heap)
 }
 
 /// Read a null-terminated wide string as text.

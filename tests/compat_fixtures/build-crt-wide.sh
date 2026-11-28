@@ -50,5 +50,5 @@ build() {
 for level in O0 O2; do
     build "crt-wide-$level" "$level" ""
 done
-# Control: one expected value is wrong, so check 17 fails.
+# Control: one expected value is wrong, so check 26 fails.
 build crt-wide-break O1 CRT_WIDE_BREAK

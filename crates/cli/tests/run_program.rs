@@ -549,13 +549,13 @@ fn a_program_using_wide_conversions_passes_its_checks() {
     for name in ["crt-wide-O0", "crt-wide-O2"] {
         let run = run_program(&crt_wide(name), &[], &[]);
         assert_eq!(run.code, Some(0), "{name}: {}{}", run.stdout, run.stderr);
-        assert_eq!(run.stdout, "crt_wide: 17 of 17 checks passed\r\n", "{name}");
+        assert_eq!(run.stdout, "crt_wide: 25 of 25 checks passed\r\n", "{name}");
         assert_eq!(run.stderr, "", "{name}");
     }
     let run = run_program(&crt_wide("crt-wide-break"), &[], &[]);
-    assert_eq!(run.code, Some(18), "{}", run.stderr);
+    assert_eq!(run.code, Some(26), "{}", run.stderr);
     assert!(
-        run.stdout.contains("check 18 failed: control"),
+        run.stdout.contains("check 26 failed: control"),
         "{}",
         run.stdout
     );

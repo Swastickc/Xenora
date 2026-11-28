@@ -150,6 +150,17 @@ exits with the program's exit status.
 - **An optional digest.** With `--sha256 <64 hex digits>` the file runs only
   if its SHA-256 is the one given. The file is read once and the bytes that
   were hashed are the bytes that run.
+- **Offscreen graphics.** Hosted programs, including those with `--package`,
+  use the software reference by default. On Apple Silicon,
+  `--graphics-backend metal` uses Metal for flat triangle draws with the
+  fixed translated gfx1030 vertex and pixel stages and for guest timeline
+  fences. Textured draws require a separate adapter. Metal failures stop the
+  affected call without software fallback. Pair either explicit backend with
+  `--trace` to see the presentation backend, number of completed frames, and
+  the latest frame's draw count and dimensions. A run with no presentations
+  reports `backend=none`. A clear-only frame has `last_draws=0` even when
+  its presentation backend is Metal. The embedded fixtures have their own
+  graphics path.
 - **Limits.** The program runs in a separate worker process with a wall
   deadline: 15 seconds, or `--wall-seconds <1..=3600>` (#448). It has no step
   limit unless `--max-steps <n>` gives one; a limit that is reached is a

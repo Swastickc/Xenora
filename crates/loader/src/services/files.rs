@@ -1979,6 +1979,16 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
             return peek.fail(cpu.gs_base, ERROR_ACCESS_DENIED, 0);
         }
         let pipe = pipe_state.lock().expect("pipe state");
+        // An empty pipe reports broken once no write can arrive: the write
+        // end closed, or it is open only in processes that stay suspended
+        // while this one runs - the synchronous process world means the
+        // block a reader would enter here can never lift. A process polling
+        // a pipe it writes itself later in the same run is the documented
+        // approximation, as the pipe reads are.
+        if pipe.buffer.is_empty() {
+            drop(pipe);
+            return peek.fail(cpu.gs_base, 109, 0); // ERROR_BROKEN_PIPE
+        }
         let available = pipe.buffer.len() as u32;
         // lpBytesRead is the number of bytes copied into the caller's buffer:
         // nothing leaves the pipe, the copy is a look at the front bytes.
@@ -2136,7 +2146,8 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         }
         let objects = types.objects.lock().expect("guest object state");
         match objects.handles.get(&args.rcx) {
-            Some(GuestObject::File(_)) => Ok(1), // FILE_TYPE_DISK
+            Some(GuestObject::File(_)) => Ok(1),     // FILE_TYPE_DISK
+            Some(GuestObject::Pipe { .. }) => Ok(3), // FILE_TYPE_PIPE
             Some(_) => {
                 // A handle that is not a file has no type the file API knows.
                 Ok(0) // FILE_TYPE_UNKNOWN

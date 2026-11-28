@@ -12,12 +12,12 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 873 |
+| Canonical services | 869 |
 | Typed registry services | 296 |
-| Manual code registrations | 577 |
+| Manual code registrations | 573 |
 | Canonical libraries | 21 |
 | Implemented | 237 |
-| Partial | 636 |
+| Partial | 632 |
 | Stub | 0 |
 | Data-import services | 7 |
 | Aliases of every kind | 937 |
@@ -59,8 +59,6 @@ independent acceptance or compatibility claims.
 | <code>ucrtbase.dll</code> | <code>c-runtime</code> | 298 | 207 | 91 | 0 | 103 | 195 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
 | <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
-| <code>ws2_32.dll</code> | <code>windows-networking</code> | 57 | 0 | 57 | 0 | 6 | 51 | 0 | 6 |
-| <code>winhttp.dll</code> | <code>other</code> | 14 | 0 | 14 | 0 | 0 | 14 | 0 | 0 |
 | <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |

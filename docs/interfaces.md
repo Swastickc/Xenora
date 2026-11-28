@@ -1064,6 +1064,11 @@ only one the emulator has, and its multibyte encoding is documented as
 the answer: every byte is the wide character of the same value,
 zero-extended, and a wide character above 255 fails the conversion with
 `EILSEQ`. The restartable forms have no shift state to keep and say so.
+They check output capacity before reading the next source unit: exact
+capacity leaves the next unit unconsumed, copying the terminator clears the
+source pointer, sizing queries make no source progress, and an
+unrepresentable wide unit is left as the next input unit. These progress
+rules follow [WG14 N2310 section 7.29.6.4](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n2310.pdf).
 The classification is the ASCII table, through `iswctype`'s bits — the
 form mingw-w64 actually imports, as the `isw*` macros inline to it. All
 `implemented`. The wide stream operations and the wide printf forms are

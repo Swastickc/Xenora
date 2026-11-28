@@ -17426,6 +17426,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSASocketW"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAStartup"
     },
     {
@@ -18712,15 +18722,15 @@
   "summary": {
     "aliases": 937,
     "api_set_aliases": 740,
-    "canonical_services": 879,
+    "canonical_services": 880,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 583,
+    "manual_services": 584,
     "ordinal_aliases": 31,
-    "partial": 642,
+    "partial": 643,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

@@ -297,6 +297,42 @@ fn socket_result(
     }
 }
 
+fn create_loopback_socket(
+    net: &mut Winsock,
+    af: u64,
+    kind: u64,
+    protocol: u64,
+) -> Result<u64, u32> {
+    if net.refs == 0 {
+        return Err(WSANOTINITIALISED);
+    }
+    if af as u32 != 2 {
+        return Err(WSAEAFNOSUPPORT);
+    }
+    let stream = match (kind as u32, protocol as u32) {
+        (2, 0 | 17) => false,
+        (1, 0 | 6) => true,
+        (1, _) | (2, _) => return Err(WSAEPROTONOSUPPORT),
+        _ => return Err(WSAESOCKTNOSUPPORT),
+    };
+    if net.sockets.len() >= MAX_SOCKETS {
+        return Err(WSAEMFILE);
+    }
+    let Some(next) = net.serial.checked_add(1) else {
+        return Err(WSAEMFILE);
+    };
+    net.serial = next;
+    let socket = 0x5300_0000_0000_0000 | u64::from(next);
+    net.sockets.insert(
+        socket,
+        Socket {
+            stream,
+            ..Socket::default()
+        },
+    );
+    Ok(socket)
+}
+
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     let startup = Arc::clone(state);
     registry.register(MODULE, "WSAStartup", move |args, _, memory| {
@@ -338,35 +374,10 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     let open = Arc::clone(state);
     registry.register(MODULE, "socket", move |args, cpu, _| {
         let mut net = open.winsock.lock().expect("guest Winsock state");
-        let fail = |error| open.fail(cpu.gs_base, error, INVALID_SOCKET);
-        if net.refs == 0 {
-            return fail(WSANOTINITIALISED);
+        match create_loopback_socket(&mut net, args.rcx, args.rdx, args.r8) {
+            Ok(socket) => Ok(socket),
+            Err(error) => open.fail(cpu.gs_base, error, INVALID_SOCKET),
         }
-        if args.rcx as u32 != 2 {
-            return fail(WSAEAFNOSUPPORT);
-        }
-        let stream = match (args.rdx as u32, args.r8 as u32) {
-            (2, 0 | 17) => false,
-            (1, 0 | 6) => true,
-            (1, _) | (2, _) => return fail(WSAEPROTONOSUPPORT),
-            _ => return fail(WSAESOCKTNOSUPPORT),
-        };
-        if net.sockets.len() >= MAX_SOCKETS {
-            return fail(WSAEMFILE);
-        }
-        let Some(next) = net.serial.checked_add(1) else {
-            return fail(WSAEMFILE);
-        };
-        net.serial = next;
-        let socket = 0x5300_0000_0000_0000 | u64::from(next);
-        net.sockets.insert(
-            socket,
-            Socket {
-                stream,
-                ..Socket::default()
-            },
-        );
-        Ok(socket)
     });
 
     let close = Arc::clone(state);
@@ -1849,43 +1860,32 @@ fn register_adapters(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
     // WSASocketA is the overlapped-capable creation form. The machine has
     // no completion machinery, so the flags must be zero - anything else is
     // honest refusal - and a zero-flag creation is exactly socket().
-    let wsasocket = Arc::clone(state);
-    registry.register_with_status(
-        MODULE,
-        "WSASocketA",
-        ServiceStatus::Partial,
-        move |args, cpu, memory| {
-            let result = (|| {
-                if args.get(3, memory).map_err(|_| WSAEFAULT)? != 0
-                    || args.get(4, memory).map_err(|_| WSAEFAULT)? != 0
-                    || args.get(5, memory).map_err(|_| WSAEFAULT)? != 0
-                {
-                    return Err(WSAEINVAL);
+    for symbol in ["WSASocketA", "WSASocketW"] {
+        let wsasocket = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                let result = (|| {
+                    if args.get(3, memory).map_err(|_| WSAEFAULT)? != 0
+                        || args.get(4, memory).map_err(|_| WSAEFAULT)? != 0
+                    {
+                        return Err(WSAEINVAL);
+                    }
+                    if args.get(5, memory).map_err(|_| WSAEFAULT)? != 0 {
+                        return Err(WSAEOPNOTSUPP);
+                    }
+                    let mut net = wsasocket.winsock.lock().expect("guest Winsock state");
+                    create_loopback_socket(&mut net, args.rcx, args.rdx, args.r8)
+                })();
+                match result {
+                    Ok(value) => Ok(value),
+                    Err(error) => wsasocket.fail(cpu.gs_base, error, INVALID_SOCKET),
                 }
-                let mut net = wsasocket.winsock.lock().expect("guest Winsock state");
-                if net.refs == 0 {
-                    return Err(WSANOTINITIALISED);
-                }
-                if args.rcx as u32 != 2 {
-                    return Err(WSAEAFNOSUPPORT);
-                }
-                if args.rdx as u32 != 2 || args.r8 as u32 != 17 {
-                    return Err(WSAESOCKTNOSUPPORT);
-                }
-                if net.sockets.len() >= MAX_SOCKETS {
-                    return Err(WSAEMFILE);
-                }
-                net.serial += 4;
-                let handle = 0x5000_0000 + u64::from(net.serial);
-                net.sockets.insert(handle, Socket::default());
-                Ok(handle)
-            })();
-            match result {
-                Ok(value) => Ok(value),
-                Err(error) => wsasocket.fail(cpu.gs_base, error, INVALID_SOCKET),
-            }
-        },
-    );
+            },
+        );
+    }
 
     // __WSAFDIsSet is the fd_set membership test the FD_SET macro expands
     // to: linear scan of the count-prefixed handle array.
@@ -3927,6 +3927,70 @@ fn wsasendto_and_wsarecvfrom_reject_bad_forms_without_losing_datagrams() {
         call(&mut memory, "WSAGetLastError", &[]),
         u64::from(WSAESHUTDOWN)
     );
+}
+
+#[cfg(test)]
+#[test]
+fn wsasocket_widths_create_bounded_loopback_sockets() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+
+    assert_eq!(
+        call(&mut memory, "WSASocketA", &[2, 2, 17, 0, 0, 0]),
+        INVALID_SOCKET
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSANOTINITIALISED)
+    );
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    for symbol in ["WSASocketA", "WSASocketW"] {
+        let udp = call(&mut memory, symbol, &[2, 2, 17, 0, 0, 0]);
+        let tcp = call(&mut memory, symbol, &[2, 1, 6, 0, 0, 0]);
+        assert_ne!(udp, INVALID_SOCKET);
+        assert_ne!(tcp, INVALID_SOCKET);
+        assert_ne!(udp, tcp);
+        for (args, error) in [
+            ([3, 2, 17, 0, 0, 0], WSAEAFNOSUPPORT),
+            ([2, 2, 6, 0, 0, 0], WSAEPROTONOSUPPORT),
+            ([2, 2, 17, 1, 0, 0], WSAEINVAL),
+            ([2, 2, 17, 0, 1, 0], WSAEINVAL),
+            ([2, 2, 17, 0, 0, 1], WSAEOPNOTSUPP),
+        ] {
+            assert_eq!(call(&mut memory, symbol, &args), INVALID_SOCKET);
+            assert_eq!(call(&mut memory, "WSAGetLastError", &[]), u64::from(error));
+        }
+    }
 }
 
 #[cfg(test)]

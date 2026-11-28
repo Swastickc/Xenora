@@ -18,7 +18,7 @@ use crate::imports::{ImportRegistry, ServiceStatus};
 use crate::memory::MemoryPermissions;
 use crate::pe::{IMAGE_FILE_MACHINE_AMD64, PE32_PLUS_MAGIC, ParsedPe, PeError, PeSection};
 use crate::services::{MockClock, ServicesState, register_standard_services};
-use crate::x86_decode::{Encoding, MAX_INSTRUCTION_LEN, decode};
+use crate::x86_decode::{DecodeError, Encoding, MAX_INSTRUCTION_LEN, decode};
 use crate::x86_table::Op;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -29,6 +29,7 @@ use std::sync::Arc;
 /// Bounded probe configuration.
 #[derive(Clone, Debug)]
 pub struct ProbeConfig {
+    /// Maximum total instruction bytes included in the CFG report.
     pub max_disasm_bytes: usize,
     pub max_instructions: usize,
     /// Maximum number of CFG worklist entries to visit (guards against exponential blowup).
@@ -92,13 +93,13 @@ fn modrm_operand(slice: &[u8], pc: usize) -> Option<(u8, usize)> {
     (end <= slice.len()).then_some((modrm, end))
 }
 
-/// Decode a single x86-64 instruction from a file-mapped byte slice.
+/// Decode a single x86-64 instruction from contiguous executable RVA bytes.
 ///
-/// `slice`  — file bytes beginning at the instruction's raw file offset.
+/// `slice`  — file-backed executable bytes starting at the instruction's RVA.
 /// `rva`    — the instruction's RVA (used to compute branch targets).
 /// `va`     — the instruction's virtual address (same).
 ///
-/// Returns `None` if the slice is empty.
+/// Returns `None` when there are no bytes or the decoder runs out of backing.
 fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
     if slice.is_empty() {
         return None;
@@ -153,16 +154,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
     if (op & 0xF0) == 0x40 {
         rex_w = (op & 0x08) != 0;
         if pc >= slice.len() {
-            return Some(CfgDecoded {
-                rva,
-                insn_len: pc,
-                mnemonic: "truncated".into(),
-                is_dbt: false,
-                is_interp: false,
-                notes: "truncated at REX prefix".into(),
-                successors: vec![],
-                fall_through: false,
-            });
+            return None;
         }
         op = slice[pc];
         pc += 1;
@@ -345,7 +337,9 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let rel32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
                 pc += 4;
                 let insn_len = pc as i64;
-                let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
+                let target_va = va
+                    .wrapping_add(insn_len as u64)
+                    .wrapping_add_signed(i64::from(rel32));
                 mnemonic = format!("call rel32 -> 0x{target_va:016x}");
                 // Push call target as a CFG successor; fall-through (return site) continues.
                 let call_rva = rva.wrapping_add(pc as u32).wrapping_add(rel32 as u32);
@@ -359,7 +353,9 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let rel32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
                 pc += 4;
                 let insn_len = pc as i64;
-                let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
+                let target_va = va
+                    .wrapping_add(insn_len as u64)
+                    .wrapping_add_signed(i64::from(rel32));
                 mnemonic = format!("jmp rel32 -> 0x{target_va:016x}");
                 let jmp_rva = rva.wrapping_add(pc as u32).wrapping_add(rel32 as u32);
                 successors.push(jmp_rva);
@@ -372,7 +368,9 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let rel8 = slice[pc] as i8;
                 pc += 1;
                 let insn_len = pc as i64;
-                let target_va = (va as i64 + insn_len + rel8 as i64) as u64;
+                let target_va = va
+                    .wrapping_add(insn_len as u64)
+                    .wrapping_add_signed(i64::from(rel8));
                 mnemonic = format!("jmp rel8 -> 0x{target_va:016x}");
                 let jmp_rva = (rva as i64 + insn_len + rel8 as i64) as u32;
                 successors.push(jmp_rva);
@@ -385,7 +383,9 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                 let rel8 = slice[pc] as i8;
                 pc += 1;
                 let insn_len = pc as i64;
-                let target_va = (va as i64 + insn_len + rel8 as i64) as u64;
+                let target_va = va
+                    .wrapping_add(insn_len as u64)
+                    .wrapping_add_signed(i64::from(rel8));
                 mnemonic = format!("j{:x} rel8 -> 0x{target_va:016x}", op & 0xF);
                 let jcc_rva = (rva as i64 + insn_len + rel8 as i64) as u32;
                 successors.push(jcc_rva);
@@ -404,7 +404,9 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                             let rel32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
                             pc += 4;
                             let insn_len = pc as i64;
-                            let target_va = (va as i64 + insn_len + rel32 as i64) as u64;
+                            let target_va = va
+                                .wrapping_add(insn_len as u64)
+                                .wrapping_add_signed(i64::from(rel32));
                             mnemonic = format!("j{:x} rel32 -> 0x{target_va:016x}", op2 & 0xF);
                             let jcc_rva = (rva as i64 + insn_len + rel32 as i64) as u32;
                             successors.push(jcc_rva);
@@ -450,7 +452,9 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
                     if (modrm & 7) == 5 && pc + 4 <= slice.len() {
                         let disp32 = i32::from_le_bytes(slice[pc..pc + 4].try_into().unwrap());
                         pc += 4;
-                        let iat_target = (va as i64 + pc as i64 + disp32 as i64) as u64;
+                        let iat_target = va
+                            .wrapping_add(pc as u64)
+                            .wrapping_add_signed(i64::from(disp32));
                         if reg_field == 2 {
                             mnemonic = format!("call *[RIP + 0x{iat_target:016x}]");
                             notes = "indirect IAT symbol call - requires dynamic import linking"
@@ -531,6 +535,7 @@ fn decode_one(slice: &[u8], rva: u32, va: u64) -> Option<CfgDecoded> {
             fall_through = !matches!(insn.op, Op::Jmp | Op::Ret | Op::Hlt);
             (is_translatable(&insn), true)
         }
+        Err(DecodeError::Fetch(())) => return None,
         Err(_) => (false, false),
     };
 
@@ -736,6 +741,48 @@ impl ProbeReport {
     }
 }
 
+/// Copy a short instruction window by RVA, so adjacent executable sections
+/// may supply successive bytes even when their raw offsets are not adjacent.
+fn executable_bytes(
+    bytes: &[u8],
+    sections: &[PeSection],
+    mut rva: u32,
+    window: &mut [u8],
+) -> usize {
+    let mut filled = 0;
+    while filled < window.len() {
+        let Some((section, offset)) = sections.iter().find_map(|section| {
+            let offset = rva.checked_sub(section.virtual_address)?;
+            (offset < section.virtual_size.max(section.raw_data_size)).then_some((section, offset))
+        }) else {
+            break;
+        };
+        if !section.permissions.execute
+            || section.raw_data_ptr == 0
+            || offset >= section.raw_data_size
+        {
+            break;
+        }
+        let raw = section.raw_data_ptr as usize + offset as usize;
+        let Some(file) = bytes.get(raw..) else {
+            break;
+        };
+        let count = (window.len() - filled)
+            .min((section.raw_data_size - offset) as usize)
+            .min(file.len());
+        if count == 0 {
+            break;
+        }
+        window[filled..filled + count].copy_from_slice(&file[..count]);
+        filled += count;
+        let Some(next) = rva.checked_add(count as u32) else {
+            break;
+        };
+        rva = next;
+    }
+    filled
+}
+
 /// Perform a strictly read-only, non-executing PE probe.
 pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport, PeError> {
     if bytes.len() < 0x40 {
@@ -774,7 +821,12 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
     ) as usize;
 
     let opt_offset = coff_offset + 20;
-    if bytes.len() < opt_offset + size_of_optional_header {
+    // The fixed PE32+ optional header ends with NumberOfRvaAndSizes. Do not
+    // read the section table or trailing file bytes as optional fields.
+    const FIXED_OPTIONAL_HEADER_SIZE: usize = 112;
+    if size_of_optional_header < FIXED_OPTIONAL_HEADER_SIZE
+        || bytes.len() < opt_offset + size_of_optional_header
+    {
         return Err(PeError::TooSmall);
     }
 
@@ -1047,6 +1099,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
         let mut worklist_entries_used = 0usize;
         let total_budget = config.max_instructions;
         let worklist_budget = config.max_worklist_entries;
+        let mut remaining_bytes = config.max_disasm_bytes;
 
         worklist.push(Reverse(entry_point_rva));
 
@@ -1062,7 +1115,7 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
             if visited.contains(&rva) {
                 continue;
             }
-            if instruction_records.len() >= total_budget {
+            if remaining_bytes == 0 || instruction_records.len() >= total_budget {
                 break;
             }
             if worklist_entries_used >= worklist_budget {
@@ -1070,38 +1123,27 @@ pub fn probe_pe_bytes(bytes: &[u8], config: &ProbeConfig) -> Result<ProbeReport,
             }
             worklist_entries_used += 1;
 
-            let Some(file_off) = rva_to_offset(rva) else {
-                // RVA out of section bounds — skip
+            // One extra backed byte preserves diagnostic lookahead for an
+            // overlong prefix run. No instruction record may include it.
+            let mut window = [0; MAX_INSTRUCTION_LEN + 1];
+            let backed = executable_bytes(bytes, &sections, rva, &mut window);
+            let avail = &window[..backed];
+            let Some(insn_va) = image_base.checked_add(u64::from(rva)) else {
                 continue;
             };
-
-            if file_off >= bytes.len() {
-                continue;
-            }
-
-            // Count bytes already visited starting from this RVA to enforce byte budget
-            let budget_start_insns = instruction_records.len();
-            if budget_start_insns > 0 {
-                let already_decoded: usize =
-                    instruction_records.iter().map(|r| r.bytes.len()).sum();
-                if already_decoded >= config.max_disasm_bytes {
-                    break;
-                }
-            }
-
-            let avail = &bytes[file_off..];
-            let insn_va = image_base + rva as u64;
-
             let Some(decoded) = decode_one(avail, rva, insn_va) else {
                 continue;
             };
-            if decoded.insn_len == 0 {
+            if decoded.insn_len == 0 || decoded.insn_len > avail.len() {
                 continue;
             }
+            if decoded.insn_len > remaining_bytes {
+                break;
+            }
+            remaining_bytes -= decoded.insn_len;
 
             // Mark this RVA visited before pushing successors to avoid duplicates
             visited.insert(rva);
-
             let insn_bytes = avail[..decoded.insn_len].to_vec();
             let rec = InstructionRecord {
                 rva,

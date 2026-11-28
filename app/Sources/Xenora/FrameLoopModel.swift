@@ -35,6 +35,9 @@ protocol FrameLoopAPI: Sendable {
     func resume(_ handle: xenora_session) -> Int32
     func stop(_ handle: xenora_session) -> Int32
     func journalSize(_ handle: xenora_session, required: inout UInt64) -> Int32
+    func journalRecords(
+        _ handle: xenora_session, _ records: UnsafeMutableBufferPointer<UInt8>, required: inout UInt64
+    ) -> Int32
     func status(
         _ handle: xenora_session, _ state: inout UInt32, _ completed: inout UInt32,
         _ frame: inout UInt32, _ rgba: UnsafeMutableBufferPointer<UInt8>
@@ -88,6 +91,12 @@ struct NativeFrameLoopAPI: FrameLoopAPI {
         xenora_session_frame_loop_journal(handle, nil, 0, &required)
     }
 
+    func journalRecords(
+        _ handle: xenora_session, _ records: UnsafeMutableBufferPointer<UInt8>, required: inout UInt64
+    ) -> Int32 {
+        xenora_session_frame_loop_journal(handle, records.baseAddress, UInt64(records.count), &required)
+    }
+
     func status(
         _ handle: xenora_session, _ state: inout UInt32, _ completed: inout UInt32,
         _ frame: inout UInt32, _ rgba: UnsafeMutableBufferPointer<UInt8>
@@ -111,6 +120,7 @@ final class FrameLoopModel: ObservableObject {
     @Published private(set) var controllers: [DetectedController] = []
     @Published private(set) var isStopping = false
     @Published private(set) var journalRecordCount: UInt64?
+    @Published private(set) var journalExportError: String?
     @Published private(set) var controllerVibrationError: String?
 
     private struct AppliedVibration: Equatable {
@@ -185,6 +195,11 @@ final class FrameLoopModel: ObservableObject {
             || state == UInt32(XENORA_LOOP_STOPPED) || state == UInt32(XENORA_LOOP_FAILED)
     }
 
+    var canExportJournal: Bool {
+        session != 0 && !isStopping && journalRecordCount != nil
+            && (state == XENORA_LOOP_FINISHED || state == XENORA_LOOP_STOPPED)
+    }
+
     var stateDescription: String {
         if isStopping { return "Stopping…" }
         let summary: String
@@ -217,6 +232,7 @@ final class FrameLoopModel: ObservableObject {
         errorMessage = nil
         cancelPolling()
         journalRecordCount = nil
+        journalExportError = nil
         state = UInt32(XENORA_LOOP_FAILED)
         isInteractive = false
         controller = nil
@@ -613,6 +629,29 @@ final class FrameLoopModel: ObservableObject {
             return
         }
         journalRecordCount = required
+    }
+
+    func captureJournalForExport() -> FrameJournalDocument? {
+        journalExportError = nil
+        guard canExportJournal, let verifiedCount = journalRecordCount else { return nil }
+        var records = [UInt8](repeating: 0, count: Int(verifiedCount))
+        var required: UInt64 = 0
+        let code = records.withUnsafeMutableBufferPointer { buffer in
+            api.journalRecords(session, buffer, required: &required)
+        }
+        guard code == XENORA_OK else {
+            journalExportError = "Could not read the verified frame journal (status \(code))."
+            return nil
+        }
+        guard required == verifiedCount else {
+            journalExportError = "The frame journal size changed before export."
+            return nil
+        }
+        guard let document = FrameJournalDocument(records: records) else {
+            journalExportError = "The frame journal contains an unknown record."
+            return nil
+        }
+        return document
     }
 
     private func makeImage() -> CGImage? {

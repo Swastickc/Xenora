@@ -189,3 +189,151 @@ fn the_error_mode_exchanges_and_remembers() {
     assert_eq!(guest.call("SetErrorMode", &[0x8000]), 1);
     assert_eq!(guest.call("SetErrorMode", &[3]), 0x8000);
 }
+
+fn check_quiet_debug_imports(imports: &'static [(&'static str, &'static str)]) {
+    use xenora_loader::MemoryPermissions;
+
+    const ANSI: u64 = SCRATCH + 0x2000;
+    const WIDE: u64 = SCRATCH + 0x3000;
+    let mut guest = Guest::new(imports, &[]);
+    assert_eq!(guest.call("IsDebuggerPresent", &[]), 0);
+
+    // Each empty string ends exactly at its mapping boundary. In particular,
+    // the ANSI terminator must not be fetched as a two-byte UTF-16 unit.
+    guest
+        .memory
+        .map_region_with_data(ANSI, 1, MemoryPermissions::READ_ONLY, &[0])
+        .unwrap();
+    guest
+        .memory
+        .map_region_with_data(WIDE, 2, MemoryPermissions::READ_ONLY, &[0, 0])
+        .unwrap();
+    assert!(guest.memory.read_u8(ANSI + 1).is_err());
+    assert!(guest.memory.read_u8(WIDE + 2).is_err());
+    guest.call("OutputDebugStringA", &[ANSI]);
+    guest.call("OutputDebugStringW", &[WIDE]);
+
+    // Nonempty strings must also leave the guest's output streams untouched.
+    narrow(&mut guest, STRING, "debug diagnostic");
+    guest.call("OutputDebugStringA", &[STRING]);
+    guest
+        .memory
+        .write_bytes(STRING, b"w\0i\0d\0e\0\0\0")
+        .unwrap();
+    guest.call("OutputDebugStringW", &[STRING]);
+    assert!(guest.state.standard_output().is_empty());
+    assert!(guest.state.standard_error().is_empty());
+}
+
+#[test]
+fn canonical_debug_imports_are_quiet_and_honor_character_width() {
+    check_quiet_debug_imports(&[
+        (KERNEL32, "IsDebuggerPresent"),
+        (KERNEL32, "OutputDebugStringA"),
+        (KERNEL32, "OutputDebugStringW"),
+    ]);
+}
+
+#[test]
+fn debug_api_set_imports_bind_and_are_quiet() {
+    const DEBUG: &str = "api-ms-win-core-debug-l1-1-0.dll";
+    check_quiet_debug_imports(&[
+        (DEBUG, "IsDebuggerPresent"),
+        (DEBUG, "OutputDebugStringA"),
+        (DEBUG, "OutputDebugStringW"),
+    ]);
+}
+
+#[test]
+fn legacy_error_handling_debug_imports_remain_available() {
+    const ERROR_HANDLING: &str = "api-ms-win-core-errorhandling-l1-1-0.dll";
+    check_quiet_debug_imports(&[
+        (ERROR_HANDLING, "IsDebuggerPresent"),
+        (ERROR_HANDLING, "OutputDebugStringA"),
+        (ERROR_HANDLING, "OutputDebugStringW"),
+    ]);
+}
+
+#[test]
+fn compiled_debug_probe_binds_the_exact_api_set_and_exits_quietly() {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Arc;
+    use xenora_loader::ExitReason;
+    use xenora_loader::import_table::ImportName;
+    use xenora_loader::imports::{ImportRegistry, ServiceStatus};
+    use xenora_loader::probe::{ProbeConfig, probe_pe_bytes};
+    use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
+    use xenora_loader::startup::{StartupLayout, run_synthetic_startup};
+
+    const DEBUG: &str = "api-ms-win-core-debug-l1-1-0.dll";
+    let output = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("debug-probe-{}", std::process::id()));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/compat_fixtures/build-debug-probe.sh");
+    let build = Command::new("sh")
+        .arg(script)
+        .arg(&output)
+        .output()
+        .expect("run the native debug probe builder");
+    assert!(
+        build.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let bytes = std::fs::read(output.join("debug-probe.exe")).unwrap();
+
+    let report = probe_pe_bytes(&bytes, &ProbeConfig::default()).unwrap();
+    assert_eq!(report.import_error, None);
+    assert_eq!(
+        report
+            .imports
+            .iter()
+            .filter(|entry| entry.dll == DEBUG)
+            .count(),
+        3
+    );
+    for symbol in [
+        "IsDebuggerPresent",
+        "OutputDebugStringA",
+        "OutputDebugStringW",
+    ] {
+        let name = ImportName::Name(symbol.into());
+        let mut matches = report
+            .imports
+            .iter()
+            .filter(|entry| entry.import_name == name);
+        let entry = matches.next().unwrap_or_else(|| panic!("missing {symbol}"));
+        assert_eq!(entry.dll, DEBUG, "{symbol}");
+        assert_eq!(
+            entry.canonical_module.as_deref(),
+            Some(KERNEL32),
+            "{symbol}"
+        );
+        assert_eq!(
+            entry.service_status,
+            Some(ServiceStatus::Implemented),
+            "{symbol}"
+        );
+        assert!(matches.next().is_none(), "duplicate {symbol}");
+    }
+
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    let mut registry = ImportRegistry::new();
+    register_standard_services(&mut registry, Arc::clone(&state));
+    let result = run_synthetic_startup(
+        &bytes,
+        StartupLayout {
+            image_base: 0x1_4000_0000,
+            stack_top: 0x2_0001_0000,
+            tls_base: 0x3_0000_0000,
+        },
+        registry,
+        100_000,
+    )
+    .expect("start the debug probe guest");
+    assert_eq!(result.execution.exit_reason, ExitReason::ProcessExit(0));
+    assert!(state.standard_output().is_empty());
+    assert!(state.standard_error().is_empty());
+}

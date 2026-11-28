@@ -15,17 +15,22 @@ use xenora_loader::pe::ParsedPe;
 use xenora_loader::services::{MockClock, ServicesState, register_standard_services};
 
 const MODULE: &str = "ws2_32.dll";
-const ORDINALS: [(&str, u16); 23] = [
+const ORDINALS: [(&str, u16); 28] = [
     ("accept", 1),
     ("bind", 2),
     ("closesocket", 3),
     ("connect", 4),
+    ("getpeername", 5),
     ("getsockname", 6),
     ("getsockopt", 7),
+    ("htonl", 8),
     ("htons", 9),
     ("ioctlsocket", 10),
     ("inet_addr", 11),
+    ("inet_ntoa", 12),
     ("listen", 13),
+    ("ntohl", 14),
+    ("ntohs", 15),
     ("recv", 16),
     ("recvfrom", 17),
     ("select", 18),
@@ -97,7 +102,7 @@ fn ordinal_lookup_aliases_the_named_implementations() {
             .resolve(MODULE, &ImportName::Name("Ordinal#7".to_owned()))
             .is_none()
     );
-    for ordinal in [5, 8] {
+    for ordinal in [24, 53] {
         assert!(
             registry
                 .resolve(MODULE, &ImportName::Ordinal(ordinal))
@@ -137,6 +142,7 @@ fn ordinal_iat_entries_bind_and_run_representative_socket_calls() {
     };
 
     assert_eq!(call(&mut memory, 115, &[0x0202, SCRATCH]), 0);
+    assert_eq!(call(&mut memory, 8, &[0x1234_5678]), 0x7856_3412);
     assert_eq!(call(&mut memory, 9, &[5000]), 0x8813);
 
     // Exercise a real loopback datagram through ordinal-imported slots, with
@@ -159,7 +165,13 @@ fn ordinal_iat_entries_bind_and_run_representative_socket_calls() {
         call(&mut memory, 6, &[receiver, address, address_length]),
         0
     );
+    let mut bound = [0; 8];
+    memory.read_bytes(address, &mut bound).unwrap();
     assert_eq!(call(&mut memory, 4, &[sender, address, 16]), 0);
+    assert_eq!(call(&mut memory, 5, &[sender, address, address_length]), 0);
+    let mut peer = [0; 8];
+    memory.read_bytes(address, &mut peer).unwrap();
+    assert_eq!(&peer, &bound);
     assert_eq!(call(&mut memory, 19, &[sender, outgoing, 7, 0]), 7);
     memory.write_u32(SCRATCH + 0x2c0, 1).unwrap();
     assert_eq!(
@@ -184,7 +196,7 @@ fn ordinal_iat_entries_bind_and_run_representative_socket_calls() {
 
 #[test]
 fn ordinal_iat_entries_without_named_implementations_stay_missing() {
-    for ordinal in [5, 8] {
+    for ordinal in [24, 53] {
         let (bytes, _) = build_ordinal_image(&[(MODULE, ordinal)]);
         assert!(
             matches!(bind_error(&bytes), ImportError::UnresolvedImport { .. }),

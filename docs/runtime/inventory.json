@@ -9114,11 +9114,41 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "inet_ntoa",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#12"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
       "canonical_symbol": "listen",
       "kind": "ordinal",
       "library": "ws2_32.dll",
       "status": "partial",
       "symbol": "Ordinal#13"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "ntohl",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#14"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "ntohs",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#15"
     },
     {
       "api_set": false,
@@ -9244,6 +9274,16 @@
       "api_set": false,
       "canonical_kind": "name",
       "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "getpeername",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "partial",
+      "symbol": "Ordinal#5"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
       "canonical_symbol": "gethostbyname",
       "kind": "ordinal",
       "library": "ws2_32.dll",
@@ -9279,6 +9319,16 @@
       "library": "ws2_32.dll",
       "status": "partial",
       "symbol": "Ordinal#7"
+    },
+    {
+      "api_set": false,
+      "canonical_kind": "name",
+      "canonical_library": "ws2_32.dll",
+      "canonical_symbol": "htonl",
+      "kind": "ordinal",
+      "library": "ws2_32.dll",
+      "status": "implemented",
+      "symbol": "Ordinal#8"
     },
     {
       "api_set": false,
@@ -18590,7 +18640,7 @@
     }
   ],
   "summary": {
-    "aliases": 929,
+    "aliases": 934,
     "api_set_aliases": 740,
     "canonical_services": 875,
     "data_import_services": 7,
@@ -18599,7 +18649,7 @@
     "implicit_status_services": 76,
     "libraries": 21,
     "manual_services": 579,
-    "ordinal_aliases": 23,
+    "ordinal_aliases": 28,
     "partial": 638,
     "structural_consistency_findings": 0,
     "stub": 0,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+mod interactive;
 mod replay;
 mod session;
 
@@ -9,17 +10,18 @@ use session::{
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const USAGE: &str = "Usage: xenora-session [--workload persistent|reopen|threaded] [--backend metal|reference] [--steps N] [--frame-dir PATH] [--replay PATH | left|right ...]\n\
+const USAGE: &str = "Usage: xenora-session [--workload persistent|reopen|threaded] [--backend metal|reference] [--steps N] [--frame-dir PATH] [--interactive | --replay PATH | left|right ...]\n\
 Runs an embedded guest in one bounded session. Defaults to persistent, Metal, 1000000 steps and left right left.\n\
 The reopen workload opens and closes its journal every frame and verifies an auto-reset event.\n\
 The threaded workload moves one column per direction on a four-column scene and journals each resulting column.\n\
-Specify up to 32 directions, or replay a xenora-session-v1 file.\n\
+Specify up to 32 directions. --interactive reads one direction per line, prints each frame immediately, and shuts down at EOF.\n\
+--replay reads a xenora-session-v1 file.\n\
 --frame-dir creates a new directory of PPM frames after a successful session.";
 const WORKER: &str = "--session-worker";
 const WALL_LIMIT: Duration = Duration::from_secs(15);
@@ -34,6 +36,7 @@ struct Options {
     backend: Backend,
     steps: usize,
     directions: Vec<Direction>,
+    interactive: bool,
     frame_dir: Option<PathBuf>,
 }
 
@@ -87,6 +90,7 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
     let mut frame_dir = None;
     let mut replay_path = None;
     let mut directions = Vec::new();
+    let mut interactive = false;
     let mut positional = false;
     while let Some(arg) = args.next() {
         match (arg.to_str(), positional) {
@@ -132,7 +136,14 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
             (Some("--replay"), false) if replay_path.is_none() => {
                 replay_path = Some(parse_path(args.next(), "--replay")?);
             }
-            (Some("--workload" | "--backend" | "--steps" | "--frame-dir" | "--replay"), false) => {
+            (Some("--interactive"), false) if !interactive => interactive = true,
+            (
+                Some(
+                    "--workload" | "--backend" | "--steps" | "--frame-dir" | "--replay"
+                    | "--interactive",
+                ),
+                false,
+            ) => {
                 return Err(format!("duplicate option {:?}", arg));
             }
             (value, _) => directions.push(
@@ -145,7 +156,13 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
             return Err(format!("specify at most {MAX_EVENTS} directions"));
         }
     }
-    if let Some(path) = replay_path {
+    if interactive {
+        if replay_path.is_some() || !directions.is_empty() {
+            return Err(
+                "--interactive cannot be combined with --replay or positional directions".into(),
+            );
+        }
+    } else if let Some(path) = replay_path {
         if !directions.is_empty() {
             return Err("--replay cannot be combined with positional directions".into());
         }
@@ -158,6 +175,7 @@ fn parse(args: impl IntoIterator<Item = OsString>, worker_mode: bool) -> Result<
         backend: backend.unwrap_or(Backend::Metal),
         steps: steps.unwrap_or(MAX_STEPS),
         directions,
+        interactive,
         frame_dir,
     }))
 }
@@ -199,8 +217,8 @@ fn check_result(
     Ok(())
 }
 
-// The worker's stdout is a private, bounded wire format. Text and frame files
-// are emitted by the supervisor only after the worker has exited successfully.
+// The worker's stdout is a private, bounded wire format. The final record
+// and frame exports are published after the worker has exited successfully.
 fn encode(result: &CompletedSession, mut output: impl Write) -> io::Result<()> {
     output.write_all(REPLY_MAGIC)?;
     for value in [
@@ -272,6 +290,9 @@ fn decode(mut input: &[u8], count: usize) -> Result<CompletedSession, String> {
 }
 
 fn worker(options: Options) -> Result<(), String> {
+    if options.interactive {
+        return interactive::worker(&options, io::stdin(), io::stdout().lock());
+    }
     let native_draws = expected_native_draws(&options.backend, options.directions.len());
     let result = session::run(
         options.workload,
@@ -286,6 +307,7 @@ fn worker(options: Options) -> Result<(), String> {
 
 enum RunError {
     Deadline,
+    Input(String),
     Runtime(String),
 }
 
@@ -295,7 +317,7 @@ fn kill_and_reap(child: &mut Child) -> io::Result<()> {
     child.wait().map(|_| ())
 }
 
-fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
+fn worker_command(options: &Options) -> Result<Command, RunError> {
     let exe = std::env::current_exe().map_err(|error| {
         RunError::Runtime(format!("could not locate the session worker: {error}"))
     })?;
@@ -310,10 +332,37 @@ fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
             "--steps",
         ])
         .arg(options.steps.to_string())
-        .args(options.directions.iter().map(direction_name))
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+    Ok(command)
+}
+
+fn wait_for_worker(child: &mut Child, start: Instant) -> Result<ExitStatus, RunError> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if start.elapsed() < WALL_LIMIT => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                kill_and_reap(child).map_err(|error| {
+                    RunError::Runtime(format!("could not reap the timed-out worker: {error}"))
+                })?;
+                return Err(RunError::Deadline);
+            }
+            Err(error) => {
+                let _ = kill_and_reap(child);
+                return Err(RunError::Runtime(format!(
+                    "could not wait for the session worker: {error}"
+                )));
+            }
+        }
+    }
+}
+
+fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
+    let mut command = worker_command(options)?;
+    command
+        .args(options.directions.iter().map(direction_name))
+        .stdin(Stdio::null());
     let start = Instant::now();
     let mut child = command.spawn().map_err(|error| {
         RunError::Runtime(format!("could not start the session worker: {error}"))
@@ -334,24 +383,7 @@ fn supervise(options: &Options) -> Result<CompletedSession, RunError> {
             )));
         }
     };
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() < WALL_LIMIT => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                kill_and_reap(&mut child).map_err(|error| {
-                    RunError::Runtime(format!("could not reap the timed-out worker: {error}"))
-                })?;
-                return Err(RunError::Deadline);
-            }
-            Err(error) => {
-                let _ = kill_and_reap(&mut child);
-                return Err(RunError::Runtime(format!(
-                    "could not wait for the session worker: {error}"
-                )));
-            }
-        }
-    };
+    let status = wait_for_worker(&mut child, start)?;
     if !status.success() {
         return Err(RunError::Runtime(format!(
             "session worker exited with {status}"
@@ -414,23 +446,34 @@ fn write_frames<'a>(dir: &'a Path, frames: &[Frame]) -> io::Result<PendingExport
     Ok(export)
 }
 
+fn print_frame(
+    backend: Backend,
+    frame: &Frame,
+    direction: Direction,
+    mut output: impl Write,
+) -> io::Result<()> {
+    let mut rgba = String::with_capacity(RGBA_BYTES * 2);
+    for byte in &frame.rgba {
+        write!(rgba, "{byte:02x}").expect("writing to a string");
+    }
+    writeln!(
+        output,
+        "frame sequence={} direction={} backend={} width={WIDTH} height={HEIGHT} draws=1 rgba={rgba}",
+        frame.sequence,
+        direction_name(&direction),
+        backend_name(&backend),
+    )
+}
+
 fn print_result(
     options: &Options,
     result: &CompletedSession,
     mut output: impl Write,
 ) -> io::Result<()> {
-    for (frame, direction) in result.frames.iter().zip(&options.directions) {
-        let mut rgba = String::with_capacity(RGBA_BYTES * 2);
-        for byte in &frame.rgba {
-            write!(rgba, "{byte:02x}").expect("writing to a string");
+    if !options.interactive {
+        for (frame, &direction) in result.frames.iter().zip(&options.directions) {
+            print_frame(options.backend, frame, direction, &mut output)?;
         }
-        writeln!(
-            output,
-            "frame sequence={} direction={} backend={} width={WIDTH} height={HEIGHT} draws=1 rgba={rgba}",
-            frame.sequence,
-            direction_name(direction),
-            backend_name(&options.backend),
-        )?;
     }
     let workload = match result.workload {
         Workload::Persistent => "",
@@ -495,7 +538,12 @@ fn main() -> ExitCode {
         }
     }
 
-    let result = match supervise(&options) {
+    let run = if options.interactive {
+        interactive::supervise(&options, BufReader::new(io::stdin()), io::stdout().lock())
+    } else {
+        supervise(&options)
+    };
+    let result = match run {
         Ok(result) => result,
         Err(RunError::Deadline) => {
             eprintln!(
@@ -507,6 +555,10 @@ fn main() -> ExitCode {
         Err(RunError::Runtime(error)) => {
             eprintln!("xenora-session: {error}");
             return ExitCode::from(125);
+        }
+        Err(RunError::Input(error)) => {
+            eprintln!("xenora-session: {error}");
+            return ExitCode::from(2);
         }
     };
     let export = if let Some(dir) = &options.frame_dir {

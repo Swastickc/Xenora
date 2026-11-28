@@ -5214,6 +5214,16 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "lroundf",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "lroundf"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "modf",
       "kind": "name",
       "library": "api-ms-win-crt-math-l1-1-0.dll",
@@ -5224,11 +5234,31 @@
       "api_set": true,
       "canonical_kind": "name",
       "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "modff",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "implemented",
+      "symbol": "modff"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
       "canonical_symbol": "nearbyint",
       "kind": "name",
       "library": "api-ms-win-crt-math-l1-1-0.dll",
       "status": "partial",
       "symbol": "nearbyint"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "nextafterf",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "nextafterf"
     },
     {
       "api_set": true,
@@ -5259,6 +5289,16 @@
       "library": "api-ms-win-crt-math-l1-1-0.dll",
       "status": "partial",
       "symbol": "remainder"
+    },
+    {
+      "api_set": true,
+      "canonical_kind": "name",
+      "canonical_library": "ucrtbase.dll",
+      "canonical_symbol": "remainderf",
+      "kind": "name",
+      "library": "api-ms-win-crt-math-l1-1-0.dll",
+      "status": "partial",
+      "symbol": "remainderf"
     },
     {
       "api_set": true,
@@ -9437,6 +9477,20 @@
         "library": "kernel32.dll",
         "source": "manual",
         "status": "implemented",
+        "symbol": "FindFirstFileExA"
+      },
+      {
+        "kind": "name",
+        "library": "kernel32.dll",
+        "source": "manual",
+        "status": "implemented",
+        "symbol": "FindFirstFileExW"
+      },
+      {
+        "kind": "name",
+        "library": "kernel32.dll",
+        "source": "manual",
+        "status": "implemented",
         "symbol": "GetCompressedFileSizeA"
       },
       {
@@ -10192,6 +10246,47 @@
       "data_import": false,
       "family": "other",
       "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptCloseAlgorithmProvider"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "api-ms-win-crt-process-l1-1-0.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_spawnve"
+      "symbol": "BCryptGenRandom"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "bcrypt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "BCryptOpenAlgorithmProvider"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
       "library": "combase.dll",
       "source": "typed",
       "status": "partial",
@@ -10837,6 +10932,26 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "FindFirstFileA"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": false,
+      "symbol": "FindFirstFileExA"
+    },
+    {
+      "data_import": false,
+      "family": "windows-system",
+      "kind": "name",
+      "library": "kernel32.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": false,
+      "symbol": "FindFirstFileExW"
     },
     {
       "data_import": false,
@@ -13586,6 +13701,26 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "_ZdaPvSt11align_val_t"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "_ZdlPvSt11align_val_t"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "_ZdlPvy"
     },
     {
@@ -13606,7 +13741,27 @@
       "source": "manual",
       "status": "implemented",
       "status_explicit": true,
+      "symbol": "_ZnaySt11align_val_t"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
       "symbol": "_Znwy"
+    },
+    {
+      "data_import": false,
+      "family": "c++-support",
+      "kind": "name",
+      "library": "libstdc++-6.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "_ZnwySt11align_val_t"
     },
     {
       "data_import": false,
@@ -13827,6 +13982,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "_commode"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
     },
     {
       "data_import": true,
@@ -14107,6 +14272,16 @@
       "status": "implemented",
       "status_explicit": false,
       "symbol": "vfprintf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "msvcrt.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "waitpid"
     },
     {
       "data_import": false,
@@ -14407,6 +14582,16 @@
       "status": "implemented",
       "status_explicit": true,
       "symbol": "_ctime64_s"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "_cwait"
     },
     {
       "data_import": false,
@@ -16183,6 +16368,16 @@
       "family": "c-runtime",
       "kind": "name",
       "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "lroundf"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
@@ -16334,9 +16529,29 @@
       "kind": "name",
       "library": "ucrtbase.dll",
       "source": "typed",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "modff"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
       "status": "partial",
       "status_explicit": true,
       "symbol": "nearbyint"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "nextafterf"
     },
     {
       "data_import": false,
@@ -16457,6 +16672,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "remainder"
+    },
+    {
+      "data_import": false,
+      "family": "c-runtime",
+      "kind": "name",
+      "library": "ucrtbase.dll",
+      "source": "typed",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "remainderf"
     },
     {
       "data_import": false,
@@ -17187,6 +17412,16 @@
       "status": "partial",
       "status_explicit": true,
       "symbol": "WinHttpConnect"
+    },
+    {
+      "data_import": false,
+      "family": "other",
+      "kind": "name",
+      "library": "winhttp.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
+      "symbol": "WinHttpCrackUrl"
     },
     {
       "data_import": false,
@@ -18514,6 +18749,26 @@
       "kind": "name",
       "library": "xgameruntime.dll",
       "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingQueryConfigurationSetting"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
+      "status": "implemented",
+      "status_explicit": true,
+      "symbol": "XNetworkingQueryStatistics"
+    },
+    {
+      "data_import": false,
+      "family": "xbox-gaming",
+      "kind": "name",
+      "library": "xgameruntime.dll",
+      "source": "manual",
       "status": "partial",
       "status_explicit": true,
       "symbol": "XTaskQueueCloseHandle"
@@ -18892,19 +19147,28 @@
   "summary": {
     "aliases": 941,
     "api_set_aliases": 740,
-    "canonical_services": 893,
+    "canonical_services": 885,
+    "aliases": 910,
+    "api_set_aliases": 744,
+    "canonical_services": 877,
     "data_import_services": 7,
     "duplicate_registrations": 0,
-    "implemented": 237,
+    "implemented": 238,
+    "aliases": 906,
+    "api_set_aliases": 740,
+    "canonical_services": 871,
+    "data_import_services": 7,
+    "duplicate_registrations": 0,
+    "implemented": 241,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 597,
-    "ordinal_aliases": 35,
-    "partial": 656,
+    "manual_services": 575,
+    "ordinal_aliases": 0,
+    "partial": 632,
     "structural_consistency_findings": 0,
     "stub": 0,
-    "typed_registry_entries": 296,
-    "typed_services": 296,
+    "typed_registry_entries": 300,
+    "typed_services": 300,
     "wanted_imports": null,
     "wanted_missing": null
   },

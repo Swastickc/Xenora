@@ -20,7 +20,7 @@ independent acceptance or compatibility claims.
 | Partial | 632 |
 | Stub | 0 |
 | Data-import services | 7 |
-| Aliases of every kind | 937 |
+| Aliases of every kind | 939 |
 | API-set aliases | 740 |
 | Ordinal aliases | 31 |
 | Canonical services | 877 |

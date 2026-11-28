@@ -1594,6 +1594,49 @@ fn register_service_lookup(registry: &mut ImportRegistry, state: &Arc<ServicesSt
     );
 }
 
+fn accept_loopback(
+    state: &Arc<ServicesState>,
+    memory: &mut GuestMemory,
+    handle: u64,
+    address: u64,
+    address_len: u64,
+) -> Result<u64, u32> {
+    let mut net = state.winsock.lock().expect("guest Winsock state");
+    if net.socket(handle)?.listening.is_none() {
+        return Err(WSAEINVAL);
+    }
+    if address != 0 {
+        if address_len == 0 {
+            return Err(WSAEFAULT);
+        }
+        let capacity = memory.read_u32(address_len).map_err(|_| WSAEFAULT)? as i32;
+        if capacity < 16 {
+            return Err(WSAEFAULT);
+        }
+        memory.check_write(address, 16).map_err(|_| WSAEFAULT)?;
+        memory.check_write(address_len, 4).map_err(|_| WSAEFAULT)?;
+    }
+    let socket = net.sockets.get_mut(&handle).expect("validated socket");
+    let server = socket.backlog.pop_front().ok_or(WSAEWOULDBLOCK)?;
+    state.winsock_changed.notify_all();
+    if address != 0 {
+        let client_port = net
+            .sockets
+            .get(&server)
+            .and_then(|endpoint| endpoint.stream_peer)
+            .and_then(|client| net.sockets.get(&client))
+            .and_then(|client| client.port)
+            .unwrap_or(0);
+        let mut bytes = [0; 16];
+        bytes[..2].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[2..4].copy_from_slice(&client_port.to_be_bytes());
+        bytes[4..8].copy_from_slice(&[127, 0, 0, 1]);
+        memory.write_bytes(address, &bytes).map_err(|_| WSAEFAULT)?;
+        memory.write_u32(address_len, 16).map_err(|_| WSAEFAULT)?;
+    }
+    Ok(server)
+}
+
 fn register_streams(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     // listen marks a bound stream socket with its backlog limit. The queue
     // is real: connect enqueues, accept dequeues, in order.
@@ -1633,43 +1676,28 @@ fn register_streams(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
         MODULE,
         "accept",
         ServiceStatus::Partial,
+        move |args, cpu, memory| match accept_loopback(&accept, memory, args.rcx, args.rdx, args.r8)
+        {
+            Ok(value) => Ok(value),
+            Err(error) => accept.fail(cpu.gs_base, error, INVALID_SOCKET),
+        },
+    );
+
+    let wsa_accept = Arc::clone(state);
+    registry.register_with_status(
+        MODULE,
+        "WSAAccept",
+        ServiceStatus::Partial,
         move |args, cpu, memory| {
             let result = (|| {
-                let mut net = accept.winsock.lock().expect("guest Winsock state");
-                if net.socket(args.rcx)?.listening.is_none() {
+                if args.r9 != 0 || args.get(4, memory).map_err(|_| WSAEFAULT)? != 0 {
                     return Err(WSAEINVAL);
                 }
-                let socket = net.sockets.get_mut(&args.rcx).expect("validated socket");
-                let server = socket.backlog.pop_front().ok_or(WSAEWOULDBLOCK)?;
-                accept.winsock_changed.notify_all();
-                if args.rdx != 0 && args.r8 != 0 {
-                    // The client endpoint is the peer of the server socket;
-                    // report its loopback address.
-                    let client_port = net
-                        .sockets
-                        .get(&server)
-                        .and_then(|endpoint| endpoint.stream_peer)
-                        .and_then(|client| net.sockets.get(&client))
-                        .and_then(|client| client.port)
-                        .unwrap_or(0);
-                    let capacity = memory.read_u32(args.r8).map_err(|_| WSAEFAULT)? as i32;
-                    if capacity < 16 {
-                        return Err(WSAEFAULT);
-                    }
-                    let mut address = [0; 16];
-                    address[..2].copy_from_slice(&2_u16.to_le_bytes());
-                    address[2..4].copy_from_slice(&client_port.to_be_bytes());
-                    address[4..8].copy_from_slice(&[127, 0, 0, 1]);
-                    memory
-                        .write_bytes(args.rdx, &address)
-                        .map_err(|_| WSAEFAULT)?;
-                    memory.write_u32(args.r8, 16).map_err(|_| WSAEFAULT)?;
-                }
-                Ok(server)
+                accept_loopback(&wsa_accept, memory, args.rcx, args.rdx, args.r8)
             })();
             match result {
                 Ok(value) => Ok(value),
-                Err(error) => accept.fail(cpu.gs_base, error, INVALID_SOCKET),
+                Err(error) => wsa_accept.fail(cpu.gs_base, error, INVALID_SOCKET),
             }
         },
     );
@@ -3976,6 +4004,95 @@ fn wsasendto_and_wsarecvfrom_reject_bad_forms_without_losing_datagrams() {
     assert_eq!(
         call(&mut memory, "WSAGetLastError", &[]),
         u64::from(WSAESHUTDOWN)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn wsaaccept_prevalidates_output_and_matches_legacy_accept() {
+    use crate::cpu::{CpuState, Register};
+    use crate::import_table::ImportName;
+    use crate::imports::Win64Args;
+    use crate::memory::MemoryPermissions;
+    use crate::services::MockClock;
+
+    let mut registry = ImportRegistry::new();
+    let state = Arc::new(ServicesState::new(Arc::new(MockClock::new(0))));
+    register(&mut registry, &state);
+    let mut memory = GuestMemory::new();
+    memory
+        .map_region(0x1000, 8192, MemoryPermissions::READ_WRITE)
+        .unwrap();
+    let call = |memory: &mut GuestMemory, symbol: &str, args: &[u64]| {
+        let mut cpu = CpuState::default();
+        for (reg, &value) in [Register::Rcx, Register::Rdx, Register::R8, Register::R9]
+            .into_iter()
+            .zip(args)
+        {
+            cpu.set(reg, value);
+        }
+        cpu.set(Register::Rsp, 0x2000);
+        for (index, &value) in args.iter().enumerate().skip(4) {
+            memory
+                .write_u64(0x2000 + 0x28 + (index as u64 - 4) * 8, value)
+                .unwrap();
+        }
+        let descriptor = registry
+            .resolve(MODULE, &ImportName::Name(symbol.to_owned()))
+            .unwrap();
+        (descriptor.handler)(&Win64Args::new(&cpu), &mut cpu, memory).unwrap()
+    };
+    assert_eq!(call(&mut memory, "WSAStartup", &[0x0202, 0x1000]), 0);
+    let mut address = [0; 16];
+    address[..8].copy_from_slice(&[2, 0, 0x13, 0x88, 127, 0, 0, 1]);
+    memory.write_bytes(0x1200, &address).unwrap();
+    let listener = call(&mut memory, "socket", &[2, 1, 6]);
+    assert_eq!(call(&mut memory, "bind", &[listener, 0x1200, 16]), 0);
+    assert_eq!(call(&mut memory, "listen", &[listener, 4]), 0);
+
+    // A too-small output is rejected without consuming the pending endpoint.
+    let first = call(&mut memory, "socket", &[2, 1, 6]);
+    assert_eq!(call(&mut memory, "connect", &[first, 0x1200, 16]), 0);
+    memory.write_u32(0x1300, 8).unwrap();
+    assert_eq!(
+        call(&mut memory, "WSAAccept", &[listener, 0x1400, 0x1300, 0, 0]),
+        INVALID_SOCKET
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
+    );
+    memory.write_u32(0x1300, 16).unwrap();
+    let server = call(&mut memory, "WSAAccept", &[listener, 0x1400, 0x1300, 0, 0]);
+    assert_ne!(server, INVALID_SOCKET);
+    assert_eq!(memory.read_u32(0x1300).unwrap(), 16);
+    let mut peer = [0; 8];
+    memory.read_bytes(0x1400, &mut peer).unwrap();
+    assert_eq!(&peer[..2], &2_u16.to_le_bytes());
+    assert_eq!(&peer[4..8], &[127, 0, 0, 1]);
+
+    // Null condition/callback is the supported subset; legacy accept remains
+    // on the same backlog path.
+    let second = call(&mut memory, "socket", &[2, 1, 6]);
+    assert_eq!(call(&mut memory, "connect", &[second, 0x1200, 16]), 0);
+    assert_ne!(
+        call(&mut memory, "accept", &[listener, 0, 0]),
+        INVALID_SOCKET
+    );
+    for args in [[listener, 0, 0, 1, 0], [listener, 0, 0, 0, 1]] {
+        assert_eq!(call(&mut memory, "WSAAccept", &args), INVALID_SOCKET);
+        assert_eq!(
+            call(&mut memory, "WSAGetLastError", &[]),
+            u64::from(WSAEINVAL)
+        );
+    }
+    assert_eq!(
+        call(&mut memory, "WSAAccept", &[listener, 0, 0, 0, 0]),
+        INVALID_SOCKET
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEWOULDBLOCK)
     );
 }
 

@@ -17256,6 +17256,16 @@
       "source": "manual",
       "status": "partial",
       "status_explicit": true,
+      "symbol": "WSAAccept"
+    },
+    {
+      "data_import": false,
+      "family": "windows-networking",
+      "kind": "name",
+      "library": "ws2_32.dll",
+      "source": "manual",
+      "status": "partial",
+      "status_explicit": true,
       "symbol": "WSAAddressToStringA"
     },
     {
@@ -18732,15 +18742,15 @@
   "summary": {
     "aliases": 937,
     "api_set_aliases": 740,
-    "canonical_services": 881,
+    "canonical_services": 882,
     "data_import_services": 7,
     "duplicate_registrations": 0,
     "implemented": 237,
     "implicit_status_services": 76,
     "libraries": 21,
-    "manual_services": 585,
+    "manual_services": 586,
     "ordinal_aliases": 31,
-    "partial": 644,
+    "partial": 645,
     "structural_consistency_findings": 0,
     "stub": 0,
     "typed_registry_entries": 296,

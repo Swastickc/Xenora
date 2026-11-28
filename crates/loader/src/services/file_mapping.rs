@@ -163,11 +163,11 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
                 // Offset views and placed views are not modelled.
                 return state.fail(cpu.gs_base, ERROR_NOT_SUPPORTED, 0);
             }
-            let length = if requested == 0 {
-                size
-            } else {
-                requested.min(size)
-            };
+            // A view must contain every requested byte within the mapping.
+            if requested > size {
+                return state.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
+            }
+            let length = if requested == 0 { size } else { requested };
             let address = memory.map_heap_allocation(PROCESS_HEAP, length as usize);
             let Ok(address) = address else {
                 return state.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);

@@ -36,18 +36,33 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     let open_process = Arc::clone(state);
     registry.register(KERNEL32, "OpenProcess", move |args, cpu, memory| {
         let _ = memory;
-        if args.r8 as u32 != 0x4100 {
-            // The machine has one process; any other id does not exist.
-            return open_process.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0);
-        }
+        let pid = args.r8 as u32;
         let mut objects = open_process.objects.lock().expect("guest object state");
+        // A spawned child's process id is the value its process handle was
+        // first created with: opening the id hands out the process anew, as
+        // a terminated child's handles keep answering on Windows.
+        let child = objects
+            .handles
+            .get(&u64::from(pid))
+            .and_then(|object| match object {
+                GuestObject::ChildProcess { status, signal } => Some((*status, Arc::clone(signal))),
+                _ => None,
+            });
         let Some(handle) = objects.next_handle() else {
             return open_process.fail(cpu.gs_base, ERROR_NOT_ENOUGH_MEMORY, 0);
         };
-        objects.insert_handle(handle, GuestObject::Process);
-        Ok(handle)
+        if pid == 0x4100 {
+            objects.insert_handle(handle, GuestObject::Process);
+            return Ok(handle);
+        }
+        if let Some((status, signal)) = child {
+            objects.insert_handle(handle, GuestObject::ChildProcess { status, signal });
+            return Ok(handle);
+        }
+        // The machine's processes are its one process and its spawned
+        // children; any other id does not exist.
+        open_process.fail(cpu.gs_base, ERROR_INVALID_PARAMETER, 0)
     });
-
     // ReadProcessMemory on the machine's one process is the guest memory
     // itself: the copy is exact and bounded by the guest address space.
     let read_process = Arc::clone(state);
@@ -125,13 +140,22 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
     });
 
     // A running process has no exit code yet, so the guest, which only runs
-    // while its process does, always reads STILL_ACTIVE for itself.
+    // while its process does, always reads STILL_ACTIVE for itself. A
+    // spawned child already ended in the synchronous spawn world, so its
+    // handles answer the final status instead.
     let s = Arc::clone(state);
     registry.register(KERNEL32, "GetExitCodeProcess", move |args, cpu, memory| {
-        if args.rcx != CURRENT_PROCESS {
-            return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0);
-        }
-        if memory.write_u32(args.rdx, STILL_ACTIVE).is_err() {
+        let status = if args.rcx == CURRENT_PROCESS {
+            STILL_ACTIVE
+        } else {
+            let objects = s.objects.lock().expect("guest object state");
+            match objects.handles.get(&args.rcx) {
+                Some(GuestObject::ChildProcess { status, .. }) => *status,
+                Some(GuestObject::Process) => STILL_ACTIVE,
+                _ => return s.fail(cpu.gs_base, ERROR_INVALID_HANDLE, 0),
+            }
+        };
+        if memory.write_u32(args.rdx, status).is_err() {
             return s.fail(cpu.gs_base, ERROR_NOACCESS, 0);
         }
         Ok(1)
@@ -292,15 +316,17 @@ pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>
         Err(ExitReason::ProcessExit(s.exit_process(args.rcx as u32)))
     });
 
-    // abort ends the process with exit code 3 and calls no registered
-    // function. It is partial: it prints no message, and it does not call a
-    // SIGABRT handler, which the documentation says it does when one is set.
-    let s = Arc::clone(state);
-    registry.register(UCRT, "abort", move |_, _, _| {
-        Err(ExitReason::ProcessExit(s.exit_process(ABORT_STATUS)))
-    });
+    // terminate defaults to abort (Microsoft Learn, "terminate (CRT)").
+    // This models the shared abrupt exit. Custom terminate handlers, SIGABRT
+    // handlers and the Windows abort message are outside this subset.
+    for symbol in ["abort", "terminate"] {
+        let s = Arc::clone(state);
+        registry.register(UCRT, symbol, move |_, _, _| {
+            Err(ExitReason::ProcessExit(s.exit_process(ABORT_STATUS)))
+        });
+    }
 
-    for symbol in ["_exit", "abort"] {
+    for symbol in ["_exit", "abort", "terminate"] {
         registry.alias(CRT_RUNTIME_API, UCRT, symbol);
         registry.set_status(UCRT, symbol, ServiceStatus::Partial);
     }

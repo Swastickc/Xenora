@@ -336,7 +336,61 @@ fn fixed_image_uses_an_available_preferred_base() {
 }
 
 #[test]
-fn collision_with_an_earlier_placement_is_precise() {
+fn a_relocatable_image_leaves_room_for_a_fixed_image_in_either_input_order() {
+    let arena = arena_at(PREFERRED, 2 * ALIGNMENT);
+    let movable = image(PREFERRED, ALIGNMENT as u32, false);
+    let fixed = image(PREFERRED, ALIGNMENT as u32, true);
+    for (images, expected) in [
+        ([movable, fixed], [PREFERRED + ALIGNMENT, PREFERRED]),
+        ([fixed, movable], [PREFERRED, PREFERRED + ALIGNMENT]),
+    ] {
+        let plan = ModuleLayoutPlan::build(arena, &[], &images).unwrap();
+        assert_eq!(plan.base_addresses().as_deref(), Some(expected.as_slice()));
+        for (index, descriptor) in images.into_iter().enumerate() {
+            let result = plan.images()[index];
+            assert_eq!(result.index, index);
+            assert_eq!(result.descriptor, descriptor);
+            assert_eq!(
+                placement(&plan, index).used_preferred_base,
+                descriptor.relocations_stripped
+            );
+        }
+    }
+}
+
+#[test]
+fn retry_keeps_the_original_order_of_relocatable_images() {
+    let arena = arena_at(PREFERRED, 3 * ALIGNMENT);
+    let movable = image(PREFERRED, ALIGNMENT as u32, false);
+    let fixed = image(PREFERRED, ALIGNMENT as u32, true);
+    let plan = ModuleLayoutPlan::build(arena, &[], &[movable, fixed, movable]).unwrap();
+    assert_eq!(
+        plan.base_addresses().unwrap(),
+        [PREFERRED + ALIGNMENT, PREFERRED, PREFERRED + 2 * ALIGNMENT],
+    );
+}
+
+#[test]
+fn two_fixed_images_cannot_claim_the_same_preferred_base() {
+    let arena = arena_at(PREFERRED, 2 * ALIGNMENT);
+    let fixed = image(PREFERRED, ALIGNMENT as u32, true);
+    let plan = ModuleLayoutPlan::build(arena, &[], &[fixed, fixed]).unwrap();
+    assert_eq!(placement(&plan, 0).base, PREFERRED);
+    let span = AddressInterval::new(PREFERRED, PREFERRED + ALIGNMENT);
+    assert_eq!(
+        failure(&plan, 1),
+        ImageLayoutFailure::FixedBaseUnavailable {
+            reason: PreferredBaseRejection::OverlapsPlacedImage {
+                placed_image_index: 0,
+                placed: span,
+                image: span,
+            },
+        },
+    );
+}
+
+#[test]
+fn incomplete_retry_preserves_the_original_placement_and_collision() {
     let arena = arena_at(PREFERRED, 0x3_0000);
     let colliding = PREFERRED + ALIGNMENT;
     let images = [

@@ -38,16 +38,15 @@ pub const ARG_REUSE_RESULT: u8 = 8;
 pub const ARG_ZERO: u8 = 0;
 
 /// Services that wait on real time, run guest code or reach native Metal are
-/// left out, so each input runs quickly and deterministically. `longjmp` is
-/// left out as well, and for a stronger reason than speed: it is a context
-/// service whose documented behaviour is to replace the callee-saved
-/// registers, so the nonvolatile invariant the driver asserts does not apply
-/// to it. The jump's real contract is covered end to end by the guest fixture
-/// of `guest_crt_jump.rs`.
+/// left out, so each input runs quickly and deterministically. Context
+/// services are left out structurally as well: their documented behaviour is
+/// to replace control flow, so the ordinary nonvolatile invariant does not
+/// apply to them. Their real contracts are covered by focused exception and
+/// guest-fixture tests.
 fn excluded(module: &str, symbol: &str) -> bool {
     module.eq_ignore_ascii_case("xenora_fixture.dll")
         || module.eq_ignore_ascii_case("xenora_graphics.dll")
-        || matches!(symbol, "WSAPoll" | "XTaskQueueDispatch" | "longjmp")
+        || matches!(symbol, "WSAPoll" | "XTaskQueueDispatch")
 }
 
 /// Outcome of one `Driver::run` against a single corpus input.
@@ -76,7 +75,9 @@ impl Driver {
         );
         let mut services: Vec<(String, ImportName)> = registry
             .iter_service_descriptors()
-            .filter(|descriptor| !excluded(&descriptor.module, &descriptor.symbol))
+            .filter(|descriptor| {
+                !descriptor.context_service && !excluded(&descriptor.module, &descriptor.symbol)
+            })
             .map(|descriptor| (descriptor.module.clone(), descriptor.import_name()))
             .collect();
         services.sort();

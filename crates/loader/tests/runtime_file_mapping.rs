@@ -7,6 +7,7 @@ mod support;
 use support::*;
 
 const KERNEL32: &str = "kernel32.dll";
+const MAPPING_API: &str = "api-ms-win-core-memory-l1-1-0.dll";
 
 const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "CreateFileMappingA"),
@@ -17,6 +18,25 @@ const IMPORTS: &[(&str, &str)] = &[
     (KERNEL32, "CloseHandle"),
     (KERNEL32, "GetLastError"),
 ];
+
+const VIEW_IMPORTS: [&[(&str, &str)]; 3] = [
+    &imports_for_view(KERNEL32, "MapViewOfFile"),
+    &imports_for_view(KERNEL32, "MapViewOfFileEx"),
+    &imports_for_view(MAPPING_API, "MapViewOfFile"),
+];
+
+const fn imports_for_view(
+    dll: &'static str,
+    view: &'static str,
+) -> [(&'static str, &'static str); 5] {
+    [
+        (dll, view),
+        (KERNEL32, "CreateFileMappingA"),
+        (KERNEL32, "UnmapViewOfFile"),
+        (KERNEL32, "CloseHandle"),
+        (KERNEL32, "GetLastError"),
+    ]
+}
 
 const INVALID_FILE: u64 = u64::MAX;
 
@@ -53,6 +73,46 @@ fn shared_memory_mappings_are_zeroed_views_the_program_releases() {
     // A bogus object cannot map.
     assert_eq!(guest.call("MapViewOfFile", &[0xdead, 2, 0, 0, 0]), 0);
     assert_eq!(guest.error(), 6);
+}
+
+#[test]
+fn oversized_view_requests_fail_without_disturbing_the_mapping() {
+    for imports in VIEW_IMPORTS {
+        let (dll, symbol) = imports[0];
+        let mut guest = Guest::new(imports, &[]);
+        let object = guest.call("CreateFileMappingA", &[INVALID_FILE, 0, 4, 0, 4096, 0]);
+        assert_ne!(object, 0);
+        assert_eq!(guest.call(symbol, &[0xdead, 2, 0, 0, 4097, 0]), 0);
+        assert_eq!(guest.error(), 6);
+        assert_eq!(guest.call(symbol, &[object, 2, 0, 1, 4097, 0]), 0);
+        assert_eq!(guest.error(), 50);
+        if symbol == "MapViewOfFileEx" {
+            assert_eq!(guest.call(symbol, &[object, 2, 0, 0, 4097, 0x10000]), 0);
+            assert_eq!(guest.error(), 50);
+        }
+
+        let whole_view = guest.call(symbol, &[object, 2, 0, 0, 0, 0]);
+        assert_ne!(whole_view, 0, "{dll}!{symbol}");
+        guest.memory.write_u8(whole_view + 4095, 42).unwrap();
+
+        for requested in [4097, u64::MAX] {
+            assert_eq!(
+                guest.call(symbol, &[object, 2, 0, 0, requested, 0]),
+                0,
+                "{dll}!{symbol} accepted length {requested}"
+            );
+            assert_eq!(guest.error(), 87);
+        }
+
+        assert_eq!(guest.memory.read_u8(whole_view + 4095).unwrap(), 42);
+        assert_eq!(guest.call("UnmapViewOfFile", &[whole_view]), 1);
+
+        let exact_view = guest.call(symbol, &[object, 2, 0, 0, 4096, 0]);
+        assert_ne!(exact_view, 0, "{dll}!{symbol}");
+        guest.memory.write_u8(exact_view + 4095, 17).unwrap();
+        assert_eq!(guest.call("UnmapViewOfFile", &[exact_view]), 1);
+        assert_eq!(guest.call("CloseHandle", &[object]), 1);
+    }
 }
 
 #[test]

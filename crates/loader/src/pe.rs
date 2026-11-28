@@ -99,6 +99,12 @@ pub struct ParsedPe {
     pub sections: Vec<PeSection>,
 }
 
+/// The stack sizes declared in the PE32+ optional header.
+pub(crate) struct PeStackSizes {
+    pub reserve: u64,
+    pub commit: u64,
+}
+
 /// Result of loading a PE32+ image into guest memory.
 pub struct LoadedImage {
     pub pe: ParsedPe,
@@ -134,6 +140,8 @@ const HEADER_PAGE: u64 = 0x1000;
 const OPTIONAL_IMAGE_BASE: usize = 24;
 const OPTIONAL_SIZE_OF_IMAGE: usize = 56;
 const OPTIONAL_SIZE_OF_HEADERS: usize = 60;
+const OPTIONAL_STACK_RESERVE: usize = 72;
+const OPTIONAL_STACK_COMMIT: usize = 80;
 
 fn read_u16(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
@@ -141,6 +149,10 @@ fn read_u16(bytes: &[u8], at: usize) -> u16 {
 
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+fn read_u64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
 
 /// A nonzero entry must lie inside executable image code. Entry RVA zero is
@@ -286,7 +298,11 @@ impl MappedImageBacking {
 impl ParsedPe {
     /// Parse PE32+ headers from an in-memory byte slice.
     pub fn parse(bytes: &[u8]) -> Result<Self, PeError> {
-        Self::parse_headers(bytes.len() as u64, |offset, len| {
+        Self::parse_with_stack_sizes(bytes).map(|(pe, _)| pe)
+    }
+
+    pub(crate) fn parse_with_stack_sizes(bytes: &[u8]) -> Result<(Self, PeStackSizes), PeError> {
+        Self::parse_headers_with_stack_sizes(bytes.len() as u64, |offset, len| {
             let start = offset as usize;
             Ok(Cow::Borrowed(&bytes[start..start + len]))
         })
@@ -296,8 +312,15 @@ impl ParsedPe {
     /// in-range requests and returns exactly the requested bytes.
     pub(crate) fn parse_headers<'data, E: From<PeError>>(
         file_len: u64,
-        mut read: impl FnMut(u64, usize) -> Result<Cow<'data, [u8]>, E>,
+        read: impl FnMut(u64, usize) -> Result<Cow<'data, [u8]>, E>,
     ) -> Result<Self, E> {
+        Self::parse_headers_with_stack_sizes(file_len, read).map(|(pe, _)| pe)
+    }
+
+    fn parse_headers_with_stack_sizes<'data, E: From<PeError>>(
+        file_len: u64,
+        mut read: impl FnMut(u64, usize) -> Result<Cow<'data, [u8]>, E>,
+    ) -> Result<(Self, PeStackSizes), E> {
         const DOS_HEADER_SIZE: usize = 0x40;
         const PE_AND_COFF_SIZE: usize = 24;
         if file_len < DOS_HEADER_SIZE as u64 {
@@ -353,15 +376,15 @@ impl ParsedPe {
         }
 
         let entry_point_rva = read_u32(&optional, 16);
-        let image_base = u64::from_le_bytes(
-            optional[OPTIONAL_IMAGE_BASE..OPTIONAL_IMAGE_BASE + 8]
-                .try_into()
-                .unwrap(),
-        );
+        let image_base = read_u64(&optional, OPTIONAL_IMAGE_BASE);
         let section_alignment = read_u32(&optional, 32);
         let file_alignment = read_u32(&optional, 36);
         let size_of_image = read_u32(&optional, OPTIONAL_SIZE_OF_IMAGE);
         let size_of_headers = read_u32(&optional, OPTIONAL_SIZE_OF_HEADERS);
+        let stack_sizes = PeStackSizes {
+            reserve: read_u64(&optional, OPTIONAL_STACK_RESERVE),
+            commit: read_u64(&optional, OPTIONAL_STACK_COMMIT),
+        };
 
         // A 32-bit PE offset and 16-bit optional size and section count all
         // fit in these file coordinates. Read only the table itself.
@@ -430,19 +453,22 @@ impl ParsedPe {
             return Err(PeError::InvalidEntryPoint.into());
         }
 
-        Ok(ParsedPe {
-            machine,
-            number_of_sections,
-            time_date_stamp,
-            characteristics: coff_characteristics,
-            image_base,
-            section_alignment,
-            file_alignment,
-            size_of_image,
-            size_of_headers,
-            entry_point_rva,
-            sections,
-        })
+        Ok((
+            ParsedPe {
+                machine,
+                number_of_sections,
+                time_date_stamp,
+                characteristics: coff_characteristics,
+                image_base,
+                section_alignment,
+                file_alignment,
+                size_of_image,
+                size_of_headers,
+                entry_point_rva,
+                sections,
+            },
+            stack_sizes,
+        ))
     }
 
     /// Whether the COFF characteristics mark this image as a DLL.

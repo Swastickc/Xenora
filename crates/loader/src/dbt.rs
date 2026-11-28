@@ -225,6 +225,10 @@ pub struct DbtEngine {
     block_cache: HashMap<u64, CachedBlock>,
     limited_block_cache: HashMap<(u64, usize), CachedBlock>,
     assembler: Arm64Assembler,
+    /// Scratch for fault-patch positions while a block is emitted. Its length
+    /// is always zero between translations; keeping only the capacity avoids
+    /// one vector allocation per cold block.
+    fault_guard_scratch: Vec<usize>,
     /// Decoded instructions that emitted helper calls point into.
     decoded_blocks: Vec<Box<[Insn]>>,
     links: LinkArena,
@@ -251,6 +255,7 @@ impl DbtEngine {
             block_cache: HashMap::new(),
             limited_block_cache: HashMap::new(),
             assembler: Arm64Assembler::new(),
+            fault_guard_scratch: Vec::new(),
             decoded_blocks: Vec::new(),
             links: LinkArena::default(),
             epoch: RETIRED_EPOCH,
@@ -654,8 +659,9 @@ impl DbtEngine {
 
         let mut emitter = Emitter {
             asm,
-            fault_guards: Vec::new(),
+            fault_guards: std::mem::take(&mut self.fault_guard_scratch),
         };
+        debug_assert!(emitter.fault_guards.is_empty());
         for (index, insn) in insns.iter().enumerate() {
             let flags = flags_live_after(&insns, index);
             if is_native(insn) {
@@ -665,6 +671,7 @@ impl DbtEngine {
             }
         }
         let Emitter { asm, fault_guards } = emitter;
+        let mut fault_guards = fault_guards;
 
         if !insns.last().is_some_and(|insn| insn.op.is_terminator()) {
             // End of basic block quota, update RIP.
@@ -692,9 +699,14 @@ impl DbtEngine {
         // Epilogue: faulting paths jump here with X0 already set to the number
         // of instructions that completed before the fault.
         let epilogue = asm.current_offset();
-        for index in fault_guards {
+        // A translatable x86 instruction has at most one memory operand, and
+        // its read-modify-write forms can therefore emit at most two guards.
+        debug_assert!(fault_guards.len() <= MAX_BLOCK_INSTRUCTIONS * 2);
+        for &index in &fault_guards {
             asm.patch_b(index, epilogue as i32 - index as i32);
         }
+        fault_guards.clear();
+        self.fault_guard_scratch = fault_guards;
         asm.ldr_uoff_64(X19, SP, 16);
         asm.ldr_uoff_64(X20, SP, 24);
         asm.ldr_uoff_64(X21, SP, 32);
@@ -2193,6 +2205,23 @@ mod tests {
         assert_eq!(engine.metrics.blocks_compiled, 1);
         assert_eq!(engine.metrics.cache_hits, 1);
         assert_eq!(engine.metrics.blocks_invalidated, 0);
+    }
+
+    #[test]
+    fn fault_guard_scratch_capacity_is_reused_without_stale_positions() {
+        // mov eax, [rip + 0]; hlt. The memory access emits a fault guard.
+        let code = [0x8B, 0x05, 0, 0, 0, 0, 0xF4];
+        let (mut engine, memory) = writable_fixture(&code);
+        assert_eq!(engine.fault_guard_scratch.len(), 0);
+        let first = engine.compile_block(ENTRY, &memory, 16).unwrap();
+        let capacity = engine.fault_guard_scratch.capacity();
+        assert!(capacity > 0);
+        assert_eq!(engine.fault_guard_scratch.len(), 0);
+
+        let second = engine.compile_block(ENTRY, &memory, 16).unwrap();
+        assert_eq!(engine.fault_guard_scratch.capacity(), capacity);
+        assert_eq!(engine.fault_guard_scratch.len(), 0);
+        assert_eq!(first.start, second.start);
     }
 
     #[test]

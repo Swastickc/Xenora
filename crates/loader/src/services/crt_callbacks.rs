@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! CRT services that call guest functions: sorting, searching and the
-//! initializer tables run during C and C++ static initialization.
+//! CRT services that can call guest functions during sorting, searching,
+//! initialization, cleanup and invalid-parameter handling.
 //!
 //! Each service is a callback task. The comparator or initializer runs as
 //! ordinary translated guest code, and the service continues when it returns.
@@ -23,8 +23,7 @@ const SORT_BUDGET: u64 = 1_048_576;
 /// Largest initializer table, in entries.
 const MAX_INITIALIZERS: u64 = 65_536;
 
-/// An invalid argument would reach the CRT invalid-parameter handler, which
-/// the runtime does not model.
+/// These callers do not dispatch the invalid-parameter handler implicitly.
 fn unsupported<T>() -> Result<T, ExitReason> {
     Err(ExitReason::IllegalInstruction(0xFE))
 }
@@ -479,6 +478,60 @@ impl CallbackTask for Exit {
     }
 }
 
+struct InvalidParameter {
+    state: Arc<ServicesState>,
+    noreturn: bool,
+}
+
+impl InvalidParameter {
+    fn terminate(state: &ServicesState) -> ExitReason {
+        // Model the documented termination fallback without running Watson.
+        const STATUS_INVALID_CRUNTIME_PARAMETER: u32 = 0xC000_0417;
+        ExitReason::ProcessExit(state.exit_process(STATUS_INVALID_CRUNTIME_PARAMETER))
+    }
+}
+
+impl CallbackTask for InvalidParameter {
+    fn resume(&mut self, _: u64, _: u64, _: &mut GuestMemory) -> Result<CallbackStep, ExitReason> {
+        if self.noreturn {
+            return Err(Self::terminate(&self.state));
+        }
+        Ok(CallbackStep::Return(0))
+    }
+}
+
+fn register_invalid_parameter(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
+    for (symbol, noreturn) in [
+        ("_invalid_parameter_noinfo", false),
+        ("_invalid_parameter_noinfo_noreturn", true),
+    ] {
+        let state = Arc::clone(state);
+        registry.register_callback_task(
+            UCRT,
+            symbol,
+            ServiceStatus::Partial,
+            move |_, _, memory, scratch| {
+                let entry = state.crt_startup().invalid_parameter_handler();
+                if entry == 0 {
+                    return Err(InvalidParameter::terminate(&state));
+                }
+                // The scratch area starts at callback RSP + 40, the Win64
+                // stack slot for the fifth argument (reserved).
+                memory.write_u64(scratch, 0).map_err(fault)?;
+                Ok(CallbackStart::Call {
+                    task: Box::new(InvalidParameter {
+                        state: Arc::clone(&state),
+                        noreturn,
+                    }),
+                    entry,
+                    args: [0; 4],
+                })
+            },
+        );
+        registry.alias(CRT_RUNTIME_API, UCRT, symbol);
+    }
+}
+
 fn register_exit_tables(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     registry.register(UCRT, "_initialize_onexit_table", |args, _, mem| {
         let table = args.rcx;
@@ -612,6 +665,7 @@ fn register_exit_tables(registry: &mut ImportRegistry, state: &Arc<ServicesState
 
 pub(super) fn register(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
     register_exit_tables(registry, state);
+    register_invalid_parameter(registry, state);
     registry.register_callback_task(UCRT, "qsort", ServiceStatus::Partial, |args, _, mem, _| {
         let compare = Comparator {
             entry: args.r9,

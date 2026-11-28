@@ -2051,6 +2051,51 @@ fn register_adapters(registry: &mut ImportRegistry, state: &Arc<ServicesState>) 
             },
         );
     }
+
+    // WSAStringToAddress parses strict dotted-decimal IPv4 plus an optional
+    // decimal port. Conversion does not imply that the machine can route to
+    // the parsed address.
+    for (symbol, unicode) in [
+        ("WSAStringToAddressA", false),
+        ("WSAStringToAddressW", true),
+    ] {
+        let strtoaddr = Arc::clone(state);
+        registry.register_with_status(
+            MODULE,
+            symbol,
+            ServiceStatus::Partial,
+            move |args, cpu, memory| {
+                let result = (|| {
+                    if args.rdx as i32 != 2 || args.r8 != 0 {
+                        return Err(WSAEINVAL);
+                    }
+                    let length = args.get(4, memory).map_err(|_| WSAEFAULT)?;
+                    if args.r9 == 0 || length == 0 {
+                        return Err(WSAEFAULT);
+                    }
+                    memory.check_write(length, 4).map_err(|_| WSAEFAULT)?;
+                    let capacity = memory.read_u32(length).map_err(|_| WSAEFAULT)? as i32;
+                    if capacity < 16 {
+                        memory.write_u32(length, 16).map_err(|_| WSAEFAULT)?;
+                        return Err(WSAEFAULT);
+                    }
+                    memory.check_write(args.r9, 16).map_err(|_| WSAEFAULT)?;
+                    let text = read_socket_text(memory, args.rcx, unicode)?;
+                    let (ip, port) = parse_ipv4_port(&text).ok_or(WSAEINVAL)?;
+                    let mut address = [0; 16];
+                    address[..2].copy_from_slice(&2_u16.to_le_bytes());
+                    address[2..4].copy_from_slice(&port.to_be_bytes());
+                    address[4..8].copy_from_slice(&ip);
+                    memory
+                        .write_bytes(args.r9, &address)
+                        .map_err(|_| WSAEFAULT)?;
+                    memory.write_u32(length, 16).map_err(|_| WSAEFAULT)?;
+                    Ok(0)
+                })();
+                socket_result(&strtoaddr, cpu.gs_base, result)
+            },
+        );
+    }
 }
 
 fn read_socket_cstr(memory: &GuestMemory, address: u64) -> Result<String, u32> {
@@ -2063,6 +2108,56 @@ fn read_socket_cstr(memory: &GuestMemory, address: u64) -> Result<String, u32> {
         bytes.push(byte);
     }
     String::from_utf8(bytes).map_err(|_| WSAEINVAL)
+}
+
+fn read_socket_text(memory: &GuestMemory, address: u64, unicode: bool) -> Result<String, u32> {
+    if address == 0 {
+        return Err(WSAEFAULT);
+    }
+    if !unicode {
+        return read_socket_cstr(memory, address);
+    }
+    let mut text = String::new();
+    for index in 0..64u64 {
+        let unit = memory
+            .read_u16(address + index * 2)
+            .map_err(|_| WSAEFAULT)?;
+        if unit == 0 {
+            return Ok(text);
+        }
+        if unit > 0x7f {
+            return Err(WSAEINVAL);
+        }
+        text.push(char::from(unit as u8));
+    }
+    Err(WSAEFAULT)
+}
+
+fn parse_ipv4_port(text: &str) -> Option<([u8; 4], u16)> {
+    let (ip_text, port) = match text.split_once(':') {
+        Some((ip, port)) => {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            (ip, port.parse::<u16>().ok()?)
+        }
+        None => (text, 0),
+    };
+    if ip_text.contains(':') {
+        return None;
+    }
+    let parts: Vec<_> = ip_text.split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let mut ip = [0; 4];
+    for (output, part) in ip.iter_mut().zip(parts) {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *output = part.parse::<u8>().ok()?;
+    }
+    Some((ip, port))
 }
 
 fn register_resolution(registry: &mut ImportRegistry, state: &Arc<ServicesState>) {
@@ -3014,6 +3109,78 @@ fn wsasocket_adapter_fdisset_and_address_formatting() {
         memory.write_u32(0x1a00, 15).unwrap();
         assert_eq!(
             call(&mut memory, "WSAAddressToStringW", &args),
+            SOCKET_ERROR
+        );
+        assert_eq!(
+            call(&mut memory, "WSAGetLastError", &[]),
+            u64::from(WSAEINVAL)
+        );
+    }
+
+    // String-to-address round trips use strict dotted decimal plus optional
+    // decimal port in both widths.
+    memory.write_bytes(0x1d00, b"127.0.0.1:5000\0").unwrap();
+    memory.write_u32(0x1a00, 16).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSAStringToAddressA",
+            &[0x1d00, 2, 0, 0x1e00, 0x1a00]
+        ),
+        0
+    );
+    let mut parsed = [0; 8];
+    memory.read_bytes(0x1e00, &mut parsed).unwrap();
+    assert_eq!(&parsed[..2], &2_u16.to_le_bytes());
+    assert_eq!(&parsed[2..4], &[0x13, 0x88]);
+    assert_eq!(&parsed[4..8], &[127, 0, 0, 1]);
+    assert_eq!(memory.read_u32(0x1a00).unwrap(), 16);
+
+    for (index, unit) in "127.0.0.1".encode_utf16().chain([0]).enumerate() {
+        memory.write_u16(0x1d40 + index as u64 * 2, unit).unwrap();
+    }
+    memory.write_u32(0x1a00, 16).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSAStringToAddressW",
+            &[0x1d40, 2, 0, 0x1e00, 0x1a00]
+        ),
+        0
+    );
+    memory.read_bytes(0x1e00, &mut parsed).unwrap();
+    assert_eq!(&parsed[2..4], &[0, 0], "missing port defaults to zero");
+    assert_eq!(&parsed[4..8], &[127, 0, 0, 1]);
+
+    // Byte capacity is enforced before writing and the required size is 16.
+    memory.write_u32(0x1a00, 8).unwrap();
+    assert_eq!(
+        call(
+            &mut memory,
+            "WSAStringToAddressW",
+            &[0x1d40, 2, 0, 0x1e00, 0x1a00]
+        ),
+        SOCKET_ERROR
+    );
+    assert_eq!(
+        call(&mut memory, "WSAGetLastError", &[]),
+        u64::from(WSAEFAULT)
+    );
+    assert_eq!(memory.read_u32(0x1a00).unwrap(), 16);
+
+    for text in [
+        b"127.0.0.1:65536\0".as_slice(),
+        b"127.0.0.1 junk\0".as_slice(),
+        b"127.0.0.1:5000:1\0".as_slice(),
+    ] {
+        memory.write_bytes(0x1d00, text).unwrap();
+        memory.write_u32(0x1a00, 16).unwrap();
+        assert_eq!(
+            call(
+                &mut memory,
+                "WSAStringToAddressA",
+                &[0x1d00, 2, 0, 0x1e00, 0x1a00]
+            ),
             SOCKET_ERROR
         );
         assert_eq!(

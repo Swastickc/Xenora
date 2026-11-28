@@ -12,33 +12,17 @@ independent acceptance or compatibility claims.
 
 | Measure | Count |
 | --- | --- |
-| Canonical services | 871 |
-| Typed registry services | 296 |
-| Manual code registrations | 575 |
-| Canonical libraries | 21 |
-| Implemented | 239 |
-| Partial | 632 |
-| Stub | 0 |
-| Data-import services | 7 |
-| Aliases of every kind | 941 |
-| API-set aliases | 740 |
-| Ordinal aliases | 31 |
-| Canonical services | 877 |
+| Canonical services | 916 |
 | Typed registry services | 300 |
-| Manual code registrations | 577 |
-| Canonical libraries | 22 |
-| Implemented | 238 |
-| Partial | 639 |
-| Typed registry services | 296 |
-| Manual code registrations | 581 |
-| Canonical libraries | 22 |
-| Implemented | 241 |
-| Partial | 636 |
+| Manual code registrations | 616 |
+| Canonical libraries | 23 |
+| Implemented | 246 |
+| Partial | 670 |
 | Stub | 0 |
 | Data-import services | 7 |
-| Aliases of every kind | 910 |
+| Aliases of every kind | 945 |
 | API-set aliases | 744 |
-| Ordinal aliases | 0 |
+| Ordinal aliases | 35 |
 | Statuses never explicitly set | 78 |
 | Duplicate canonical registrations | 0 |
 | Structural consistency findings | 0 |
@@ -48,7 +32,9 @@ independent acceptance or compatibility claims.
 | Library | Family | Total | Typed | Manual | Data | Implemented | Partial | Stub | Implicit status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | <code>advapi32.dll</code> | <code>windows-system</code> | 21 | 0 | 21 | 0 | 1 | 20 | 0 | 0 |
+| <code>api-ms-win-core-synch-l1-2-0.dll</code> | <code>windows-system</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>api-ms-win-crt-process-l1-1-0.dll</code> | <code>c-runtime</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
+| <code>bcrypt.dll</code> | <code>other</code> | 3 | 0 | 3 | 0 | 0 | 3 | 0 | 0 |
 | <code>combase.dll</code> | <code>other</code> | 14 | 14 | 0 | 0 | 0 | 14 | 0 | 0 |
 | <code>kernel32.dll</code> | <code>windows-system</code> | 318 | 59 | 259 | 0 | 42 | 276 | 0 | 28 |
 | <code>libgcc_s_seh-1.dll</code> | <code>c++-support</code> | 1 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
@@ -56,10 +42,10 @@ independent acceptance or compatibility claims.
 | <code>libwinpthread-1.dll</code> | <code>c++-support</code> | 8 | 0 | 8 | 0 | 4 | 4 | 0 | 0 |
 | <code>msvcrt.dll</code> | <code>c-runtime</code> | 41 | 13 | 28 | 7 | 14 | 27 | 0 | 14 |
 | <code>psapi.dll</code> | <code>windows-system</code> | 1 | 0 | 1 | 0 | 0 | 1 | 0 | 0 |
-| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 298 | 207 | 91 | 0 | 103 | 195 | 0 | 10 |
+| <code>ucrtbase.dll</code> | <code>c-runtime</code> | 302 | 211 | 91 | 0 | 104 | 198 | 0 | 10 |
 | <code>user32.dll</code> | <code>other</code> | 7 | 0 | 7 | 0 | 0 | 7 | 0 | 0 |
-| <code>winhttp.dll</code> | <code>other</code> | 13 | 0 | 13 | 0 | 0 | 13 | 0 | 0 |
-| <code>ws2_32.dll</code> | <code>windows-networking</code> | 41 | 0 | 41 | 0 | 6 | 35 | 0 | 6 |
+| <code>winhttp.dll</code> | <code>other</code> | 14 | 0 | 14 | 0 | 0 | 14 | 0 | 0 |
+| <code>ws2_32.dll</code> | <code>windows-networking</code> | 65 | 0 | 65 | 0 | 6 | 59 | 0 | 6 |
 | <code>xenora_fixture.dll</code> | <code>xenora-fixture</code> | 22 | 0 | 22 | 0 | 22 | 0 | 0 | 20 |
 | <code>xenora_graphics.dll</code> | <code>xenora-fixture</code> | 34 | 0 | 34 | 0 | 34 | 0 | 0 | 0 |
 | <code>xgameruntime.dll</code> | <code>xbox-gaming</code> | 12 | 0 | 12 | 0 | 3 | 9 | 0 | 0 |
@@ -76,10 +62,8 @@ metadata, are in `inventory.json`.
 
 | Alias kind | Count |
 | --- | --- |
-| API-set | 740 |
-| Ordinal | 31 |
 | API-set | 744 |
-| Ordinal | 0 |
+| Ordinal | 35 |
 | Other module | 166 |
 
 Every API-set, module and ordinal alias is listed in `inventory.json`.

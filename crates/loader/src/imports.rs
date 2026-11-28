@@ -199,6 +199,9 @@ pub struct ServiceDescriptor {
     /// Whether binding writes the address of a data cell rather than a dispatch
     /// trampoline. This metadata does not change how a function is dispatched.
     pub data_import: bool,
+    /// Whether dispatch hands control flow to the service instead of returning
+    /// through the ordinary Win64 nonvolatile-register contract.
+    pub context_service: bool,
 }
 
 impl ServiceDescriptor {
@@ -503,6 +506,7 @@ impl ImportRegistry {
             status,
             status_explicit,
             data_import: false,
+            context_service: false,
         });
         self.services.insert(key, index);
         Ok(())
@@ -853,6 +857,7 @@ impl ImportRegistry {
             .service_index(module, symbol)
             .expect("registered context service");
         self.context_services.insert(index);
+        self.handlers[index].context_service = true;
     }
 
     /// Enter a guest callback from the task frame whose return slot is `slot`.

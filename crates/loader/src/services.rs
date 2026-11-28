@@ -221,6 +221,11 @@ struct ObjectState {
     last_handle: u64,
     handles: BTreeMap<u64, GuestObject>,
     files: BTreeMap<String, Vec<u8>>,
+    /// Per-file times as Windows FILETIMEs: creation, access, write. An
+    /// entry appears when the file does and moves with it; a file without
+    /// one reports the fixed Unix epoch, the answer of a drive that does
+    /// not know.
+    file_times: BTreeMap<String, [u64; 3]>,
     directories: BTreeSet<String>,
     /// Locked byte ranges per file path, as (owning handle, offset, length, exclusive).
     locks: BTreeMap<String, Vec<(u64, u64, u64, bool)>>,
@@ -4055,7 +4060,8 @@ pub(crate) mod handlers {
     pub use super::crt_math::{
         acos, asin, atan, atan2, atan2f, cbrt, ceil, ceilf, copysign, cos, cosf, cosh, erf, exp,
         exp2, expf, expm1, fdim, floor, floorf, fmax, fmin, fmod, fmodf, frexp, hypot, ldexp,
-        llround, log, log1p, log2, log10, logf, lround, modf, nearbyint, pow, powf, remainder,
-        rint, round, roundf, sin, sinf, sinh, tan, tanf, tanh, tgamma, trunc,
+        llround, log, log1p, log2, log10, logf, lround, lroundf, modf, modff, nearbyint,
+        nextafterf, pow, powf, remainder, remainderf, rint, round, roundf, sin, sinf, sinh, tan,
+        tanf, tanh, tgamma, trunc,
     };
 }

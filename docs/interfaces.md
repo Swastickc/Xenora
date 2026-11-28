@@ -611,6 +611,12 @@ together, so both names resolve in each.
 `crates/loader/tests/startup_info.rs` runs original C and C++ programs through
 them. Nothing was compared with Windows.
 
+The UCRT and `api-ms-win-crt-runtime-l1-1-0.dll` provide
+`_get_narrow_winmain_command_line`. It returns a pointer into the same
+allocation as `GetCommandLineA`, beginning after the executable name and
+its separator. The tail preserves the serialized quoting and UTF-8 bytes.
+It points at the terminating NUL when there are no arguments.
+
 ### XInput controller state
 
 `XInputGetState` resolves through the legacy DirectX redistributable
